@@ -1,0 +1,48 @@
+{
+  "schema_version": 1,
+  "session_id": "2026-05-27T12-55-40Z_outer_wilds_c_e7c7aa4d6e4b6618",
+  "player": {
+    "contributor_id": "c_e7c7aa4d6e4b6618",
+    "skill_level": "novice"
+  },
+  "game": {
+    "name": "Outer Wilds",
+    "exe_name": "OuterWilds.exe",
+    "pid_at_capture": 4200
+  },
+  "session": {
+    "role": "Astronaut",
+    "objective_task": "New Expedition"
+  },
+  "recording": {
+    "started_at_utc": "2026-05-27T12:55:49.640128Z",
+    "ended_at_utc": "2026-05-27T13:07:58.417829Z",
+    "duration_seconds": 728.778,
+    "anchor_monotonic_us": 1198328829267
+  },
+  "video": {
+    "filename": "video.mp4",
+    "codec": "h264",
+    "width": 1920,
+    "height": 1080,
+    "fps": 30.0,
+    "size_bytes": 256517771
+  },
+  "input_capture": {
+    "filename": "inputs.jsonl",
+    "events_total": 12311,
+    "events_by_type": {
+      "mouse_raw": 10875,
+      "mouse_button": 60,
+      "key": 1375,
+      "focus": 1
+    }
+  },
+  "system": {
+    "os": "Windows 11",
+    "humyncapture_version": "0.1.0",
+    "screen_width": 1920,
+    "screen_height": 1080,
+    "screen_refresh_hz": 170
+  }
+}
