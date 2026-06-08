@@ -3,3 +3,12 @@ game-data/
 *.mp4
 *.zip
 *.rrd
+
+# Build artifacts
+__pycache__/
+*.pyc
+
+# Sample bundles and generated delivery outputs (kept untracked)
+samples/
+Game Samples/
+out/
