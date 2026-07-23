@@ -1,0 +1,96 @@
+{
+  "canonical": {
+    "spec_version": "v1",
+    "vendor": "humynlabs",
+    "game": "Kamla",
+    "session_id": "2026-06-06T13-59-38Z_kamla_c_82f637f618cc1ec0",
+    "video_fps": 26.207051627990648,
+    "video_resolution": [
+      1920,
+      1080
+    ],
+    "video_duration_s": 1111.8,
+    "frame_count": 29137,
+    "created_at_utc": "2026-06-06T13:59:41.965551Z",
+    "has_audio": false,
+    "trim": {
+      "head_cut_s": 6.333333,
+      "end_cut_s": 1139.866667,
+      "new_duration_s": 1133.666667
+    },
+    "data_quality": {
+      "keyboard_capture": "ok",
+      "mouse_capture": "ok",
+      "mouse_buttons": "ok",
+      "input_bleed_frames": 0,
+      "distinct_actions": [
+        "interact",
+        "look",
+        "move_down",
+        "move_left",
+        "move_right",
+        "move_up",
+        "pause_menu"
+      ],
+      "frames_dropped_beyond_video": 0,
+      "frame_timing": "real_pts"
+    },
+    "post_trim": {
+      "applied_to": "delivered clip (already 5s head/tail trimmed; see canonical.trim)",
+      "requested_head_s": 20.0,
+      "head_cut_s": 21.933333,
+      "head_frames_removed": 625,
+      "method": "lossless stream-copy, snapped to first keyframe >= 20s; timestamps restart at 0",
+      "new_duration_s": 1111.8,
+      "new_frame_count": 29137
+    }
+  },
+  "humyncapture_metadata": {
+    "schema_version": 1,
+    "session_id": "2026-06-06T13-59-38Z_kamla_c_82f637f618cc1ec0",
+    "player": {
+      "contributor_id": "c_82f637f618cc1ec0",
+      "skill_level": "novice"
+    },
+    "game": {
+      "name": "Kamla",
+      "exe_name": "Kamla.exe",
+      "pid_at_capture": 13040
+    },
+    "session": {
+      "role": "Explorer",
+      "objective_task": "chapter 1"
+    },
+    "recording": {
+      "started_at_utc": "2026-06-06T13:59:41.965551Z",
+      "ended_at_utc": "2026-06-06T14:18:44.754886Z",
+      "duration_seconds": 1142.789,
+      "anchor_monotonic_us": 2900809005
+    },
+    "video": {
+      "filename": "video.mp4",
+      "codec": "h264",
+      "width": 1920,
+      "height": 1080,
+      "fps": 30.0,
+      "size_bytes": 695184003
+    },
+    "input_capture": {
+      "filename": "inputs.jsonl",
+      "events_total": 34839,
+      "events_by_type": {
+        "mouse_raw": 32965,
+        "mouse_button": 205,
+        "key": 1666,
+        "focus": 3
+      }
+    },
+    "system": {
+      "os": "Windows 10",
+      "humyncapture_version": "0.1.0",
+      "screen_width": 1920,
+      "screen_height": 1080,
+      "screen_refresh_hz": 144
+    }
+  }
+}

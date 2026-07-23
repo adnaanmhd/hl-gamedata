@@ -1,0 +1,97 @@
+{
+  "canonical": {
+    "spec_version": "v1",
+    "vendor": "humynlabs",
+    "game": "Outer wild",
+    "session_id": "2026-06-06T18-50-54Z_outer_wild_c_82f637f618cc1ec0",
+    "video_fps": 24.068265682656826,
+    "video_resolution": [
+      1920,
+      1080
+    ],
+    "video_duration_s": 433.6,
+    "frame_count": 10436,
+    "created_at_utc": "2026-06-06T18:50:59.303767Z",
+    "has_audio": false,
+    "trim": {
+      "head_cut_s": 5.733333,
+      "end_cut_s": 439.233333,
+      "new_duration_s": 433.6
+    },
+    "data_quality": {
+      "keyboard_capture": "ok",
+      "mouse_capture": "ok",
+      "mouse_buttons": "ok",
+      "input_bleed_frames": 0,
+      "distinct_actions": [
+        "equipment_primary_tool_action",
+        "equipment_retrieve_scout",
+        "equipment_tool_x_axis",
+        "flight_down_thrust",
+        "flight_match_velocity",
+        "flight_up_thrust",
+        "general_cancel",
+        "general_confirm",
+        "general_flashlight",
+        "general_pause",
+        "general_primary_interact",
+        "movement_jetpack_boost",
+        "movement_jump",
+        "movement_look_x_axis",
+        "movement_look_y_axis",
+        "movement_move_x_axis",
+        "movement_move_y_axis"
+      ],
+      "frames_dropped_beyond_video": 0,
+      "frame_timing": "real_pts"
+    }
+  },
+  "humyncapture_metadata": {
+    "schema_version": 1,
+    "session_id": "2026-06-06T18-50-54Z_outer_wild_c_82f637f618cc1ec0",
+    "player": {
+      "contributor_id": "c_82f637f618cc1ec0",
+      "skill_level": "novice"
+    },
+    "game": {
+      "name": "Outer wild",
+      "exe_name": "OuterWilds.exe",
+      "pid_at_capture": 4432
+    },
+    "session": {
+      "role": "Explorer",
+      "objective_task": "Launch code"
+    },
+    "recording": {
+      "started_at_utc": "2026-06-06T18:50:59.303767Z",
+      "ended_at_utc": "2026-06-06T18:58:21.067686Z",
+      "duration_seconds": 441.764,
+      "anchor_monotonic_us": 3097105210
+    },
+    "video": {
+      "filename": "video.mp4",
+      "codec": "h264",
+      "width": 1920,
+      "height": 1080,
+      "fps": 30.0,
+      "size_bytes": 376571815
+    },
+    "input_capture": {
+      "filename": "inputs.jsonl",
+      "events_total": 8071,
+      "events_by_type": {
+        "mouse_raw": 7424,
+        "key": 582,
+        "mouse_button": 64,
+        "focus": 1
+      }
+    },
+    "system": {
+      "os": "Windows 10",
+      "humyncapture_version": "0.1.0",
+      "screen_width": 1920,
+      "screen_height": 1080,
+      "screen_refresh_hz": 144
+    }
+  }
+}

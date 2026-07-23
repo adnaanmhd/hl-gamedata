@@ -1,0 +1,86 @@
+{
+  "1": [
+    "equipment_tool_x_axis"
+  ],
+  "2": [
+    "equipment_tool_y_axis"
+  ],
+  "3": [
+    "equipment_tool_y_axis"
+  ],
+  "4": [
+    "equipment_tool_x_axis"
+  ],
+  "a": [
+    "movement_move_x_axis"
+  ],
+  "alt_l": [
+    "flight_cockpit_free_look"
+  ],
+  "c": [
+    "general_secondary_interact",
+    "flight_landing_camera"
+  ],
+  "ctrl_l": [
+    "flight_down_thrust"
+  ],
+  "d": [
+    "movement_move_x_axis"
+  ],
+  "e": [
+    "general_confirm",
+    "general_primary_interact"
+  ],
+  "esc": [
+    "general_pause"
+  ],
+  "f": [
+    "general_flashlight"
+  ],
+  "mouse_left": [
+    "equipment_primary_tool_action"
+  ],
+  "mouse_middle": [
+    "flight_lock_on"
+  ],
+  "mouse_right": [
+    "equipment_retrieve_scout"
+  ],
+  "mouse_x": [
+    "movement_look_x_axis"
+  ],
+  "mouse_y": [
+    "movement_look_y_axis"
+  ],
+  "q": [
+    "general_cancel"
+  ],
+  "r": [
+    "equipment_secondary_tool_action",
+    "flight_roll_mode"
+  ],
+  "s": [
+    "movement_move_y_axis"
+  ],
+  "shift": [],
+  "shift_l": [
+    "flight_up_thrust"
+  ],
+  "space": [
+    "movement_jump",
+    "movement_jetpack_boost",
+    "flight_match_velocity"
+  ],
+  "tab": [
+    "general_view_map"
+  ],
+  "w": [
+    "movement_move_y_axis"
+  ],
+  "x": [
+    "flight_autopilot"
+  ],
+  "y": [
+    "equipment_signalscope"
+  ]
+}

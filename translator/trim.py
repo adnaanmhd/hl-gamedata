@@ -51,11 +51,12 @@ def plan_cuts(keyframes: list[float], duration: float,
     return head_cut, target_end
 
 
-def trim(src: Path, out_path: Path, *, info: V.VideoInfo | None = None) -> TrimResult:
-    """Stream-copy `src` minus ~5 s head/tail into `out_path`."""
+def trim(src: Path, out_path: Path, *, info: V.VideoInfo | None = None,
+         head_s: float = HEAD_S, tail_s: float = TAIL_S) -> TrimResult:
+    """Stream-copy `src` minus a head/tail (default ~5 s each) into `out_path`."""
     info = info or V.probe(src)
     kf = V.keyframe_times(src)
-    head_cut, end_cut = plan_cuts(kf, info.duration_s)
+    head_cut, end_cut = plan_cuts(kf, info.duration_s, head_s=head_s, tail_s=tail_s)
     warnings: list[str] = []
     new_dur = end_cut - head_cut
     if new_dur < MIN_CLIP_S:

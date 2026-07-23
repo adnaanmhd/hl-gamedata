@@ -1,0 +1,36 @@
+{
+  "3": [],
+  "a": [
+    "move_left"
+  ],
+  "ctrl_l": [],
+  "d": [
+    "move_right"
+  ],
+  "delete": [],
+  "e": [
+    "interact"
+  ],
+  "end": [],
+  "enter": [],
+  "esc": [
+    "pause_menu"
+  ],
+  "f": [],
+  "home": [],
+  "left": [],
+  "mouse": [
+    "look"
+  ],
+  "page_down": [],
+  "page_up": [],
+  "s": [
+    "move_down"
+  ],
+  "shift": [],
+  "space": [],
+  "v": [],
+  "w": [
+    "move_up"
+  ]
+}

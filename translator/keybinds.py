@@ -23,7 +23,9 @@ KEYBINDS: dict[str, dict] = {
         # General
         "general_pause": "esc",
         "general_cancel": "q",
-        "general_confirm": "e",
+        # Enter is the documented keyboard Confirm key (menu/dialogue advance);
+        # contributors' keybind.json files list only "e".
+        "general_confirm": ["e", "enter"],
         "general_primary_interact": "e",
         "general_secondary_interact": "c",
         "general_view_map": "tab",
