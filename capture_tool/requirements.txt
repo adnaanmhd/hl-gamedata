@@ -1,0 +1,12 @@
+PySide6>=6.5
+pynput>=1.7
+psutil>=5.9
+# Optional but strongly recommended — used by the in-tool sync self-test
+# (app/core/finalize/pipeline.py -> translator.sync) and by check_session_v2's
+# QA gate. Without them, sync verification is skipped with a warning.
+numpy
+opencv-python-headless
+# NOTE: the `translator` package (repo root's translator/) is a required
+# import (app.core.finalize.pipeline) but is not pip-installable — there's
+# no pyproject.toml/setup.py for it. It's resolved via PYTHONPATH at both
+# dev-run and PyInstaller-build time. See "Packaging" in README.md.
