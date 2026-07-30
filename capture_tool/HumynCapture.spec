@@ -17,10 +17,19 @@ from pathlib import Path
 
 block_cipher = None
 
-# repo root (one level up) must be on the path so `import translator` resolves
-# — the finalize pipeline (app/core/finalize/pipeline.py) imports it directly
+# repo root must be on the path so `import translator` resolves — the
+# finalize pipeline (app/core/finalize/pipeline.py) imports it directly
 # rather than vendoring a second copy. See README.md "Design deviations".
-REPO_ROOT = str(Path(SPECPATH).parent.parent)
+#
+# SPECPATH is ALREADY the directory containing this .spec file (PyInstaller
+# sets it that way, it is not the file's own path) — i.e. .../hl-gamedata/
+# capture_tool. One .parent gets the repo root (.../hl-gamedata, where
+# translator/ lives). Real bug found on Windows: this used to be
+# `.parent.parent`, going one directory too far up past the repo root, so
+# translator/ was never on PyInstaller's analysis path, was never bundled,
+# and the frozen exe raised `ImportError: no module named 'translator'` at
+# finalize time — every session failed at "Writing delivery files...".
+REPO_ROOT = str(Path(SPECPATH).parent)
 
 a = Analysis(
     ["app/main.py"],

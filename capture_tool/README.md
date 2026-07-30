@@ -39,6 +39,20 @@ straight to a release build without the acceptance protocol in handoff §7.
 
 ## Real-hardware findings (from actual Windows testing)
 
+- **Packaging: `HumynCapture.spec`'s `REPO_ROOT` was one directory too high.**
+  Every finalized session failed at "Writing delivery files..." with
+  `the sibling 'translator' package is not importable`. Root cause was in
+  the spec file, not the fixed source: `SPECPATH` is *already* the directory
+  containing the `.spec` file (`.../hl-gamedata/capture_tool`), not the
+  file's own path — the spec computed `REPO_ROOT = Path(SPECPATH).parent.
+  parent`, going one level past the actual repo root where `translator/`
+  lives, so it was silently never added to PyInstaller's analysis path,
+  never bundled, and `import translator` failed at runtime exactly as
+  `_load_translator()`'s error handling was designed to report. Fixed to a
+  single `.parent`. **This can't be caught by the pytest suite** (it's a
+  PyInstaller packaging concern, not application logic) — only a real build
+  + real session exercises it, which is exactly what caught it.
+
 - **A1, encoder-open vs. encoder-listed.** First real recording on a Windows
   box with an older NVIDIA driver failed the whole session: `h264_nvenc` was
   listed in `ffmpeg -encoders` (compiled in) but failed to *open*
