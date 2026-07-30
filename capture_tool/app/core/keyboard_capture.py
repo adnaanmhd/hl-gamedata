@@ -367,7 +367,16 @@ class InputCapture:
                 on_scroll=self._on_scroll,
             )
             self._mouse_listener.start()
-            if not self._kb_listener.wait(timeout=3) or not self._mouse_listener.wait(timeout=3):
+            # Both waits are blocking calls (pynput's Listener.wait isn't
+            # asyncio-aware) — run them off the event loop thread, and
+            # concurrently rather than sequentially, so a slow/stuck hook
+            # install doesn't stall the whole loop for up to 6s and delay
+            # every other subsystem's readiness signal from being delivered.
+            kb_ready, mouse_ready = await asyncio.gather(
+                asyncio.to_thread(self._kb_listener.wait, 3),
+                asyncio.to_thread(self._mouse_listener.wait, 3),
+            )
+            if not kb_ready or not mouse_ready:
                 self.last_error = "pynput listener failed to start within 3s"
         except Exception as e:
             log.exception("InputCapture.start failed")
