@@ -1,4 +1,9 @@
-from app.core.finalize.anchor import AnchorResult, ClockPairing, apply_correction
+from unittest.mock import MagicMock, patch
+
+from app.core.finalize.anchor import (
+    AnchorResult, ClockPairing, apply_correction, compute_anchor_correction,
+    first_frame_pts_wallclock_s,
+)
 
 
 def test_apply_correction_shifts_all_events():
@@ -36,3 +41,45 @@ def test_unavailable_anchor_has_zero_correction():
     result = AnchorResult(method="unavailable", correction_us=0, launch_pairing=None,
                            frame0_wallclock_s=None, frame0_monotonic_s=None)
     assert result.to_capture_health_dict()["launch_wallclock_s"] is None
+
+
+def test_first_frame_pts_parses_ffprobe_trailing_comma(tmp_path):
+    """Real bug found on Windows: ffprobe's `-of csv=p=0` output for a
+    single selected field still came back with a trailing comma
+    ("0.066667,"), which float() rejected outright — silently swallowed
+    before logging was added, so this failed on every real session without
+    any visible reason."""
+    fake_result = MagicMock(stdout="0.066667,\n", returncode=0)
+    with patch("app.core.finalize.anchor.subprocess.run", return_value=fake_result):
+        assert first_frame_pts_wallclock_s(tmp_path / "video.mp4") == 0.066667
+
+
+def test_compute_anchor_correction_rejects_implausible_result(tmp_path):
+    """Real bug: if the video's PTS doesn't survive as wallclock-scale time
+    after muxing (e.g. ffmpeg's avoid_negative_ts normalizes it back to ~0),
+    frame0_wall comes back tiny/relative instead of epoch-scale, and the
+    naive correction would be off by YEARS — silently corrupting every event
+    timestamp instead of failing loudly. Must fall back to "unavailable"."""
+    launch_pairing = ClockPairing(wallclock_s=1_785_000_000.0, monotonic_s=100.0)
+    with patch("app.core.finalize.anchor.first_frame_pts_wallclock_s",
+               return_value=0.066667):  # relative-scale, NOT epoch-scale
+        result = compute_anchor_correction(
+            launch_pairing=launch_pairing, old_anchor_monotonic_s=100.05,
+            video_path=tmp_path / "video.mp4")
+    assert result.method == "unavailable"
+    assert result.correction_us == 0
+
+
+def test_compute_anchor_correction_accepts_plausible_result(tmp_path):
+    """A genuinely small startup gap (sub-second, matching the handoff
+    doc's own evidence of a real correctly-anchored capture) must still be
+    applied — the safety net must not reject real, valid corrections."""
+    launch_pairing = ClockPairing(wallclock_s=1_785_000_000.0, monotonic_s=100.0)
+    # frame0 occurs 0.05s (wallclock) after launch -> a small, real gap.
+    with patch("app.core.finalize.anchor.first_frame_pts_wallclock_s",
+               return_value=1_785_000_000.05):
+        result = compute_anchor_correction(
+            launch_pairing=launch_pairing, old_anchor_monotonic_s=100.0,
+            video_path=tmp_path / "video.mp4")
+    assert result.method == "first_frame_pts_wallclock"
+    assert result.correction_us == 50_000

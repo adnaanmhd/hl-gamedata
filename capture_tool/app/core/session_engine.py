@@ -88,6 +88,16 @@ class SessionResult:
     qa_status: str
     self_check_failures: list[str] = field(default_factory=list)
     self_check_warnings: list[str] = field(default_factory=list)
+    # Real bug this fixes: qa_status ("PASS"/"WARN"/"FAIL") comes from
+    # translator.v2.check_session_v2 — a SEPARATE, independent check from
+    # self_check_failures/warnings above (which come from app.core.health's
+    # own gate). Without this field, a session could show "QA status: FAIL"
+    # with no FAIL line anywhere in the summary — self_check_failures would
+    # be empty while the real failure reason sat only in qa_issues, which
+    # was computed but never returned to the UI at all. Confirmed on a real
+    # delivery: the popup said "QA status: FAIL" followed only by an
+    # unrelated self-check WARN, with no indication of what actually failed.
+    qa_issues: list[str] = field(default_factory=list)
 
 
 def _slugify(text: str) -> str:
@@ -318,6 +328,7 @@ class SessionEngine:
             qa_status=finalize_result.qa_status,
             self_check_failures=finalize_result.self_check_failures,
             self_check_warnings=finalize_result.self_check_warnings,
+            qa_issues=finalize_result.qa_issues,
         )
 
     async def _poll_cancel(self) -> None:

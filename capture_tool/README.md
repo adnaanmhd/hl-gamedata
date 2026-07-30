@@ -37,6 +37,43 @@ straight to a release build without the acceptance protocol in handoff §7.
 | B6 | focus tracking (event-driven) | `focus_tracker.py` | `SetWinEventHook` usage **unverified** (Windows-only API) |
 | C3 | finalize timeout / fragmented mp4 | `ffmpeg_recorder.py` | Timeout-scaling logic **unit-testable in principle**, not covered by a test; remux-repair path **unverified** (needs a real truncated fragmented MP4) |
 
+## A2 anchor: ffprobe parsing bug, plus a guard against a deeper assumption
+
+Diagnosable directly from `humyncapture.log` once the earlier logging fix
+landed — exactly the payoff that fix was for:
+
+```
+first_frame_pts_wallclock_s failed: could not convert string to float: '0.066667,'
+```
+
+ffprobe actually succeeded; `-of csv=p=0` with a single selected field still
+emits a **trailing comma** on this ffprobe build (`"0.066667,"`, not
+`"0.066667"`), and `float()` rejected it outright. Fixed by taking the first
+comma-separated field instead of assuming the line is a bare number.
+
+That surfaced a second, deeper concern: `0.066667` is a *relative* number
+(~2 frames in at 30fps), not wallclock/epoch-scale (`time.time()` is
+~1.78 billion right now) — meaning the assumption this whole anchor strategy
+depends on (`-use_wallclock_as_timestamps 1` survives into the muxed file's
+PTS) may not hold once ffmpeg's output muxing normalizes timestamps to
+start near 0, which is default behavior for most containers
+(`avoid_negative_ts`). If that's what's happening, the naive correction
+would be off by **years**, silently corrupting every event timestamp instead
+of failing loudly. Added a sanity guard in `compute_anchor_correction`:
+corrections beyond a wide, generous margin (10s — the handoff doc's own
+evidence puts a real correctly-anchored gap at sub-second/a few frames) are
+rejected as `"unavailable"` rather than applied, with a warning logged
+explaining why. Covered by 4 new tests in `tests/test_anchor.py`.
+
+**Still open**: whether the underlying assumption is actually broken (in
+which case A2 needs a different strategy — e.g. parsing ffmpeg's own
+`-progress` stderr output for the real first-frame instant, the handoff
+doc's alternative option) can only be confirmed once the parsing fix lands
+and a real correction number comes back. If `humyncapture.log` still shows
+`time_anchor: "unavailable"` with a warning about an implausible
+correction after rebuilding, that confirms the deeper issue and the anchor
+strategy itself needs to change.
+
 ## session.rrd was never actually being generated
 
 Found by inspecting a real finalized delivery: `rrd_creation.py` was there,
@@ -267,7 +304,7 @@ self-check at all). Both are commented in `main_window.py` where they occur.
 
 ## Verified vs. unverified — what "verified" means here
 
-**60 pytest tests, all passing** (`capture_tool/tests/`), on macOS with
+**63 pytest tests, all passing** (`capture_tool/tests/`), on macOS with
 `pynput`/`PySide6`/`psutil`/`numpy`/`opencv-python-headless`/`rerun-sdk`
 installed:
 

@@ -384,6 +384,14 @@ class MainWindow(QMainWindow):
             # and any self-check failures are appended here — that gate is
             # the entire point of the E2 fix; see module docstring.
             qa_lines = [f"QA status: {result.qa_status}"]
+            # qa_issues is the actual reason behind qa_status (from
+            # translator.v2.check_session_v2 — a separate check from
+            # self_check_failures/warnings below). Real bug fixed here: this
+            # used to be omitted entirely, so "QA status: FAIL" could show
+            # with no FAIL line anywhere — the real failure sat in
+            # qa_issues, computed but never surfaced. Each entry is already
+            # prefixed "FAIL:"/"WARN:"/"OK:" by check_session_v2 itself.
+            qa_lines += result.qa_issues
             qa_lines += [f"FAIL: {f}" for f in result.self_check_failures]
             qa_lines += [f"WARN: {w}" for w in result.self_check_warnings]
             warnings_text = "\n\n" + "\n".join(qa_lines)

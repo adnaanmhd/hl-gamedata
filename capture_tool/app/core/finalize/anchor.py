@@ -87,7 +87,13 @@ def first_frame_pts_wallclock_s(video_path: Path) -> float | None:
         out = subprocess.run(cmd, capture_output=True, text=True, timeout=15,
                               creationflags=creationflags, check=True)
         first_line = out.stdout.strip().splitlines()[0]
-        return float(first_line)
+        # Real bug found on Windows: `-of csv=p=0` with a single selected
+        # field ("frame=pts_time") still emits a trailing comma on this
+        # ffprobe build ("0.066667,", not "0.066667") — float() choked on
+        # it outright, and the failure was being swallowed silently before
+        # the logging above was added. Take the first comma-separated field
+        # rather than assuming the line is a bare number.
+        return float(first_line.split(",")[0].strip())
     except (subprocess.SubprocessError, OSError, ValueError, IndexError) as e:
         # Real gap fixed here: this used to swallow the exact failure
         # reason silently, so every "time_anchor: unavailable" in a real
@@ -145,6 +151,32 @@ def compute_anchor_correction(
 
     frame0_monotonic = launch_pairing.monotonic_s + (frame0_wall - launch_pairing.wallclock_s)
     correction_us = round((frame0_monotonic - old_anchor_monotonic_s) * 1_000_000)
+
+    # Safety net for an assumption this whole approach depends on:
+    # -use_wallclock_as_timestamps should make the muxed file's frame PTS a
+    # real wallclock (epoch-scale) value, so frame0_wall - launch_pairing.
+    # wallclock_s is a SMALL number (the true startup gap). If ffmpeg's
+    # output muxing instead normalizes PTS to start near 0 (common default
+    # behavior — avoid_negative_ts), frame0_wall comes back tiny/relative
+    # instead of epoch-scale, and the subtraction above produces a
+    # correction of several YEARS, not milliseconds. Applying that would
+    # silently shift every event timestamp by that same absurd amount
+    # instead of failing loudly. The handoff doc's own evidence says the
+    # real startup gap is sub-second to a few frames at most (§3, "1-3
+    # frames" on correctly-anchored sessions) — anything beyond a few
+    # seconds is certainly this failure mode, not a real anchor correction.
+    MAX_PLAUSIBLE_CORRECTION_S = 10.0
+    if abs(correction_us) > MAX_PLAUSIBLE_CORRECTION_S * 1_000_000:
+        log.warning(
+            "first-frame PTS anchor implausible (correction=%.3fs, frame0_wall=%s, "
+            "launch_wallclock=%s) — the video's PTS likely does not survive as "
+            "wallclock time after muxing (e.g. avoid_negative_ts normalization); "
+            "treating as unavailable rather than applying a bogus correction",
+            correction_us / 1_000_000, frame0_wall, launch_pairing.wallclock_s)
+        return AnchorResult(
+            method="unavailable", correction_us=0, launch_pairing=launch_pairing,
+            frame0_wallclock_s=frame0_wall, frame0_monotonic_s=None)
+
     return AnchorResult(
         method="first_frame_pts_wallclock", correction_us=correction_us,
         launch_pairing=launch_pairing, frame0_wallclock_s=frame0_wall,
