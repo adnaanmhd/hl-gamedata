@@ -37,6 +37,24 @@ straight to a release build without the acceptance protocol in handoff §7.
 | B6 | focus tracking (event-driven) | `focus_tracker.py` | `SetWinEventHook` usage **unverified** (Windows-only API) |
 | C3 | finalize timeout / fragmented mp4 | `ffmpeg_recorder.py` | Timeout-scaling logic **unit-testable in principle**, not covered by a test; remux-repair path **unverified** (needs a real truncated fragmented MP4) |
 
+## `list_likely_games` restored verbatim (real game missing from dropdown)
+
+Same root cause as the UI reconstruction below, different file:
+`process_watcher.list_likely_games`'s bytecode never decompiled either, so
+it had been reinvented from scratch — a small ~20-entry exclusion list, and
+(the actual bug) **deduplicating results down to one entry per exe name**,
+which the real implementation never does. A real running game (Outer
+Wilds) went missing from the "Game .exe" dropdown as a result. Restored
+verbatim from `pycdas` disassembly instead of continuing to guess: the real
+exclusion list has ~90 entries (launchers, overlays, anti-cheat/DRM
+helpers), there's no dedup, and an `is_gamey` heuristic (exe path under
+`steamapps`/`epic games`/etc.) affects sort order only, never exclusion.
+Also kept the defensive fix from the same investigation: one unreadable
+process (`psutil` raising something other than `NoSuchProcess`/
+`AccessDenied` — plausible for anti-cheat-protected processes) no longer
+aborts the whole scan and returns an empty list. Covered by 5 new tests in
+`tests/test_process_watcher.py`.
+
 ## UI reconstruction pass (prompted by comparing against the real shipped exe)
 
 `app/ui/main_window.py`, `setup_window.py`, `async_runner.py`, and
@@ -193,7 +211,7 @@ self-check at all). Both are commented in `main_window.py` where they occur.
 
 ## Verified vs. unverified — what "verified" means here
 
-**54 pytest tests, all passing** (`capture_tool/tests/`), on macOS with
+**59 pytest tests, all passing** (`capture_tool/tests/`), on macOS with
 `pynput`/`PySide6`/`psutil`/`numpy`/`opencv-python-headless`/`rerun-sdk`
 installed:
 
