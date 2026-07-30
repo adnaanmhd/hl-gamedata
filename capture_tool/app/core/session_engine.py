@@ -307,6 +307,8 @@ class SessionEngine:
             launch_pairing=recorder.launch_pairing,
             old_anchor_monotonic_s=old_anchor_monotonic,
             video_path=video_path,
+            first_progress_monotonic_s=recorder.health.first_progress_monotonic_s,
+            first_progress_encoded_s=recorder.health.first_progress_encoded_s,
         )
         if anchor.method == "unavailable":
             warnings.append("A2 anchor correction unavailable (first-frame "

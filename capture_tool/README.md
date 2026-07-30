@@ -37,6 +37,59 @@ straight to a release build without the acceptance protocol in handoff §7.
 | B6 | focus tracking (event-driven) | `focus_tracker.py` | `SetWinEventHook` usage **unverified** (Windows-only API) |
 | C3 | finalize timeout / fragmented mp4 | `ffmpeg_recorder.py` | Timeout-scaling logic **unit-testable in principle**, not covered by a test; remux-repair path **unverified** (needs a real truncated fragmented MP4) |
 
+## Caught before shipping: `\r` vs `\n` would have undermined the A2 fix above
+
+Self-review, not user testing, caught this one — worth being explicit about
+since everything else in this log has come from real hardware. ffmpeg's
+live `-stats` progress output is `\r`-terminated (it overwrites one
+terminal line repeatedly), not `\n`-terminated. `_StderrMonitor._run()`
+used `iter(stream.readline, b"")`, which only splits on `\n` — it would
+have silently buffered several `\r`-separated stats updates together and
+only captured `time.perf_counter()` once an unrelated real `\n` eventually
+arrived, adding unpredictable delay to the exact timestamp the new A2 fix's
+sub-50ms precision depends on. Rewrote `_run()` to read raw bytes and split
+on either `\r` or `\n`, so each stats update is timestamped the instant it
+arrives. Covered by a new test (`test_splits_on_carriage_return_not_just_
+newline`) using `\r`-only stream bytes with no `\n` at all, which would
+have hung/misbehaved under the old `readline()`-based implementation.
+
+## A2's real fix: the ffprobe/wallclock approach is replaced, not just guarded
+
+The previous round's implausibility guard did its job — it caught the
+broken assumption and refused to apply a multi-year-wrong correction — but
+that meant A2's actual sync bug was still **unfixed in practice** on every
+real session (`time_anchor: "unavailable"`, `correction_applied_us: 0`,
+QA `FAIL: controls-to-video sync self-test FAILED (|lag| > 50ms target)`
+every time). Confirmed directly from a real log: `frame0_wall=0.066667`
+against `launch_wallclock=1785439320.11...` — the muxed file's frame0 PTS
+is relative/near-zero, not epoch-scale, regardless of
+`-use_wallclock_as_timestamps 1`. ffmpeg's own `-avoid_negative_ts` output
+normalization resets it, and there's no flag used here that prevents that.
+
+Rather than fight the container's timestamp normalization, A2 now uses the
+handoff doc's other suggested approach: **parse ffmpeg's own live `-stats`
+progress output.** `_StderrMonitor` (already tailing stderr for `frame=`/
+`drop=` since A1) now also captures, on the first `time=` line ffmpeg
+prints, the pair `(time.perf_counter() at the instant we read that line,
+the time= value itself)`. Since `time=T` at real monotonic instant `M`
+means "the video's own t=0 occurred at `M - T`" — true for *any* progress
+line, algebraically — this never depends on what the container's PTS
+becomes after muxing. No wallclock assumption, nothing to read back from a
+file, nothing for a muxer to normalize away.
+
+`compute_anchor_correction` now tries this first (`method:
+"ffmpeg_progress_time"`), only falling back to the old ffprobe/wallclock
+path (with its implausibility guard still in place) if `_StderrMonitor`
+never captured a progress line at all. Covered by 4 new tests in
+`test_ffmpeg_recorder.py` (progress-line parsing) and 2 new tests in
+`test_anchor.py` (preference + fallback behavior).
+
+**This is the real fix for the client's original P0 complaint** — everything
+before this was either reconstructing the tool or catching a broken
+assumption safely. Still needs a real recording to confirm the actual
+measured `|lag|` finally lands under the 50ms target; that's the next
+thing to check once this is rebuilt.
+
 ## Finalize step wasn't offloaded to a thread either
 
 Same class of bug as `recorder.start_async`/`stop_async` a few rounds back:
@@ -319,7 +372,7 @@ self-check at all). Both are commented in `main_window.py` where they occur.
 
 ## Verified vs. unverified — what "verified" means here
 
-**63 pytest tests, all passing** (`capture_tool/tests/`), on macOS with
+**70 pytest tests, all passing** (`capture_tool/tests/`), on macOS with
 `pynput`/`PySide6`/`psutil`/`numpy`/`opencv-python-headless`/`rerun-sdk`
 installed:
 

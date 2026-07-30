@@ -12,31 +12,45 @@ between "ffmpeg process running" and "first frame on disk" became a fixed
 per-session offset between the input stream and the video (measured by the
 client: 151.5ms / 207.7ms / 2326.9ms lag on the flagged 07-17 delivery).
 
-The fix
---------
-We anchor to the first video frame's PTS, using a wallclock<->monotonic
-pairing rather than trying to parse ffmpeg's progress output live (the
-handoff doc's option 1) or re-run ffprobe mid-recording (not possible):
+The fix — v2, after the v1 approach was confirmed broken on real hardware
+--------------------------------------------------------------------------
+v1 (kept below as a fallback) anchored to the first video frame's PTS by
+reading it back out of the muxed file via ffprobe, assuming
+`-use_wallclock_as_timestamps 1` makes that PTS a real wallclock (epoch)
+value. **Confirmed broken on a real delivery**: the muxed file's frame0 PTS
+came back as a tiny relative number (~0.067s), not epoch-scale — ffmpeg's
+`-avoid_negative_ts` output normalization resets it back near zero
+regardless of the input timestamping flag. The v1 code's own implausibility
+guard (`MAX_PLAUSIBLE_CORRECTION_S`) is what caught this rather than
+silently applying a multi-year-wrong correction — but it meant A2's actual
+sync bug was never fixed in practice, only safely refused.
 
-  1. `FFmpegRecorder` is told to run with `-use_wallclock_as_timestamps 1` on
-     its video input (see ffmpeg_recorder.py), so every encoded frame's PTS
-     is wallclock-derived (seconds since the Unix epoch), not
-     capture-pipeline-relative.
-  2. At the exact instant we launch ffmpeg, we record a
-     `(wallclock, monotonic)` pair via `time.time()` / `time.perf_counter()`
-     back-to-back (`capture_launch_pairing()`) — close enough in time that
-     the two clocks can be treated as offset by a fixed constant for the
-     duration of one recording session (session lengths are minutes, not
-     hours, so wallclock drift/adjustment risk is negligible).
-  3. After the recording stops, we read the first frame's real PTS
-     (wallclock seconds, thanks to step 1) via ffprobe and convert it to our
-     monotonic timeline using the step-2 pairing. That gives
-     `frame0_monotonic` — the *correct* input-clock anchor, in the same
-     units `InputCapture`/`RawMouseCapture`/`FocusTracker` already use.
-  4. Every input event was recorded relative to the OLD (buggy) anchor; we
-     compute one constant `correction_us` and shift every event by it during
-     finalize's re-anchor step (`app/core/finalize/pipeline.py`), rather than
-     re-deriving anything per-event.
+**The real fix** is the handoff doc's other suggested option: parse
+ffmpeg's own live `-stats` progress output. `FFmpegRecorder`'s
+`_StderrMonitor` (ffmpeg_recorder.py) already tails stderr for `frame=`/
+`drop=`; it now also captures, on the FIRST progress line ffmpeg prints,
+the pairing `(time.perf_counter() at the instant we read that line,
+the `time=` value ffmpeg reported)`. Since `time=T` at real monotonic
+instant `M` means "time/frame zero occurred at `M - T`" — algebraically,
+for ANY progress line — this never depends on what the container's PTS
+becomes after muxing. No wallclock assumption, nothing to normalize away,
+nothing to read back from a file at all.
+
+  1. `FFmpegRecorder` tails its own stderr (already required for A1's
+     frame-drop counter) and records `(read_monotonic_s, encoded_s)` for
+     the first `time=` line (`RecorderHealth.first_progress_monotonic_s` /
+     `first_progress_encoded_s`).
+  2. `frame0_monotonic = read_monotonic_s - encoded_s` — the real
+     monotonic instant the video's own t=0 occurred, in the same units
+     `InputCapture`/`RawMouseCapture`/`FocusTracker` already use.
+  3. Every input event was recorded relative to the OLD (buggy) anchor; we
+     compute one constant `correction_us` and shift every event by it
+     during finalize's re-anchor step (`app/core/finalize/pipeline.py`),
+     rather than re-deriving anything per-event.
+  4. The v1 ffprobe/wallclock approach is kept ONLY as a fallback for the
+     rare case `_StderrMonitor` never captured a progress line (e.g. a
+     near-zero-length recording); its implausibility guard stays in place
+     since the same failure mode is possible there.
 
 The chosen anchor and the raw pairing are recorded verbatim in
 `capture_health` (session metadata) so a residual issue is diagnosable
@@ -131,9 +145,18 @@ class AnchorResult:
         }
 
 
+MAX_PLAUSIBLE_CORRECTION_S = 10.0
+# The handoff doc's own evidence says the real startup gap is sub-second to
+# a few frames at most (§3, "1-3 frames" on correctly-anchored sessions) —
+# anything beyond a few seconds is a computation failure, not a real anchor
+# correction. Shared by both strategies below.
+
+
 def compute_anchor_correction(
     *, launch_pairing: ClockPairing, old_anchor_monotonic_s: float,
     video_path: Path,
+    first_progress_monotonic_s: float | None = None,
+    first_progress_encoded_s: float | None = None,
 ) -> AnchorResult:
     """Returns the correction (in µs) to ADD to every recorded event's `t`
     so that t=0 lands on the first video frame's real presentation instant
@@ -142,7 +165,28 @@ def compute_anchor_correction(
     correction_us > 0 means the old anchor was too early (events need to
     move later, i.e. the video actually started after the old t=0) — this
     matches the client's observed direction ("video behind inputs").
+
+    Prefers the real fix (ffmpeg's own live progress output, captured by
+    `_StderrMonitor` — see module docstring "v2") when available; falls
+    back to the v1 ffprobe/wallclock-PTS approach only if a progress line
+    was never captured (e.g. a near-instant recording).
     """
+    if first_progress_monotonic_s is not None and first_progress_encoded_s is not None:
+        frame0_monotonic = first_progress_monotonic_s - first_progress_encoded_s
+        correction_us = round((frame0_monotonic - old_anchor_monotonic_s) * 1_000_000)
+        if abs(correction_us) > MAX_PLAUSIBLE_CORRECTION_S * 1_000_000:
+            log.warning(
+                "ffmpeg-progress anchor implausible (correction=%.3fs, "
+                "first_progress_monotonic=%s, first_progress_encoded=%s) — "
+                "falling back to the ffprobe/wallclock-PTS method",
+                correction_us / 1_000_000, first_progress_monotonic_s,
+                first_progress_encoded_s)
+        else:
+            return AnchorResult(
+                method="ffmpeg_progress_time", correction_us=correction_us,
+                launch_pairing=launch_pairing, frame0_wallclock_s=None,
+                frame0_monotonic_s=frame0_monotonic)
+
     frame0_wall = first_frame_pts_wallclock_s(video_path)
     if frame0_wall is None:
         return AnchorResult(
@@ -161,11 +205,7 @@ def compute_anchor_correction(
     # instead of epoch-scale, and the subtraction above produces a
     # correction of several YEARS, not milliseconds. Applying that would
     # silently shift every event timestamp by that same absurd amount
-    # instead of failing loudly. The handoff doc's own evidence says the
-    # real startup gap is sub-second to a few frames at most (§3, "1-3
-    # frames" on correctly-anchored sessions) — anything beyond a few
-    # seconds is certainly this failure mode, not a real anchor correction.
-    MAX_PLAUSIBLE_CORRECTION_S = 10.0
+    # instead of failing loudly (see MAX_PLAUSIBLE_CORRECTION_S above).
     if abs(correction_us) > MAX_PLAUSIBLE_CORRECTION_S * 1_000_000:
         log.warning(
             "first-frame PTS anchor implausible (correction=%.3fs, frame0_wall=%s, "

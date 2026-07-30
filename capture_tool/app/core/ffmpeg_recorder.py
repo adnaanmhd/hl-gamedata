@@ -79,6 +79,10 @@ MAX_FINALIZE_TIMEOUT_S = 120.0
 
 _DROP_RE = re.compile(r"drop=\s*(\d+)")
 _FRAME_RE = re.compile(r"frame=\s*(\d+)")
+# ffmpeg's own -stats progress line, e.g. "frame= 1234 fps= 30 q=20.0
+# size=  2048kB time=00:00:41.13 bitrate= 407.0kbits/s speed=1.00x" — the
+# real A2 fix (see _StderrMonitor docstring) reads `time=` here.
+_TIME_RE = re.compile(r"time=\s*(\d+):(\d+):(\d+(?:\.\d+)?)")
 
 
 @dataclass
@@ -103,6 +107,10 @@ class RecorderHealth:
     finalize_forced_kill: bool = False
     remux_repair_attempted: bool = False
     remux_repair_succeeded: bool = False
+    # The real A2 anchor data — see _StderrMonitor's docstring for why this
+    # replaced the ffprobe/wallclock-PTS approach.
+    first_progress_monotonic_s: float | None = None
+    first_progress_encoded_s: float | None = None
 
 
 def _run_ffmpeg_query(args: list[str], timeout: float = 5.0) -> str:
@@ -163,12 +171,30 @@ def _probe_ddagrab_support() -> bool:
 class _StderrMonitor:
     """Tails ffmpeg's stderr on a background thread, extracting the running
     `frame=`/`drop=` counters ffmpeg itself reports (A1/D2) — this is the
-    authoritative drop count, not a PTS-gap inference after the fact."""
+    authoritative drop count, not a PTS-gap inference after the fact.
+
+    Also captures the real A2 anchor data: the first `time=` progress value
+    ffmpeg reports, paired with the monotonic instant WE read that line.
+    This replaces the original approach of reading the first frame's PTS
+    back out of the muxed file via ffprobe and treating it as wallclock
+    time — confirmed broken on a real delivery: ffmpeg's `-avoid_negative_ts`
+    normalizes the file's PTS back to relative/near-zero regardless of
+    `-use_wallclock_as_timestamps`, so that number was never actually
+    wallclock-scale after muxing (see anchor.py's implausibility guard,
+    which caught exactly this).
+
+    This approach never depends on what survives muxing: `time=T` at real
+    monotonic instant `M` means frame/time zero occurred at `M - T`,
+    algebraically, for any progress line — no container round-trip, no
+    wallclock assumption, nothing to normalize away.
+    """
 
     def __init__(self, stream) -> None:
         self._stream = stream
         self.frames_encoded = 0
         self.frames_dropped = 0
+        self.first_progress_monotonic_s: float | None = None
+        self.first_progress_encoded_s: float | None = None
         self._lines: list[str] = []
         self._thread = threading.Thread(target=self._run, daemon=True)
 
@@ -176,18 +202,47 @@ class _StderrMonitor:
         self._thread.start()
 
     def _run(self) -> None:
-        for raw in iter(self._stream.readline, b""):
-            try:
-                line = raw.decode("utf-8", errors="replace")
-            except Exception:
-                continue
-            self._lines.append(line)
-            m = _FRAME_RE.search(line)
+        # Real precision bug avoided here: ffmpeg's own "-stats" progress
+        # line is terminated with \r (it overwrites itself in a terminal),
+        # not \n. `iter(stream.readline, b"")` only splits on \n, so it
+        # could buffer several \r-separated stats updates together and only
+        # capture time.perf_counter() once a real \n finally arrives —
+        # silently delaying the exact timestamp the A2 fix's precision
+        # depends on. Read raw bytes and split on EITHER \r or \n instead,
+        # so each stats update is timestamped the instant it actually
+        # arrives.
+        buf = b""
+        while True:
+            chunk = self._stream.read(1)
+            if not chunk:
+                break
+            if chunk in (b"\r", b"\n"):
+                if buf:
+                    self._handle_line(buf, time.perf_counter())
+                    buf = b""
+            else:
+                buf += chunk
+        if buf:
+            self._handle_line(buf, time.perf_counter())
+
+    def _handle_line(self, raw: bytes, read_at: float) -> None:
+        try:
+            line = raw.decode("utf-8", errors="replace")
+        except Exception:
+            return
+        self._lines.append(line)
+        m = _FRAME_RE.search(line)
+        if m:
+            self.frames_encoded = int(m.group(1))
+        m = _DROP_RE.search(line)
+        if m:
+            self.frames_dropped = int(m.group(1))
+        if self.first_progress_monotonic_s is None:
+            m = _TIME_RE.search(line)
             if m:
-                self.frames_encoded = int(m.group(1))
-            m = _DROP_RE.search(line)
-            if m:
-                self.frames_dropped = int(m.group(1))
+                h, mi, s = m.groups()
+                self.first_progress_encoded_s = int(h) * 3600 + int(mi) * 60 + float(s)
+                self.first_progress_monotonic_s = read_at
 
     def tail(self, n: int = 20) -> list[str]:
         return self._lines[-n:]
@@ -399,6 +454,8 @@ class FFmpegRecorder:
         if self._stderr_monitor is not None:
             self.health.frames_encoded = self._stderr_monitor.frames_encoded
             self.health.frames_dropped = self._stderr_monitor.frames_dropped
+            self.health.first_progress_monotonic_s = self._stderr_monitor.first_progress_monotonic_s
+            self.health.first_progress_encoded_s = self._stderr_monitor.first_progress_encoded_s
 
         return self._output_path
 

@@ -83,3 +83,34 @@ def test_compute_anchor_correction_accepts_plausible_result(tmp_path):
             video_path=tmp_path / "video.mp4")
     assert result.method == "first_frame_pts_wallclock"
     assert result.correction_us == 50_000
+
+
+def test_progress_based_anchor_is_preferred_and_never_touches_ffprobe(tmp_path):
+    """The real A2 fix: when _StderrMonitor captured a progress line, use
+    it directly — no ffprobe call, no wallclock assumption at all. Confirmed
+    on a real delivery that the ffprobe/wallclock path is unreliable; this
+    path must be tried first and must not fall through to it when it has
+    everything it needs."""
+    launch_pairing = ClockPairing(wallclock_s=1_785_000_000.0, monotonic_s=100.0)
+    with patch("app.core.finalize.anchor.first_frame_pts_wallclock_s") as ffprobe_call:
+        result = compute_anchor_correction(
+            launch_pairing=launch_pairing, old_anchor_monotonic_s=100.0,
+            video_path=tmp_path / "video.mp4",
+            first_progress_monotonic_s=100.5, first_progress_encoded_s=0.45)
+    ffprobe_call.assert_not_called()
+    assert result.method == "ffmpeg_progress_time"
+    # frame0_monotonic = 100.5 - 0.45 = 100.05; correction = (100.05 - 100.0) * 1e6
+    assert result.correction_us == 50_000
+
+
+def test_progress_based_anchor_falls_back_to_ffprobe_if_implausible(tmp_path):
+    launch_pairing = ClockPairing(wallclock_s=1_785_000_000.0, monotonic_s=100.0)
+    with patch("app.core.finalize.anchor.first_frame_pts_wallclock_s",
+               return_value=None) as ffprobe_call:
+        result = compute_anchor_correction(
+            launch_pairing=launch_pairing, old_anchor_monotonic_s=100.0,
+            video_path=tmp_path / "video.mp4",
+            # implausible: encoded_s far exceeds any real elapsed time here
+            first_progress_monotonic_s=100.5, first_progress_encoded_s=999_999.0)
+    ffprobe_call.assert_called_once()
+    assert result.method == "unavailable"
