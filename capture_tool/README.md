@@ -37,6 +37,21 @@ straight to a release build without the acceptance protocol in handoff §7.
 | B6 | focus tracking (event-driven) | `focus_tracker.py` | `SetWinEventHook` usage **unverified** (Windows-only API) |
 | C3 | finalize timeout / fragmented mp4 | `ffmpeg_recorder.py` | Timeout-scaling logic **unit-testable in principle**, not covered by a test; remux-repair path **unverified** (needs a real truncated fragmented MP4) |
 
+## Finalize step wasn't offloaded to a thread either
+
+Same class of bug as `recorder.start_async`/`stop_async` a few rounds back:
+`compute_anchor_correction` and `run_finalize` were both called
+synchronously inside `SessionEngine.run`'s coroutine, not via
+`asyncio.to_thread`. `run_finalize` in particular decodes and runs dense
+optical flow over up to 3600 frames for the sync self-test, then does an
+independent second pass inside `check_session_v2` — genuinely CPU-heavy,
+legitimately slow on a long recording. Wrapping it in `to_thread` doesn't
+make that work faster (it's real work, not overhead), but keeps the event
+loop free instead of blocking it for the whole duration, consistent with
+every other heavy call in this method. Not covered by a new test (same
+reasoning as the earlier recorder fix — this is a threading-hygiene
+change, not new logic).
+
 ## A2 anchor: ffprobe parsing bug, plus a guard against a deeper assumption
 
 Diagnosable directly from `humyncapture.log` once the earlier logging fix

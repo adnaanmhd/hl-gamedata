@@ -53,11 +53,11 @@ from app.core.keyboard_capture import InputCapture
 from app.core.paths import SESSIONS_DIR, ensure_dirs
 from app.core.process_watcher import wait_for_exit
 from app.core.raw_mouse import AsyncRawMouseCapture
+from app._version import HUMYN_VERSION
 
 log = logging.getLogger(__name__)
 
 SCHEMA_VERSION = 2  # matches the native v2 delivery this engine now writes
-HUMYN_VERSION = "0.2.0"
 
 StatusFn = Callable[[str, str, "int | None"], None]
 
@@ -293,7 +293,17 @@ class SessionEngine:
         (raw_dir / "metadata.json").write_text(json.dumps(metadata, indent=2))
 
         self._status("finalizing", "Writing delivery files...", None)
-        anchor = compute_anchor_correction(
+        # Both of these are synchronous, CPU/subprocess-bound calls — same
+        # reasoning as recorder.start_async/stop_async above. run_finalize
+        # in particular decodes and runs dense optical flow over up to 3600
+        # frames (the sync self-test) plus a second independent pass inside
+        # check_session_v2, so it can legitimately take real wall-clock
+        # time on a long recording; running it via to_thread doesn't make
+        # that work faster, but it keeps this coroutine's event loop free
+        # instead of blocking it for that whole duration, consistent with
+        # every other heavy call in this method.
+        anchor = await asyncio.to_thread(
+            compute_anchor_correction,
             launch_pairing=recorder.launch_pairing,
             old_anchor_monotonic_s=old_anchor_monotonic,
             video_path=video_path,
@@ -303,7 +313,8 @@ class SessionEngine:
                              "PTS unreadable) — input/video sync not verified")
 
         final_issues = monitor.any_fatal()
-        finalize_result = run_finalize(
+        finalize_result = await asyncio.to_thread(
+            run_finalize,
             raw_session_dir=raw_dir,
             out_root=SESSIONS_DIR,
             anchor=anchor,

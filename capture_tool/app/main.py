@@ -54,8 +54,16 @@ def _setup_logging() -> Path:
     logging.getLogger("urllib3").setLevel(logging.WARNING)
     logging.getLogger("PIL").setLevel(logging.WARNING)
 
+    # app._version is deliberately tiny and dependency-free (no PySide6/
+    # pynput/etc.) so it's safe to import here, before any heavy app module
+    # — see that file's docstring for why this line exists: several rounds
+    # of debugging were spent unable to tell whether a given exe/log
+    # actually contained the latest fixes. Now it's the first thing in the
+    # log, every time.
+    from app._version import HUMYN_VERSION
+
     root.info("=" * 60)
-    root.info("HumynCapture starting (log: %s)", log_path)
+    root.info("HumynCapture v%s starting (log: %s)", HUMYN_VERSION, log_path)
     root.info("=" * 60)
     return log_path
 
