@@ -143,6 +143,7 @@ def translate_bundle_v2(bundle_dir: Path, out_root: Path, *,
                         tail_s: float = trimmod.TAIL_S,
                         make_rrd: bool = True,
                         rrd_python: str | None = None,
+                        rrd_in_process: bool = False,
                         lag_correct: bool = True) -> dict:
     bundle_dir = Path(bundle_dir)
     meta = json.loads((bundle_dir / "metadata.json").read_text())
@@ -244,7 +245,7 @@ def translate_bundle_v2(bundle_dir: Path, out_root: Path, *,
     (out_dir / "session.json").write_text(json.dumps(session, indent=2))
 
     if make_rrd:
-        rrd.generate(out_dir, python=rrd_python)
+        rrd.generate(out_dir, python=rrd_python, in_process=rrd_in_process)
     else:
         rrd.write_script(out_dir)
 

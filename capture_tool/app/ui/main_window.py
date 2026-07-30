@@ -255,13 +255,26 @@ class MainWindow(QMainWindow):
         self.game_process_combo.blockSignals(False)
 
     def _refresh_sessions_list(self) -> None:
+        """Show finalized sessions (the actual v2 delivery, has session.json)
+        newest first.
+
+        Real bug fixed here: this used to glob SESSIONS_DIR's TOP LEVEL only
+        and skip `_raw`-suffixed names — but `translator.v2.translate_bundle_v2`
+        (called from finalize/pipeline.py) writes the finalized output
+        nested under `<SESSIONS_DIR>/<vendor>/<mm-dd-yyyy>/<game_slug>/
+        <session_id>/`, not as a flat sibling of `<session_id>_raw/`. The
+        old code found nothing there but the vendor folder itself (e.g.
+        "humynlabs"), which it then listed as if it were a session. Finding
+        every `session.json` anywhere under SESSIONS_DIR is correct
+        regardless of how deep translator nests things.
+        """
         self.sessions_list.clear()
         if not SESSIONS_DIR.exists():
             return
-        sessions = sorted(SESSIONS_DIR.glob("*"), reverse=True)[:10]
-        for s in sessions:
-            if not s.is_dir() or s.name.endswith("_raw"):
-                continue
+        finalized = sorted(SESSIONS_DIR.rglob("session.json"),
+                            key=lambda p: p.stat().st_mtime, reverse=True)[:10]
+        for session_json in finalized:
+            s = session_json.parent
             video = s / "video.mp4"
             size_mb = (video.stat().st_size / 1024 / 1024) if video.exists() else 0
             label = (f"{s.name}    "

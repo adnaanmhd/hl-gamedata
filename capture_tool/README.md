@@ -37,6 +37,62 @@ straight to a release build without the acceptance protocol in handoff §7.
 | B6 | focus tracking (event-driven) | `focus_tracker.py` | `SetWinEventHook` usage **unverified** (Windows-only API) |
 | C3 | finalize timeout / fragmented mp4 | `ffmpeg_recorder.py` | Timeout-scaling logic **unit-testable in principle**, not covered by a test; remux-repair path **unverified** (needs a real truncated fragmented MP4) |
 
+## session.rrd was never actually being generated
+
+Found by inspecting a real finalized delivery: `rrd_creation.py` was there,
+`session.rrd` was not — a required v2 delivery file silently missing, with
+no error shown to the user. Two separate bugs in `translator/rrd.py`
+(pre-existing, shared code — not something in `capture_tool/` itself):
+
+1. `write_script()` wrote the script with `Path.write_text(RRD_SCRIPT)` —
+   no `encoding="utf-8"`. The script contains "§" and "—"; without an
+   explicit encoding, Windows defaults to something like cp1252, which CAN
+   represent both characters but as bytes that are **not valid UTF-8** —
+   confirmed on the real delivered file, which read back as "�" mojibake
+   everywhere those characters appeared.
+2. `generate()`'s only code path shells out to `[sys.executable, script,
+   "--session-dir", ...]` to actually produce `session.rrd`. Inside a
+   frozen PyInstaller exe, **`sys.executable` is the frozen exe itself**,
+   not a Python interpreter — that subprocess call doesn't run the script,
+   it tries to relaunch HumynCapture. `check=True` should have made this
+   raise loudly, but nothing did; either way, `session.rrd` never got
+   produced.
+
+Fixed `write_script()` to specify `encoding="utf-8"` explicitly, and added
+`generate(..., in_process=True)`, which imports and calls the written
+script's `log_session()` directly — no subprocess, no dependence on a
+Python interpreter existing on disk. `capture_tool/app/core/finalize/
+pipeline.py` now passes `rrd_in_process=True`. Also added `rerun-sdk` to
+`capture_tool/requirements.txt`, which the frozen build needs to actually
+import `rerun` for this — it was missing entirely; the subprocess bug had
+been masking that gap too, since it also would have failed for that reason.
+Covered by 2 new tests in `translator/tests/test_rrd.py`.
+
+**Why nothing caught this earlier**: every test here runs under a normal
+Python interpreter, where `sys.executable` genuinely is a Python
+interpreter — the subprocess call "works" in every test environment and
+only breaks specifically inside a frozen exe. This is a second case (after
+the `HumynCapture.spec` `REPO_ROOT` bug) of something no amount of testing
+on this machine could have caught; it needed an actual delivered file to
+inspect.
+
+## Recent-sessions list was looking in the wrong place
+
+Found while helping locate a real session's finalized output: I initially
+told the user the finalized delivery sits as a flat sibling of `<session_id>
+_raw\` — wrong. `translator.v2.translate_bundle_v2` (called from
+`finalize/pipeline.py`) writes it nested under `<SESSIONS_DIR>/<vendor>/
+<mm-dd-yyyy>/<game_slug>/<session_id>/` — that's `translator/v2.py`'s own
+layout, not something decided in this package. `MainWindow.
+_refresh_sessions_list` only globbed `SESSIONS_DIR`'s top level, so in
+practice it found nothing but the `<vendor>\` folder itself (e.g.
+"humynlabs") and would have listed that folder as if it were a session,
+while every real finalized session nested inside it stayed invisible in
+the "Recent sessions" list. Fixed to `SESSIONS_DIR.rglob("session.json")`,
+which finds them regardless of nesting depth. Also fixed `paths.py`'s
+layout docstring, which documented the same wrong flat assumption. Covered
+by `tests/test_main_window_sessions_list.py`.
+
 ## `list_likely_games` restored verbatim (real game missing from dropdown)
 
 Same root cause as the UI reconstruction below, different file:
@@ -211,7 +267,7 @@ self-check at all). Both are commented in `main_window.py` where they occur.
 
 ## Verified vs. unverified — what "verified" means here
 
-**59 pytest tests, all passing** (`capture_tool/tests/`), on macOS with
+**60 pytest tests, all passing** (`capture_tool/tests/`), on macOS with
 `pynput`/`PySide6`/`psutil`/`numpy`/`opencv-python-headless`/`rerun-sdk`
 installed:
 

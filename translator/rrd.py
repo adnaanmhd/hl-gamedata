@@ -67,16 +67,41 @@ if __name__ == "__main__":
 
 def write_script(session_dir: Path) -> Path:
     p = session_dir / "rrd_creation.py"
-    p.write_text(RRD_SCRIPT)
+    # encoding="utf-8" is required, not cosmetic: RRD_SCRIPT contains "§"
+    # and "—". Path.write_text() with no encoding uses the platform's
+    # default (e.g. cp1252 on Windows), which CAN represent those two
+    # characters as single bytes — but as bytes that are invalid UTF-8, so
+    # anything reading the file back as UTF-8 (any editor/tool not also
+    # defaulting to cp1252) sees "�" mojibake instead. Confirmed on a
+    # real Windows delivery.
+    p.write_text(RRD_SCRIPT, encoding="utf-8")
     return p
 
 
-def generate(session_dir: Path, *, python: str | None = None) -> Path:
-    """Write rrd_creation.py and run it to produce session.rrd."""
+def generate(session_dir: Path, *, python: str | None = None,
+             in_process: bool = False) -> Path:
+    """Write rrd_creation.py and run it to produce session.rrd.
+
+    `in_process=True` imports and calls the written script's `log_session()`
+    directly instead of spawning `[python, script, ...]` as a subprocess.
+    Required inside a frozen PyInstaller executable: `sys.executable` there
+    points at the frozen exe itself, not a Python interpreter, so shelling
+    out to "run" the script actually tries to relaunch the whole packaged
+    app — session.rrd never gets produced (confirmed on a real delivery:
+    rrd_creation.py was written, session.rrd was not). `python=` is ignored
+    when `in_process=True`.
+    """
     session_dir = Path(session_dir)
     script = write_script(session_dir)
-    subprocess.run(
-        [python or sys.executable, str(script), "--session-dir", str(session_dir)],
-        check=True,
-    )
+    if in_process:
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("rrd_creation", script)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        module.log_session(session_dir)
+    else:
+        subprocess.run(
+            [python or sys.executable, str(script), "--session-dir", str(session_dir)],
+            check=True,
+        )
     return session_dir / "session.rrd"

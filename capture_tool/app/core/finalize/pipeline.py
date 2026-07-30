@@ -110,8 +110,18 @@ def run_finalize(
     # --- trim -> re-anchor & bin -> write v2 files. lag_correct=False is ---
     # deliberate: we want to MEASURE whether A2 actually fixed the root
     # cause, not paper over a regression the way the old post-hoc rescue did.
+    #
+    # rrd_in_process=True is required here specifically (not just a nicety):
+    # translator.rrd.generate()'s default subprocess path runs
+    # `[sys.executable, rrd_creation.py, ...]`, but inside a frozen
+    # PyInstaller exe `sys.executable` IS this exe, not a Python
+    # interpreter — that subprocess call doesn't generate anything, it
+    # tries to relaunch HumynCapture itself. Confirmed on a real delivery:
+    # rrd_creation.py was written, session.rrd was not. in_process imports
+    # and calls the written script's log_session() directly instead.
     result = translator_v2.translate_bundle_v2(
-        raw_session_dir, out_root, lag_correct=False, make_rrd=True)
+        raw_session_dir, out_root, lag_correct=False, make_rrd=True,
+        rrd_in_process=True)
     out_dir = Path(result["out_dir"])
 
     # --- independent full v2 contract + sync + off-by-one check. ---

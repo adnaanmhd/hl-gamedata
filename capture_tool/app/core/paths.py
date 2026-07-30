@@ -7,14 +7,33 @@ Layout:
         ffmpeg\\
             ffmpeg.exe              bundled ffmpeg binary
         sessions\\                  recorded sessions go here
-            <session_id>\\
+            <session_id>_raw\\      written DURING recording
                 video.mp4
                 inputs.jsonl
                 metadata.json
-                session.json        # v2 delivery (native finalize output)
-                frames.csv           # v2 delivery
-                session.rrd          # v2 delivery
-                rrd_creation.py      # v2 delivery
+            <vendor>\\<mm-dd-yyyy>\\<game_slug>\\<session_id>\\
+                                     the FINALIZED v2 delivery, written by
+                                     app.core.finalize.pipeline right after
+                                     you stop recording — NOT a flat sibling
+                                     of <session_id>_raw\\. This nesting is
+                                     translator.v2.translate_bundle_v2's own
+                                     layout (translator/v2.py); finalize
+                                     calls straight into it rather than a
+                                     second implementation, so this is
+                                     wherever THAT writes, not something
+                                     decided here. Real bug once caused by
+                                     assuming a flat layout: MainWindow's
+                                     "Recent sessions" list only looked at
+                                     SESSIONS_DIR's top level and found
+                                     nothing but the <vendor>\\ folder itself
+                                     — see main_window.py's
+                                     _refresh_sessions_list, now an rglob
+                                     for session.json instead.
+                session.json
+                frames.csv
+                video.mp4
+                session.rrd
+                rrd_creation.py
         logs\\                      app logs
         state.json                  first-run flag, version
 """
