@@ -169,6 +169,35 @@ def _detect_hw_encoder() -> str:
     return "libx264"
 
 
+def _ddagrab_opens() -> bool:
+    """Actually try to open ddagrab's output_idx=0, not just check the
+    filter is listed — same lesson as `_encoder_opens` (A1): "this ffmpeg
+    build has the filter compiled in" and "this specific GPU/monitor
+    configuration can actually open it" are different things. Confirmed on
+    a real machine: the filter was correctly detected AND correctly
+    invoked, and ffmpeg still exited with "Selected output not supported" /
+    "Failed to configure output pad" — DXGI output indices don't always
+    map cleanly to a usable output, especially on hybrid-GPU laptops or
+    certain multi-monitor arrangements. Runs a trivial synthetic capture
+    (tiny size, 3 frames, `-f null -`) so a real failure here falls back to
+    gdigrab instead of crashing the whole recording session."""
+    cmd = ["-hide_banner", "-loglevel", "error", "-f", "lavfi",
+           "-i", "ddagrab=output_idx=0:framerate=5:video_size=64x64",
+           "-vf", "hwdownload,format=bgra",
+           "-frames:v", "3", "-f", "null", "-"]
+    creationflags = CREATE_NO_WINDOW if sys.platform == "win32" else 0
+    try:
+        result = subprocess.run([str(ffmpeg_exe()), *cmd], capture_output=True,
+                                 timeout=10, creationflags=creationflags)
+    except (subprocess.SubprocessError, OSError):
+        return False
+    if result.returncode != 0:
+        log.warning("ddagrab preflight failed: %s",
+                    (result.stderr or b"").decode("utf-8", errors="replace").strip()[-500:])
+        return False
+    return True
+
+
 def _probe_ddagrab_support() -> bool:
     """Real bug found here: `ddagrab` is an avfilter SOURCE (invoked as
     `-f lavfi -i "ddagrab=..."`), not an avdevice — ffmpeg lists it under
@@ -176,9 +205,13 @@ def _probe_ddagrab_support() -> bool:
     code here) meant this returned False on EVERY ffmpeg build, including
     ones that genuinely support ddagrab, silently forcing the `gdigrab`
     fallback — and its C2 exclusive-fullscreen black-capture limitation —
-    on every machine, not just ones that actually lack it."""
+    on every machine, not just ones that actually lack it.
+
+    Listing the filter alone isn't sufficient either (see `_ddagrab_opens`
+    docstring) — a real preflight open-test is required, same as A1's
+    hardware-encoder check."""
     listing = _run_ffmpeg_query(["-hide_banner", "-filters"])
-    return "ddagrab" in listing
+    return "ddagrab" in listing and _ddagrab_opens()
 
 
 class _StderrMonitor:

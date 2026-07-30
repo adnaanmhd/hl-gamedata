@@ -37,6 +37,28 @@ straight to a release build without the acceptance protocol in handoff §7.
 | B6 | focus tracking (event-driven) | `focus_tracker.py` | `SetWinEventHook` usage **unverified** (Windows-only API) |
 | C3 | finalize timeout / fragmented mp4 | `ffmpeg_recorder.py` | Timeout-scaling logic **unit-testable in principle**, not covered by a test; remux-repair path **unverified** (needs a real truncated fragmented MP4) |
 
+## ddagrab: listed and correctly invoked, still needed a real preflight
+
+Immediate follow-up to the detection/invocation fix above — same lesson as
+A1's hardware-encoder fix, just for ddagrab this time. Real error from an
+actual machine, with the *fixed* invocation already in place:
+```
+[Parsed_ddagrab_0] Selected output not supported
+[Parsed_ddagrab_0] Failed to configure output pad on Parsed_ddagrab_0
+Error opening input: Generic error in an external library
+```
+The filter was correctly detected (`-filters` lists it) and correctly
+invoked (proper lavfi syntax) — and it still failed to actually open.
+`output_idx=0` doesn't reliably map to a usable DXGI output on every GPU/
+monitor configuration (hybrid-GPU laptops and certain multi-monitor setups
+are the likely cause here). "Listed" and "opens" are different questions
+for ddagrab exactly the way they were for `h264_nvenc`.
+
+Added `_ddagrab_opens()` — a real preflight (tiny 64x64, 3-frame synthetic
+capture to `-f null -`) — and `_probe_ddagrab_support()` now requires both
+the filter being listed AND that preflight succeeding before committing to
+ddagrab, falling back to `gdigrab` otherwise. Covered by 3 new tests.
+
 ## ddagrab was never actually usable — wrong detection AND wrong invocation
 
 Found while answering "can we add exclusive-fullscreen support" — checked
@@ -432,7 +454,7 @@ self-check at all). Both are commented in `main_window.py` where they occur.
 
 ## Verified vs. unverified — what "verified" means here
 
-**78 pytest tests, all passing** (`capture_tool/tests/`), on macOS with
+**81 pytest tests, all passing** (`capture_tool/tests/`), on macOS with
 `pynput`/`PySide6`/`psutil`/`numpy`/`opencv-python-headless`/`rerun-sdk`
 installed:
 

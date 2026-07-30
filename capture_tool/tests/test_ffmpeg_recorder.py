@@ -29,7 +29,8 @@ class TestDdagrabDetectionAndInvocation:
     """
 
     def test_probe_checks_filters_not_devices(self):
-        with patch.object(fr, "_run_ffmpeg_query") as query:
+        with patch.object(fr, "_run_ffmpeg_query") as query, \
+             patch.object(fr, "_ddagrab_opens", return_value=True):
             query.return_value = "ddagrab  V..... DXGI Desktop Duplication"
             assert fr._probe_ddagrab_support() is True
         query.assert_called_once_with(["-hide_banner", "-filters"])
@@ -37,6 +38,26 @@ class TestDdagrabDetectionAndInvocation:
     def test_probe_false_when_filter_not_listed(self):
         with patch.object(fr, "_run_ffmpeg_query", return_value="gdigrab  V....."):
             assert fr._probe_ddagrab_support() is False
+
+    def test_probe_false_when_listed_but_fails_to_actually_open(self):
+        """The exact regression this preflight guards against: ddagrab is
+        listed in -filters AND correctly invoked, but still fails at
+        runtime with "Selected output not supported" on some GPU/monitor
+        configurations — listing alone must not be trusted."""
+        with patch.object(fr, "_run_ffmpeg_query",
+                          return_value="ddagrab  V..... DXGI Desktop Duplication"), \
+             patch.object(fr, "_ddagrab_opens", return_value=False):
+            assert fr._probe_ddagrab_support() is False
+
+    def test_ddagrab_opens_false_on_nonzero_exit(self):
+        fake = type("R", (), {"returncode": 1, "stderr": b"Selected output not supported"})()
+        with patch.object(fr.subprocess, "run", return_value=fake):
+            assert fr._ddagrab_opens() is False
+
+    def test_ddagrab_opens_true_on_success(self):
+        fake = type("R", (), {"returncode": 0, "stderr": b""})()
+        with patch.object(fr.subprocess, "run", return_value=fake):
+            assert fr._ddagrab_opens() is True
 
     def test_build_command_uses_lavfi_filter_syntax_when_ddagrab_available(self):
         recorder = fr.FFmpegRecorder()
