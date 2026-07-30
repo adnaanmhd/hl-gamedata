@@ -392,15 +392,28 @@ class SessionEngine:
                     match = False
             if not match:
                 return True
+            # Real bug fixed here: many real game windows (especially
+            # fullscreen/borderless ones) legitimately have an empty title —
+            # skipping them outright could leave only a tiny/minimized helper
+            # window as the sole candidate, which is exactly the kind of
+            # window that produces a 0x0 client rect downstream. Use the
+            # title if present, but don't disqualify the window for lacking
+            # one; fall back to the exe name for the returned "title".
             length = user32.GetWindowTextLengthW(hwnd)
-            if length == 0:
-                return True
-            buf = ctypes.create_unicode_buffer(length + 1)
-            user32.GetWindowTextW(hwnd, buf, length + 1)
+            if length > 0:
+                buf = ctypes.create_unicode_buffer(length + 1)
+                user32.GetWindowTextW(hwnd, buf, length + 1)
+                title = buf.value
+            else:
+                title = exe_name
+            if user32.IsIconic(hwnd):
+                return True  # minimized — never a usable capture candidate
             rect = wintypes.RECT()
             user32.GetClientRect(hwnd, ctypes.byref(rect))
             area = max(rect.right - rect.left, 0) * max(rect.bottom - rect.top, 0)
-            candidates.append((area, buf.value, hwnd))
+            if area == 0:
+                return True  # zero client area — same reasoning as above
+            candidates.append((area, title, hwnd))
             return True
 
         user32.EnumWindows(_callback, 0)
@@ -417,6 +430,15 @@ class SessionEngine:
         don't capture title bars or borders for windowed-mode games.
         Width/height are forced even because libx264/nvenc with yuv420p
         needs even dimensions.
+
+        Real bug fixed here: this used to call GetClientRect/ClientToScreen
+        without checking their return values, and never validated the result
+        — if the window was minimized (a well-known Win32 quirk: a minimized
+        window's client rect is legitimately (0,0,0,0), not an error return)
+        or `hwnd` had gone stale, this silently returned a 0x0 rect, which
+        then reached ffmpeg as `-video_size 0x0` — a cryptic native parse
+        error ("Unable to parse video_size option value 0x0") instead of a
+        clear message pointing at the actual cause.
         """
         if sys.platform != "win32":
             return (0, 0, 1920, 1080)
@@ -424,14 +446,27 @@ class SessionEngine:
         from ctypes import wintypes
 
         user32 = ctypes.windll.user32
+        if user32.IsIconic(hwnd):
+            raise RuntimeError(
+                "the game window is minimized — restore it into view before "
+                "starting the recording (a minimized window has no capturable "
+                "client area)")
+
         rect = wintypes.RECT()
-        user32.GetClientRect(hwnd, ctypes.byref(rect))
+        if not user32.GetClientRect(hwnd, ctypes.byref(rect)):
+            raise OSError(f"GetClientRect failed: Win32 error {ctypes.get_last_error()}")
         top_left = wintypes.POINT(rect.left, rect.top)
-        user32.ClientToScreen(hwnd, ctypes.byref(top_left))
+        if not user32.ClientToScreen(hwnd, ctypes.byref(top_left)):
+            raise OSError(f"ClientToScreen failed: Win32 error {ctypes.get_last_error()}")
         w = rect.right - rect.left
         h = rect.bottom - rect.top
         w -= w % 2
         h -= h % 2
+        if w <= 0 or h <= 0:
+            raise RuntimeError(
+                f"game window client area is {w}x{h} (expected a real visible "
+                f"size) — make sure the game window is open, not minimized, "
+                f"and fully rendered before starting the recording")
         return (top_left.x, top_left.y, w, h)
 
     def _merge_inputs(self, queue_events: list[dict], raw_mouse_path: Path,

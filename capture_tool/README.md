@@ -39,7 +39,24 @@ straight to a release build without the acceptance protocol in handoff §7.
 
 ## Real-hardware findings (from actual Windows testing)
 
-- **Packaging: `HumynCapture.spec`'s `REPO_ROOT` was one directory too high.**
+- **`_get_window_screen_rect` produced a 0x0 capture rect.** ffmpeg failed
+  with `Unable to parse "video_size" option value "0x0"`. Root cause:
+  `_get_window_screen_rect` (and `_get_window_for_pid`'s candidate scoring)
+  called `GetClientRect`/`ClientToScreen` without checking their return
+  values, and never validated the result. A minimized window's client rect
+  is *legitimately* `(0,0,0,0)` in Win32 (not a failure return), so a
+  minimized or not-yet-rendered game window silently produced a zero-size
+  rect that only surfaced as a cryptic native ffmpeg error two layers away.
+  Also fixed a related bug in `_get_window_for_pid`: it skipped any window
+  with an empty title outright, but many real fullscreen/borderless game
+  windows legitimately have no title text — that could leave a tiny/hidden
+  helper window as the only remaining candidate. Both functions now check
+  `IsIconic`/zero-area and raise a clear, actionable error ("the game window
+  is minimized — restore it into view...") instead of passing a degenerate
+  rect through to ffmpeg. **Not covered by a test** — both functions are
+  `sys.platform == "win32"`-gated with no Windows environment here to
+  exercise the real Win32 calls; this is source-reviewed, not test-verified,
+  same caveat as the session-engine threading fix two rounds ago.
   Every finalized session failed at "Writing delivery files..." with
   `the sibling 'translator' package is not importable`. Root cause was in
   the spec file, not the fixed source: `SPECPATH` is *already* the directory
