@@ -15,7 +15,19 @@
 import sys
 from pathlib import Path
 
+from PyInstaller.utils.hooks import collect_all
+
 block_cipher = None
+
+# rerun-sdk is a hybrid Python+Rust package (native .pyd extension modules
+# plus bundled data/asset files for its viewer). `import rerun` succeeding
+# in a plain venv does NOT guarantee PyInstaller's static import analysis
+# catches everything it needs — this is a common "works unfrozen, breaks
+# frozen" gap for packages with compiled extensions. collect_all() pulls in
+# rerun's binaries/datas/submodules explicitly instead of hoping Analysis's
+# static scan finds them all on its own. Needed for app.core.finalize.
+# pipeline's in_process rrd generation (see translator/rrd.py).
+rerun_datas, rerun_binaries, rerun_hiddenimports = collect_all("rerun")
 
 # repo root must be on the path so `import translator` resolves — the
 # finalize pipeline (app/core/finalize/pipeline.py) imports it directly
@@ -34,8 +46,8 @@ REPO_ROOT = str(Path(SPECPATH).parent)
 a = Analysis(
     ["app/main.py"],
     pathex=[SPECPATH, REPO_ROOT],
-    binaries=[],
-    datas=[],
+    binaries=rerun_binaries,
+    datas=rerun_datas,
     hiddenimports=[
         # translator/ (repo root) — used by app.core.finalize.pipeline
         "translator",
@@ -53,6 +65,7 @@ a = Analysis(
         # analysis since they're selected at import time by platform.
         "pynput.keyboard._win32",
         "pynput.mouse._win32",
+        *rerun_hiddenimports,
     ],
     hookspath=[],
     hooksconfig={},
