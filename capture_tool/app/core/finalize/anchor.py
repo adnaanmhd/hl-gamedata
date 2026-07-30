@@ -45,12 +45,15 @@ requirement ("record the chosen anchor explicitly in metadata").
 """
 from __future__ import annotations
 
+import logging
 import subprocess
 import sys
 from dataclasses import dataclass
 from pathlib import Path
 
 from app.core.paths import ffmpeg_exe
+
+log = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -85,7 +88,19 @@ def first_frame_pts_wallclock_s(video_path: Path) -> float | None:
                               creationflags=creationflags, check=True)
         first_line = out.stdout.strip().splitlines()[0]
         return float(first_line)
-    except (subprocess.SubprocessError, OSError, ValueError, IndexError):
+    except (subprocess.SubprocessError, OSError, ValueError, IndexError) as e:
+        # Real gap fixed here: this used to swallow the exact failure
+        # reason silently, so every "time_anchor: unavailable" in a real
+        # delivery gave no way to tell WHY ffprobe couldn't read the first
+        # frame's PTS without re-running the command by hand on the
+        # original machine. Log the command, exit code, and stderr/stdout
+        # so this is diagnosable from humyncapture.log alone next time.
+        stdout = getattr(e, "stdout", None)
+        stderr = getattr(e, "stderr", None)
+        log.warning(
+            "first_frame_pts_wallclock_s failed: %s\ncmd: %s\nreturncode: %s\n"
+            "stdout: %r\nstderr: %r",
+            e, " ".join(cmd), getattr(e, "returncode", None), stdout, stderr)
         return None
 
 
