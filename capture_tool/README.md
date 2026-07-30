@@ -54,9 +54,75 @@ straight to a release build without the acceptance protocol in handoff §7.
   machine — treat every other "unverified" row above as *equally* likely to
   have a gap like this until it's actually run.
 
+- **B2/E1/E2 self-check, pynput `Listener.wait()` API misuse.** First real
+  keyboard/mouse capture failed with `AbstractListener.wait() takes 1
+  positional argument but 2 were given`, surfaced correctly by the B2 health
+  gate as a subsystem warning (that part worked) but the underlying cause was
+  a real bug in `keyboard_capture.py`: pynput's `Listener.wait()` takes **no
+  arguments** — it has no built-in timeout support. The code (both the
+  original version here and an earlier attempted fix in this same file) called
+  it as `.wait(timeout=3)`, which is a `TypeError`, not a timeout. This was
+  almost certainly the actual cause of an earlier vague "keyboard and mouse
+  input not recognized, timeout" report, misdiagnosed at the time as a
+  possible AV/EDR or elevation issue since both subsystems failed together —
+  they failed together because the exception fired before either listener's
+  readiness could be checked at all, not because of an external block. Fixed
+  by polling pynput's documented public `.running` attribute with our own
+  timeout loop (`_wait_listener_running`) instead of relying on `.wait()`.
+  Covered by `tests/test_input_capture_start.py` (3 tests, using a fake
+  listener with only a `.running` attribute and deliberately no `.wait()`, so
+  a regression back to calling `.wait(timeout=...)` fails loudly here too).
+
+- **B4, OS/system keys not actually filtered.** A real `inputs.jsonl`
+  capture had `cmd` and `print_screen` as its first two events — the module
+  docstring explicitly claims these are "dropped at capture instead of
+  leaking into inputs.jsonl", but they weren't. Root cause: `_OS_SYSTEM_VKS`
+  only guards the path where pynput hands back a `KeyCode` with a numeric
+  `.vk` — but Win/cmd, PrintScreen, lock keys, and media keys arrive from
+  pynput as **named `Key` enum members** (`Key.cmd`, `Key.print_screen`, …),
+  which have no `.vk` at all, so `_key_to_str`'s final fallback
+  (`return key.name`) returned them completely unfiltered. Added
+  `_OS_SYSTEM_KEY_NAMES` (name-keyed, mirroring `_OS_SYSTEM_VKS`) and checked
+  it in that fallback branch. Covered by 4 new tests in
+  `tests/test_keyboard_capture.py`, using a fake object with only a `.name`
+  attribute (not real `pynput.keyboard.Key.print_screen`/`.media_volume_mute`
+  — pynput's per-platform backend doesn't define every Windows-only member
+  on macOS, which is exactly the kind of platform gap this whole package is
+  full of).
+
+- **Native v2 finalize, `[WinError 2] The system cannot find the file
+  specified`.** `translator/{trim,video,rrd}.py` invoke bare `"ffmpeg"`/
+  `"ffprobe"` (correct for the translator package's own CLI/dev usage, where
+  a system ffmpeg on PATH is the right assumption) — but the packaged app
+  has no system-wide ffmpeg on an end-user Windows machine, only the copy
+  the setup wizard downloads under `%LOCALAPPDATA%\HumynCapture\ffmpeg\`.
+  Every `translator` call during finalize (trim, probe, rrd generation) was
+  raising this uncaught. Fixed with `app.core.paths.ensure_ffmpeg_on_path()`
+  — prepends the bundled binary's directory to `PATH` — called at the top of
+  `finalize/pipeline.run_finalize()`, before any `translator` call. Covered
+  by `tests/test_paths.py` (2 tests).
+
+- **Session-start/-stop UI stall ("glitching when recording starts").**
+  `SessionEngine.run()` called `recorder.start(...)` and `recorder.stop()`
+  — the plain **synchronous** methods — directly inside an `async def`,
+  even though `FFmpegRecorder` already defines `start_async`/`stop_async`
+  wrappers (`asyncio.to_thread`) for exactly this. `start()` now also runs
+  the A1 encoder preflight (up to 3 sequential subprocess calls, up to 10s
+  each) before launching ffmpeg, and `stop()` can block up to
+  `MAX_FINALIZE_TIMEOUT_S` (120s) — called synchronously, either blocks the
+  single AsyncRunner event-loop thread for its full duration, starving every
+  other coroutine scheduled on it (status/progress signals, the input-queue
+  drain task) for that whole window. Fixed by switching both call sites in
+  `session_engine.py` to `await recorder.start_async(...)` /
+  `await recorder.stop_async()`. **Not covered by a test** — `SessionEngine.
+  run()` has enough remaining Windows-only surface (window-finding, all four
+  input/health subsystems) that mocking just this slice wasn't worth it
+  given everything else already unverified in this method; this fix is
+  code-reviewed, not test-covered.
+
 ## Verified vs. unverified — what "verified" means here
 
-**46 pytest tests, all passing** (`capture_tool/tests/`), on macOS with
+**54 pytest tests, all passing** (`capture_tool/tests/`), on macOS with
 `pynput`/`PySide6`/`psutil`/`numpy`/`opencv-python-headless`/`rerun-sdk`
 installed:
 

@@ -1,8 +1,45 @@
+import pynput.keyboard as keyboard
+
 from app.core.keyboard_capture import (
     _ModifierDebounce,
     _base_letter_from_control_byte,
+    _key_to_str,
     _resolve_modifier_side,
 )
+
+
+class _FakeNamedKey:
+    """A stand-in for a pynput `Key` enum member: has `.name`, no `.vk`, and
+    is not a `KeyCode` instance. Used instead of e.g. `keyboard.Key.
+    print_screen` directly because pynput's per-platform backend doesn't
+    define every Windows-only member (print_screen, media_*, ...) on every
+    OS — this repo's tests run on macOS — so referencing them by attribute
+    would fail here even though they're exactly what a real Windows capture
+    delivers, which is the actual bug being regression-tested."""
+
+    def __init__(self, name: str) -> None:
+        self.name = name
+
+
+def test_key_to_str_drops_os_system_keys_delivered_as_named_key_enum():
+    """Real bug: on Windows, Win/cmd, PrintScreen, lock keys, and media keys
+    arrive from pynput as named `Key` enum members (Key.cmd, Key.print_screen,
+    ...), which have no `.vk` at all — the vk-keyed `_OS_SYSTEM_VKS` drop set
+    never applied to them. A real capture's inputs.jsonl had `cmd` and
+    `print_screen` as its first two events, completely unfiltered."""
+    assert _key_to_str(_FakeNamedKey("cmd"), side_hint=None) is None
+    assert _key_to_str(_FakeNamedKey("print_screen"), side_hint=None) is None
+    assert _key_to_str(_FakeNamedKey("caps_lock"), side_hint=None) is None
+    assert _key_to_str(_FakeNamedKey("media_volume_mute"), side_hint=None) is None
+
+
+def test_key_to_str_keeps_ordinary_special_keys():
+    assert _key_to_str(keyboard.Key.space, side_hint=None) == "space"
+    assert _key_to_str(keyboard.Key.esc, side_hint=None) == "esc"
+
+
+def test_key_to_str_keeps_printable_chars():
+    assert _key_to_str(keyboard.KeyCode.from_char("w"), side_hint=None) == "w"
 
 
 def test_shift_side_from_scancode():

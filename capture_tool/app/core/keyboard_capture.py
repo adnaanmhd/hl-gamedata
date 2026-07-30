@@ -71,6 +71,13 @@ _NUMPAD_VK_NAMES = {
 # Dropped outright — never recorded as game input (B4). Win keys, media keys,
 # lock keys, PrintScreen, and browser/launcher keys are not gameplay signal
 # and their pynput names are inconsistent junk (`cmd`, `vk_###`) anyway.
+#
+# This ONLY catches keys pynput hands back as a KeyCode with a numeric .vk.
+# Win/cmd, PrintScreen, the lock keys, and media keys actually arrive as
+# NAMED `pynput.keyboard.Key` enum members (Key.cmd, Key.print_screen, ...),
+# which have no .vk at all — see _OS_SYSTEM_KEY_NAMES below for those. Real
+# bug found on Windows: without the name-based set, `cmd` and `print_screen`
+# were the first two events in a real inputs.jsonl capture, unfiltered.
 _OS_SYSTEM_VKS = {
     0x5B, 0x5C, 0x5D,          # LWin, RWin, Apps
     0x2C,                       # PrintScreen
@@ -79,6 +86,16 @@ _OS_SYSTEM_VKS = {
     0xB0, 0xB1, 0xB2, 0xB3,      # Media next/prev/stop/play-pause
     0xB4, 0xB5, 0xB6, 0xB7,      # Launch mail/media/app1/app2
     0xA6, 0xA7,                  # Browser back/forward
+}
+
+# Same drop list, but keyed by pynput's `Key` enum member `.name` — the path
+# Win/cmd, PrintScreen, lock keys, and media keys actually take on Windows.
+_OS_SYSTEM_KEY_NAMES = {
+    "cmd", "cmd_l", "cmd_r",
+    "print_screen",
+    "caps_lock", "num_lock", "scroll_lock",
+    "media_volume_mute", "media_volume_down", "media_volume_up",
+    "media_play_pause", "media_next", "media_previous",
 }
 
 # Scancodes shared by both sides of a modifier; side is resolved from these
@@ -179,7 +196,24 @@ def _key_to_str(key: Any, side_hint: str | None) -> str | None:
     # scancode (shouldn't happen on Windows for these three, but fall back
     # to pynput's own name rather than crash).
     name = getattr(key, "name", None)
+    if name in _OS_SYSTEM_KEY_NAMES:
+        return None
     return name
+
+
+async def _wait_listener_running(listener: Any, timeout: float) -> bool:
+    """Poll pynput's public `running` attribute until it's True or `timeout`
+    elapses. NOT `listener.wait()` — that method takes no arguments in
+    pynput's actual API (`AbstractListener.wait(self)`); calling it with a
+    timeout raises `TypeError: wait() takes 1 positional argument but 2 were
+    given`. This was a real bug here, not a hypothetical: it crashed input
+    capture on first real-hardware use."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if getattr(listener, "running", False):
+            return True
+        await asyncio.sleep(0.02)
+    return bool(getattr(listener, "running", False))
 
 
 def _button_to_str(button: Any) -> str:
@@ -367,14 +401,18 @@ class InputCapture:
                 on_scroll=self._on_scroll,
             )
             self._mouse_listener.start()
-            # Both waits are blocking calls (pynput's Listener.wait isn't
-            # asyncio-aware) — run them off the event loop thread, and
-            # concurrently rather than sequentially, so a slow/stuck hook
-            # install doesn't stall the whole loop for up to 6s and delay
-            # every other subsystem's readiness signal from being delivered.
+            # pynput's Listener.wait() takes NO arguments — it blocks
+            # forever on an internal Event with no timeout support (calling
+            # it as `.wait(timeout=3)` raises TypeError: "takes 1 positional
+            # argument but 2 were given", which is exactly the crash this
+            # replaced). Poll the documented public `.running` attribute
+            # instead, so we get a real bounded timeout without depending on
+            # a wait() signature pynput doesn't have. `asyncio.sleep` here
+            # (not a blocking wait) keeps the event loop free for every
+            # other subsystem starting concurrently.
             kb_ready, mouse_ready = await asyncio.gather(
-                asyncio.to_thread(self._kb_listener.wait, 3),
-                asyncio.to_thread(self._mouse_listener.wait, 3),
+                _wait_listener_running(self._kb_listener, timeout=3.0),
+                _wait_listener_running(self._mouse_listener, timeout=3.0),
             )
             if not kb_ready or not mouse_ready:
                 self.last_error = "pynput listener failed to start within 3s"

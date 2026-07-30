@@ -64,3 +64,22 @@ def ffmpeg_exe() -> Path:
             if candidate.exists():
                 return candidate
     return direct
+
+
+def ensure_ffmpeg_on_path() -> None:
+    """Prepend the bundled ffmpeg's directory (same dir as ffmpeg.exe AND
+    ffprobe.exe in the gyan.dev layout) to this process's PATH.
+
+    Real bug this fixes: `app.core.finalize.pipeline` calls straight into
+    the `translator` package (trim.py, video.py, rrd.py), which invokes bare
+    `"ffmpeg"`/`"ffprobe"` — correct for translator's own CLI/dev usage where
+    a system ffmpeg is expected on PATH, but on an end-user Windows machine
+    there usually isn't one; only the copy this app's setup wizard downloads
+    under %LOCALAPPDATA%\\HumynCapture\\ffmpeg\\. Without this, every such
+    call raises `FileNotFoundError: [WinError 2] The system cannot find the
+    file specified` — which is exactly what surfaced during finalize. Safe
+    to call repeatedly; only adds the directory once."""
+    bin_dir = str(ffmpeg_exe().parent)
+    current = os.environ.get("PATH", "")
+    if bin_dir not in current.split(os.pathsep):
+        os.environ["PATH"] = bin_dir + os.pathsep + current

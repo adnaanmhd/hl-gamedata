@@ -190,7 +190,14 @@ class SessionEngine:
 
         recorder = FFmpegRecorder(self._recorder_config)
         self._status("starting_recorder", "Starting capture...", None)
-        old_anchor_monotonic = recorder.start(rect, video_path)
+        # start_async (asyncio.to_thread under the hood), not the plain
+        # synchronous start(): start() now runs the A1 encoder preflight
+        # (up to 3 sequential subprocess calls, up to 10s each) before
+        # launching ffmpeg. Called synchronously, that blocks this whole
+        # coroutine's event loop for the full duration — no status/progress
+        # signal or other subsystem's startup can make progress meanwhile,
+        # which is what "glitching when recording starts" was.
+        old_anchor_monotonic = await recorder.start_async(rect, video_path)
         # From this point, InputCapture/RawMouseCapture/FocusTracker all
         # timestamp relative to `old_anchor_monotonic` — A2's finalize-time
         # correction re-anchors everything to the real first frame later.
@@ -237,7 +244,12 @@ class SessionEngine:
         await focus_tracker.stop()
         await input_capture.stop()
         await raw_mouse.stop()
-        recorder.stop()
+        # Same reasoning as start_async above: stop() can block for up to
+        # MAX_FINALIZE_TIMEOUT_S (120s) waiting on ffmpeg to finish writing
+        # the file. Run it off the event loop thread so drain_task and any
+        # other still-pending coroutine on this loop aren't starved for that
+        # whole window.
+        await recorder.stop_async()
 
         drain_task.cancel()
         try:

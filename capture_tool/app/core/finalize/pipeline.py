@@ -85,6 +85,15 @@ def run_finalize(
     (trim/bin/write are `translate_bundle_v2`; self-check is this function's
     second half).
     """
+    # Real bug found on Windows: translate_bundle_v2/check_session_v2 call
+    # into translator/{trim,video,rrd}.py, which invoke bare "ffmpeg"/
+    # "ffprobe" (correct for translator's own CLI usage, not for this
+    # packaged app). Without the bundled ffmpeg on PATH, every such call
+    # raised `FileNotFoundError: [WinError 2] The system cannot find the
+    # file specified`. See app.core.paths.ensure_ffmpeg_on_path docstring.
+    from app.core.paths import ensure_ffmpeg_on_path
+    ensure_ffmpeg_on_path()
+
     translator_v2 = _load_translator()
 
     # --- A2: apply the anchor correction to the raw events BEFORE binning. ---
