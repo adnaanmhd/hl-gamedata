@@ -37,6 +37,66 @@ straight to a release build without the acceptance protocol in handoff §7.
 | B6 | focus tracking (event-driven) | `focus_tracker.py` | `SetWinEventHook` usage **unverified** (Windows-only API) |
 | C3 | finalize timeout / fragmented mp4 | `ffmpeg_recorder.py` | Timeout-scaling logic **unit-testable in principle**, not covered by a test; remux-repair path **unverified** (needs a real truncated fragmented MP4) |
 
+## ddagrab was never actually usable — wrong detection AND wrong invocation
+
+Found while answering "can we add exclusive-fullscreen support" — checked
+whether `ddagrab` (the A1/C2 fix's preferred capture path, which genuinely
+can capture exclusive fullscreen via DXGI Desktop Duplication) was actually
+working as designed, and it wasn't, for two compounding reasons:
+
+1. `_probe_ddagrab_support` checked `ffmpeg -devices` for the string
+   "ddagrab". **`ddagrab` is an avfilter SOURCE, not an avdevice** — it's
+   listed under `-filters`, never `-devices` (confirmed against ffmpeg's
+   own filter docs). This means detection returned `False` on **every**
+   machine, including ones whose bundled ffmpeg build genuinely supports
+   ddagrab — silently forcing the `gdigrab` fallback (and its C2
+   exclusive-fullscreen black-capture limitation) universally, not just on
+   machines that actually lack it.
+2. Even with detection fixed, the invocation itself (`-f ddagrab -framerate
+   N -i 0`) uses device-style syntax that doesn't correspond to how the
+   filter works at all. The real syntax is `-f lavfi -i "ddagrab=
+   output_idx=0:framerate=N:video_size=WxH:offset_x=X:offset_y=Y"` — cropping
+   is a native parameter of the filter itself, so the separate `crop=`
+   filter this code also added was unnecessary.
+
+Fixed both: `_probe_ddagrab_support` now checks `-filters`; `_build_command`
+builds the correct lavfi filter string. `ddagrab` has been a built-in
+ffmpeg filter (uses only Windows DXGI APIs, no external library) since
+ffmpeg 6.0, and the bundled build here is 8.1.2 — so this machine's ffmpeg
+almost certainly does support it, meaning this bug was likely the entire
+reason gdigrab was being used at all in this project's testing so far, not
+a genuine hardware limitation. **Not yet confirmed with a real recording**
+— need one more test session to see `capture_health.backend: "ddagrab"`
+and confirm it actually captures exclusive fullscreen correctly. Covered by
+4 new tests in `test_ffmpeg_recorder.py` mocking the subprocess/filter
+listing (the detection and command-building logic, not real ffmpeg
+execution, which needs Windows either way).
+
+## Windowed mode at native resolution overflows the monitor edge
+
+Found the moment the user switched Outer Wilds from exclusive Fullscreen to
+Windowed (to fix the black-capture C2 issue) — new failure: `ffmpeg exited
+immediately`, `Capture area (11,45),(3851,2205) extends outside window area
+(-1920,0),(3840,2160)`. Windows adds a title bar (~45px) and border (~11px)
+on top of a window's client area — a game running "windowed" at exactly the
+monitor's native resolution (3840x2160) ends up with its whole window
+(client + decorations) a few pixels taller/wider than the monitor itself.
+`gdigrab`'s `-i desktop` source is the full virtual desktop (which includes
+negative coordinates here — a second monitor sits left of the primary), and
+it hard-fails rather than clip when the requested capture region extends
+past it.
+
+Fixed by clamping the capture rect to the real virtual desktop bounds
+(`GetSystemMetrics(SM_XVIRTUALSCREEN/SM_YVIRTUALSCREEN/SM_CXVIRTUALSCREEN/
+SM_CYVIRTUALSCREEN)`) before handing it to ffmpeg, in
+`SessionEngine._get_window_screen_rect`. The clamping math itself
+(`_clamp_rect_to_bounds`) is a pure function taking bounds as plain
+integers, specifically so it's unit-testable without any Win32 call —
+covered by 4 tests in `test_session_engine.py`, including the exact
+real numbers from this failure (a window overflowing a monitor's right edge
+when a second monitor sits to its left, which is why the virtual desktop's
+left edge is negative here).
+
 ## Caught before shipping: `\r` vs `\n` would have undermined the A2 fix above
 
 Self-review, not user testing, caught this one — worth being explicit about
@@ -372,7 +432,7 @@ self-check at all). Both are commented in `main_window.py` where they occur.
 
 ## Verified vs. unverified — what "verified" means here
 
-**70 pytest tests, all passing** (`capture_tool/tests/`), on macOS with
+**78 pytest tests, all passing** (`capture_tool/tests/`), on macOS with
 `pynput`/`PySide6`/`psutil`/`numpy`/`opencv-python-headless`/`rerun-sdk`
 installed:
 

@@ -36,9 +36,15 @@ surface, so exclusive-fullscreen games (which bypass the compositor for
 flip-model bypasses composition can, in principle, still black out, so the
 finalize-stage black-frame heuristic (see `app/core/finalize/blackframe.py`,
 run from `SessionEngine.run`'s self-check) is the actual safety net, not this
-module. This module also now crops to the game's client rect via a `crop`
-filter (ddagrab always grabs a full output) instead of grabbing an arbitrary
-desktop offset/size the way gdigrab could.
+module. `ddagrab` crops to the game's client rect natively via its own
+`video_size`/`offset_x`/`offset_y` params (real bug fixed here:
+`_probe_ddagrab_support` used to check `-devices`, but `ddagrab` is a lavfi
+FILTER, listed under `-filters` — this meant ddagrab was never actually
+detected/used on ANY machine, always silently falling back to gdigrab even
+when the bundled ffmpeg build genuinely supported it; the invocation itself
+was also using device-style syntax, `-f ddagrab -i 0`, instead of the real
+`-f lavfi -i "ddagrab=output_idx=0:framerate=...:video_size=...:offset_x=
+...:offset_y=..."`).
 
 C3 (5s kill() truncates the MP4): `stop()`'s timeout now scales with
 recording length (`_finalize_timeout_s`) instead of a flat 5s, output uses
@@ -164,7 +170,14 @@ def _detect_hw_encoder() -> str:
 
 
 def _probe_ddagrab_support() -> bool:
-    listing = _run_ffmpeg_query(["-hide_banner", "-devices"])
+    """Real bug found here: `ddagrab` is an avfilter SOURCE (invoked as
+    `-f lavfi -i "ddagrab=..."`), not an avdevice — ffmpeg lists it under
+    `-filters`, never under `-devices`. Checking `-devices` (the original
+    code here) meant this returned False on EVERY ffmpeg build, including
+    ones that genuinely support ddagrab, silently forcing the `gdigrab`
+    fallback — and its C2 exclusive-fullscreen black-capture limitation —
+    on every machine, not just ones that actually lack it."""
+    listing = _run_ffmpeg_query(["-hide_banner", "-filters"])
     return "ddagrab" in listing
 
 
@@ -301,8 +314,18 @@ class FFmpegRecorder:
         # with ffprobe and re-anchor input timestamps to it.
         wallclock_ts = ["-use_wallclock_as_timestamps", "1"]
         if use_ddagrab:
-            cmd += ["-f", "ddagrab", "-framerate", str(cfg.fps), *wallclock_ts, "-i", "0"]
-            vf = f"crop={w}:{h}:{x}:{y},hwdownload,format=bgra"
+            # Real bug found here too: ddagrab was invoked as a device
+            # (`-f ddagrab -i 0`), which isn't how it works at all — it's a
+            # lavfi filter, invoked as `-f lavfi -i "ddagrab=..."`, with
+            # output_idx/framerate/video_size/offset_x/offset_y all as
+            # named params INSIDE that one filter string (no separate crop
+            # filter needed — ddagrab crops natively). It exclusively
+            # returns D3D11 hardware frames, so hwdownload+format is still
+            # required before any software filter (scale/pad below).
+            ddagrab = (f"ddagrab=output_idx=0:framerate={cfg.fps}:"
+                       f"video_size={w}x{h}:offset_x={x}:offset_y={y}")
+            cmd += ["-f", "lavfi", *wallclock_ts, "-i", ddagrab]
+            vf = "hwdownload,format=bgra"
         else:
             # Fallback path — same limitations as the original tool (issue
             # C2 applies): a desktop GDI surface, not the composited output.

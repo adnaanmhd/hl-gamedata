@@ -1,6 +1,48 @@
 import json
 
-from app.core.session_engine import SessionEngine, _slugify
+from app.core.session_engine import SessionEngine, _clamp_rect_to_bounds, _slugify
+
+
+def test_clamp_rect_shrinks_window_that_overflows_monitor_edge():
+    """Real bug found on Windows: a windowed-mode game running at exactly
+    the monitor's native resolution has its client area pushed a few pixels
+    past the monitor edge by the title bar/border. Exact numbers from a
+    real ffmpeg failure — its error message reports the virtual desktop as
+    two CORNER POINTS, (-1920,0)-(3840,2160): a second monitor (width 1920)
+    sits left of the primary, so the true virtual-desktop origin/size is
+    vx=-1920, vw=3840-(-1920)=5760. Client rect (11, 45, 3840, 2160) then
+    overflows the primary monitor's right edge (at x=3840) by exactly 11px
+    — gdigrab hard-failed instead of clipping that sliver off."""
+    x, y, w, h = _clamp_rect_to_bounds(
+        x=11, y=45, w=3840, h=2160, vx=-1920, vy=0, vw=5760, vh=2160)
+    assert (x, y) == (11, 45)
+    assert (w, h) == (3829, 2115)  # shrunk by exactly the 11px/45px overflow
+    # The clamped rect must never extend past the real desktop bounds.
+    assert x + w <= -1920 + 5760
+    assert y + h <= 0 + 2160
+
+
+def test_clamp_rect_is_noop_when_fully_inside_bounds():
+    x, y, w, h = _clamp_rect_to_bounds(
+        x=100, y=100, w=800, h=600, vx=0, vy=0, vw=1920, vh=1080)
+    assert (x, y, w, h) == (100, 100, 800, 600)
+
+
+def test_clamp_rect_handles_window_left_of_primary_monitor():
+    """A window mostly on a monitor placed left of the primary (negative
+    x) must clamp against the true virtual-desktop left edge, not 0."""
+    x, y, w, h = _clamp_rect_to_bounds(
+        x=-1920, y=0, w=2000, h=1080, vx=-1920, vy=0, vw=3840, vh=2160)
+    assert (x, y, w, h) == (-1920, 0, 2000, 1080)  # fits, no clamp needed
+
+
+def test_clamp_rect_never_returns_negative_size():
+    """A window entirely outside the virtual desktop must clamp to a zero
+    (not negative) size — the caller treats <= 0 as a hard failure, never
+    a crash from a negative width reaching ffmpeg."""
+    x, y, w, h = _clamp_rect_to_bounds(
+        x=5000, y=5000, w=800, h=600, vx=0, vy=0, vw=1920, vh=1080)
+    assert w == 0 and h == 0
 
 
 def test_slugify_basic():

@@ -100,6 +100,40 @@ class SessionResult:
     qa_issues: list[str] = field(default_factory=list)
 
 
+def _clamp_rect_to_bounds(
+    x: int, y: int, w: int, h: int, vx: int, vy: int, vw: int, vh: int,
+) -> tuple[int, int, int, int]:
+    """Clamp screen rect (x, y, w, h) to lie within bounds (vx, vy, vw, vh).
+    Pure function (no Win32 calls) so it's unit-testable without Windows —
+    see SessionEngine._get_window_screen_rect for why this is needed (a
+    window's title bar/border can push it a few pixels past the monitor
+    edge even though its client area size is otherwise valid)."""
+    x2 = min(x + w, vx + vw)
+    y2 = min(y + h, vy + vh)
+    x = max(x, vx)
+    y = max(y, vy)
+    return x, y, max(0, x2 - x), max(0, y2 - y)
+
+
+def _virtual_desktop_bounds() -> tuple[int, int, int, int]:
+    """(x, y, width, height) of the full virtual desktop — spans every
+    monitor, so it can include negative coordinates for a monitor placed
+    left of or above the primary one. This is gdigrab's actual capture
+    source ("-i desktop"), not just the primary monitor's 0,0 origin."""
+    if sys.platform != "win32":
+        return (0, 0, 1920, 1080)
+    import ctypes
+    user32 = ctypes.windll.user32
+    SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN = 76, 77
+    SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN = 78, 79
+    return (
+        user32.GetSystemMetrics(SM_XVIRTUALSCREEN),
+        user32.GetSystemMetrics(SM_YVIRTUALSCREEN),
+        user32.GetSystemMetrics(SM_CXVIRTUALSCREEN),
+        user32.GetSystemMetrics(SM_CYVIRTUALSCREEN),
+    )
+
+
 def _slugify(text: str) -> str:
     """Make a filesystem-safe short slug. Used in session_id."""
     cleaned = re.sub(r"[^a-zA-Z0-9]+", "_", text.strip().lower()).strip("_")
@@ -494,14 +528,35 @@ class SessionEngine:
             raise OSError(f"ClientToScreen failed: Win32 error {ctypes.get_last_error()}")
         w = rect.right - rect.left
         h = rect.bottom - rect.top
-        w -= w % 2
-        h -= h % 2
         if w <= 0 or h <= 0:
             raise RuntimeError(
                 f"game window client area is {w}x{h} (expected a real visible "
                 f"size) — make sure the game window is open, not minimized, "
                 f"and fully rendered before starting the recording")
-        return (top_left.x, top_left.y, w, h)
+
+        # Real bug found on Windows: a window running "windowed" at exactly
+        # the monitor's native resolution has its CLIENT area sized to that
+        # full resolution, but Windows adds a title bar + border on top of
+        # that — pushing the whole window a few pixels past the monitor's
+        # right/bottom edge (observed: client area (11,45)-(3851,2205) vs.
+        # this monitor's real (0,0)-(3840,2160), because the title bar is
+        # ~45px and the border ~11px). gdigrab's "-i desktop" source is the
+        # full virtual desktop (which can include negative coordinates from
+        # a second monitor to the left, as it does here), and it hard-fails
+        # ("Capture area ... extends outside window area ...") rather than
+        # clip — so an oversized-by-a-few-pixels window crashed the whole
+        # recording instead of just losing a sliver of the window's edge.
+        # Clamp to the real virtual desktop bounds so this can't happen.
+        x, y, w, h = _clamp_rect_to_bounds(
+            top_left.x, top_left.y, w, h, *_virtual_desktop_bounds())
+        w -= w % 2
+        h -= h % 2
+        if w <= 0 or h <= 0:
+            raise RuntimeError(
+                f"game window client area is {w}x{h} after clamping to the "
+                f"visible desktop — the window may be almost entirely "
+                f"off-screen")
+        return (x, y, w, h)
 
     def _merge_inputs(self, queue_events: list[dict], raw_mouse_path: Path,
                        out_path: Path) -> tuple[int, dict[str, int]]:

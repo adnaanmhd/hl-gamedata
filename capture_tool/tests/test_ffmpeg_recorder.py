@@ -14,6 +14,57 @@ from unittest.mock import patch
 from app.core import ffmpeg_recorder as fr
 
 
+class TestDdagrabDetectionAndInvocation:
+    """Regression coverage for two real bugs found together: ddagrab is an
+    avfilter SOURCE (`-f lavfi -i "ddagrab=..."`), not an avdevice.
+
+    1. `_probe_ddagrab_support` checked `-devices` (where gdigrab lives) —
+       ddagrab is never listed there even on ffmpeg builds that fully
+       support it; it's listed under `-filters`. This meant ddagrab was
+       NEVER detected/used on any machine, silently forcing the `gdigrab`
+       fallback (and its C2 exclusive-fullscreen black-capture limitation)
+       even where the bundled ffmpeg build genuinely supported ddagrab.
+    2. `_build_command` invoked it as `-f ddagrab -i 0` (device syntax) —
+       not how it works at all even if detection were fixed alone.
+    """
+
+    def test_probe_checks_filters_not_devices(self):
+        with patch.object(fr, "_run_ffmpeg_query") as query:
+            query.return_value = "ddagrab  V..... DXGI Desktop Duplication"
+            assert fr._probe_ddagrab_support() is True
+        query.assert_called_once_with(["-hide_banner", "-filters"])
+
+    def test_probe_false_when_filter_not_listed(self):
+        with patch.object(fr, "_run_ffmpeg_query", return_value="gdigrab  V....."):
+            assert fr._probe_ddagrab_support() is False
+
+    def test_build_command_uses_lavfi_filter_syntax_when_ddagrab_available(self):
+        recorder = fr.FFmpegRecorder()
+        with patch.object(fr, "_probe_ddagrab_support", return_value=True), \
+             patch.object(fr, "_detect_hw_encoder", return_value="libx264"):
+            cmd = recorder._build_command((10, 20, 800, 600), "out.mp4")
+        # Must NOT use the old, wrong device-style invocation.
+        assert "ddagrab" not in cmd or "-f" not in cmd or \
+            not (cmd[cmd.index("-f") + 1] == "ddagrab")
+        assert "lavfi" in cmd
+        i = cmd.index("lavfi")
+        assert cmd[i - 1] == "-f"
+        input_arg = cmd[cmd.index("-i") + 1]
+        assert input_arg.startswith("ddagrab=")
+        assert "video_size=800x600" in input_arg
+        assert "offset_x=10" in input_arg
+        assert "offset_y=20" in input_arg
+        # No separate crop filter — ddagrab crops natively via the params above.
+        assert "crop=" not in cmd[cmd.index("-vf") + 1]
+
+    def test_build_command_falls_back_to_gdigrab_when_ddagrab_unavailable(self):
+        recorder = fr.FFmpegRecorder()
+        with patch.object(fr, "_probe_ddagrab_support", return_value=False), \
+             patch.object(fr, "_detect_hw_encoder", return_value="libx264"):
+            cmd = recorder._build_command((10, 20, 800, 600), "out.mp4")
+        assert cmd[cmd.index("-f") + 1] == "gdigrab"
+
+
 def test_detect_hw_encoder_picks_first_that_lists_and_opens():
     with patch.object(fr, "_run_ffmpeg_query", return_value="h264_nvenc h264_qsv"), \
          patch.object(fr, "_encoder_opens", return_value=True) as opens:
