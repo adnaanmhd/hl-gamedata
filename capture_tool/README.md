@@ -37,6 +37,46 @@ straight to a release build without the acceptance protocol in handoff §7.
 | B6 | focus tracking (event-driven) | `focus_tracker.py` | `SetWinEventHook` usage **unverified** (Windows-only API) |
 | C3 | finalize timeout / fragmented mp4 | `ffmpeg_recorder.py` | Timeout-scaling logic **unit-testable in principle**, not covered by a test; remux-repair path **unverified** (needs a real truncated fragmented MP4) |
 
+## UI reconstruction pass (prompted by comparing against the real shipped exe)
+
+`app/ui/main_window.py`, `setup_window.py`, `async_runner.py`, and
+`style.py` all had class bodies that failed to decompile entirely (pynput's
+async/closure-heavy code isn't unique here — PySide6 GUI code hit the same
+`pycdc` gaps). The versions previously in this repo were written from
+scratch against only each module's docstring, and — once actually compared
+side-by-side against a real recording of the shipped exe — visibly didn't
+match: different window size, no status bar, no live process-list refresh,
+no recording timer, wrong color palette (blue accent instead of the real
+orange), no card/section-title/primary/danger style classes, different
+method and attribute names throughout, and a completely different `_on_done`
+flow in the setup wizard (real app has separate `done_signal`/`error_signal`
+paths, not one combined handler).
+
+All four files are now reconstructed from `pycdas` bytecode disassembly of
+the shipped exe (Names/Constants tables + manual opcode trace per method),
+which — unlike `pycdc`'s failed decompilation — recovers the real structure
+exactly. Verified by rendering both `MainWindow` states and `SetupWizard`
+off-screen (`QT_QPA_PLATFORM=offscreen`) and inspecting the actual pixels,
+not just that the code imports.
+
+Two real integration bugs surfaced *by doing this comparison*, independent
+of anything Windows-specific:
+- `session_engine.py` emitted a `"recording"` stage name; the real UI's
+  timer-start logic checks for `"playing"` — these never decompiled either,
+  so this string was invented when session_engine.py was first written and
+  never matched what the UI (once its real behavior was known) expects.
+  Fixed to `"playing"`.
+- `process_watcher.list_likely_games()` returned `list[str]`; the real
+  `_refresh_running_games` indexes into each item as `proc['name']`/
+  `proc['pid']` and uses the exe name as the combo box's itemData (not the
+  display label, which includes the PID). Fixed to return `list[dict]`.
+
+Kept as deliberate deviations from the original (not gaps): the game field
+is a dropdown (D1 fix — the original's free-text `QLineEdit` here is
+literally the bug D1 exists to fix), and the session-finished dialog now
+includes QA status/self-check failures (E2 fix — the original had no
+self-check at all). Both are commented in `main_window.py` where they occur.
+
 ## Real-hardware findings (from actual Windows testing)
 
 - **`_get_window_screen_rect` produced a 0x0 capture rect.** ffmpeg failed

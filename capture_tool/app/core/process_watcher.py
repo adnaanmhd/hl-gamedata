@@ -37,17 +37,22 @@ def find_pid_by_exe(exe_name: str) -> int | None:
     return candidates[0]["pid"]
 
 
-def list_likely_games(min_uptime_sec: float = 5.0) -> list[str]:
-    """Heuristic list of running .exe basenames that might be the game.
+def list_likely_games(min_uptime_sec: float = 5.0) -> list[dict]:
+    """Heuristic list of running .exe processes that might be the game.
 
     Used by the GUI to populate a 'Pick the game' dropdown so the user
     doesn't have to type the exe name. We exclude well-known system /
     launcher / capture-tool-itself processes and require a minimum uptime
     so freshly-spawned helper processes (splash screens, updaters) don't
     flash through the list.
+
+    Returns dicts with `name` (exe basename) and `pid`, matching the real
+    app's `MainWindow._refresh_running_games` — it displays `"{name}  (PID
+    {pid})"` and stores `name` as the combo box's itemData (via
+    `addItem(label, proc['name'])`) — not a bare `list[str]`.
     """
     now = time.time()
-    seen: dict[str, float] = {}
+    seen: dict[str, dict] = {}
     for proc in psutil.process_iter(["pid", "name", "create_time"]):
         try:
             name = proc.info.get("name") or ""
@@ -62,8 +67,10 @@ def list_likely_games(min_uptime_sec: float = 5.0) -> list[str]:
             continue
         # Keep the earliest-seen create_time per name (stable ordering if a
         # game relaunches a same-named child during the scan window).
-        seen.setdefault(name, create_time)
-    return sorted(seen, key=lambda n: seen[n])
+        if name not in seen or create_time < seen[name]["create_time"]:
+            seen[name] = {"name": name, "pid": proc.info.get("pid"),
+                          "create_time": create_time}
+    return sorted(seen.values(), key=lambda p: p["create_time"])
 
 
 async def wait_for_exit(pid: int, poll_interval: float = 1.0) -> None:

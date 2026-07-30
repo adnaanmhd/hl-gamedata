@@ -82,6 +82,8 @@ class SessionMetadata:
 class SessionResult:
     session_id: str
     out_dir: Path
+    duration_sec: float
+    input_event_count: int
     ready_for_upload: bool
     qa_status: str
     self_check_failures: list[str] = field(default_factory=list)
@@ -224,7 +226,13 @@ class SessionEngine:
             log.error("subsystem '%s' failed to start: %s", issue.name, issue.error)
             self._status("subsystem_warning", f"{issue.name}: {issue.error}", None)
 
-        self._status("recording", "Recording...", None)
+        # Stage name "playing" (not "recording") matches the real app's
+        # contract with the UI — MainWindow._on_status_update starts the
+        # elapsed-time timer on this exact string. run()'s body never
+        # decompiled at all (bytecode-incomplete), so this stage name was
+        # invented when this file was first reconstructed; recovered here
+        # from main_window.py's disassembly instead.
+        self._status("playing", "Recording...", None)
         started_utc = datetime.now(timezone.utc)
 
         drain_task = asyncio.create_task(self._drain_queue(input_capture))
@@ -304,6 +312,8 @@ class SessionEngine:
         return SessionResult(
             session_id=session_id,
             out_dir=finalize_result.out_dir,
+            duration_sec=duration_sec,
+            input_event_count=events_total,
             ready_for_upload=finalize_result.ready_for_upload,
             qa_status=finalize_result.qa_status,
             self_check_failures=finalize_result.self_check_failures,

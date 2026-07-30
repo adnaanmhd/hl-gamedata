@@ -3,71 +3,74 @@ Qt + asyncio integration. We run an asyncio loop on a worker thread and
 marshal results back to the GUI thread via Qt signals. PySide6 has
 QtAsyncio in newer versions, but for portability we use a small custom
 bridge that works on PySide6 6.5+.
+
+Restored to match the shipped app almost exactly (this class's bytecode
+decompiled cleanly enough to read the real design directly) — the version
+previously here was a from-scratch guess (token-keyed signals, a separate
+`progress` signal owned by AsyncRunner) written when this repo had no
+decompiled source to check against. The real design is simpler: there is
+only ever one recording at a time, so no token is needed, and per-stage
+status doesn't go through AsyncRunner at all — MainWindow owns its own
+`status_signal` and passes a closure over it directly as SessionEngine's
+`status_fn` (see main_window.py).
 """
 from __future__ import annotations
 
 import asyncio
+import logging
 import threading
-from typing import Any, Callable, Coroutine
+from typing import Coroutine
 
 from PySide6.QtCore import QObject, Signal
 
+log = logging.getLogger("app.async_runner")
+
 
 class AsyncRunner(QObject):
-    """Owns a background asyncio event loop; `run()` schedules a coroutine
-    on it and emits `finished`/`failed` back on the Qt thread that owns this
-    object (Signal emission across threads is queued by Qt automatically)."""
+    """Runs coroutines on a background thread with its own asyncio loop.
+    Emits `finished(result)` or `failed(exception_str)` on the GUI thread
+    when the coroutine completes."""
 
-    finished = Signal(object, object)  # (token, result)
-    failed = Signal(object, Exception)  # (token, exception)
-    progress = Signal(object, str, str, object)  # (token, stage, detail, progress_pct)
+    finished = Signal(object)
+    failed = Signal(str)
 
-    def __init__(self, parent: QObject | None = None) -> None:
-        super().__init__(parent)
+    def __init__(self) -> None:
+        super().__init__()
         self._loop: asyncio.AbstractEventLoop | None = None
         self._thread: threading.Thread | None = None
+        self._ready = threading.Event()
 
     def start(self) -> None:
-        if self._thread is not None:
+        if self._thread is not None and self._thread.is_alive():
             return
-        ready = threading.Event()
-
-        def _run_loop():
-            self._loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(self._loop)
-            ready.set()
-            self._loop.run_forever()
-
-        self._thread = threading.Thread(target=_run_loop, name="AsyncRunner", daemon=True)
+        self._thread = threading.Thread(target=self._run_loop, daemon=True)
         self._thread.start()
-        ready.wait()
+        self._ready.wait(timeout=5)
+
+    def _run_loop(self) -> None:
+        self._loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(self._loop)
+        self._ready.set()
+        self._loop.run_forever()
 
     def stop(self) -> None:
-        if self._loop is not None:
+        if self._loop is not None and self._loop.is_running():
             self._loop.call_soon_threadsafe(self._loop.stop)
         if self._thread is not None:
-            self._thread.join(timeout=5)
-        self._thread = None
-        self._loop = None
+            self._thread.join(timeout=3)
 
-    def status_callback(self, token: Any) -> Callable[[str, str, "int | None"], None]:
-        """Returns a plain-function status_fn (matching SessionEngine's
-        StatusFn signature) that marshals onto this runner's owning thread
-        via the `progress` signal."""
-        def _fn(stage: str, detail: str, pct: int | None = None) -> None:
-            self.progress.emit(token, stage, detail, pct)
-        return _fn
-
-    def run(self, token: Any, coro: Coroutine) -> None:
+    def submit(self, coro: Coroutine) -> None:
         if self._loop is None:
-            self.start()
+            raise RuntimeError("AsyncRunner not started")
 
-        async def _wrapped():
+        def _on_done(f: "asyncio.Future") -> None:
             try:
-                result = await coro
+                result = f.result()
             except Exception as e:  # noqa: BLE001 — surfaced to the GUI, not swallowed
-                self.failed.emit(token, e)
+                log.exception("Async task failed: %s", e)
+                self.failed.emit(f"{type(e).__name__}: {e}")
             else:
-                self.finished.emit(token, result)
+                self.finished.emit(result)
 
-        asyncio.run_coroutine_threadsafe(_wrapped(), self._loop)
+        future = asyncio.run_coroutine_threadsafe(coro, self._loop)
+        future.add_done_callback(_on_done)
