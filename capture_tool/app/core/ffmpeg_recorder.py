@@ -115,14 +115,42 @@ def _run_ffmpeg_query(args: list[str], timeout: float = 5.0) -> str:
         return ""
 
 
+def _encoder_opens(encoder: str) -> bool:
+    """Actually try to open `encoder`, not just check that ffmpeg lists its
+    name. A hardware encoder can be compiled into ffmpeg (and so appear in
+    `-encoders`) while still failing to *open* — e.g. an NVENC build that
+    requires a newer driver API than the installed GPU driver provides
+    ("Driver does not support the required nvenc API version"). That failure
+    only surfaces when the encoder is actually initialized, so we run a
+    trivial synthetic encode (a handful of tiny lavfi-generated frames into
+    `-f null -`, nothing touches disk or the real capture) and check the
+    real exit code."""
+    cmd = ["-hide_banner", "-loglevel", "error", "-f", "lavfi",
+           "-i", "color=size=64x64:rate=5:duration=0.2",
+           "-pix_fmt", "yuv420p", "-c:v", encoder, "-f", "null", "-"]
+    creationflags = CREATE_NO_WINDOW if sys.platform == "win32" else 0
+    try:
+        result = subprocess.run([str(ffmpeg_exe()), *cmd], capture_output=True,
+                                 timeout=10, creationflags=creationflags)
+    except (subprocess.SubprocessError, OSError):
+        return False
+    if result.returncode != 0:
+        log.warning("encoder preflight failed for %s: %s", encoder,
+                    (result.stderr or b"").decode("utf-8", errors="replace").strip()[-500:])
+        return False
+    return True
+
+
 def _detect_hw_encoder() -> str:
-    """A1: prefer a hardware encoder; fall back to libx264 only if none of
-    the bundled ffmpeg's encoders list a usable GPU path. Order reflects
-    typical availability, not quality — any HW encoder beats software x264
-    for our CPU-contention problem."""
+    """A1: prefer a hardware encoder; fall back to libx264 if none of the
+    bundled ffmpeg's *listed* encoders actually *open* on this machine.
+    Order reflects typical availability, not quality — any HW encoder beats
+    software x264 for our CPU-contention problem, but a HW encoder that
+    fails to open is worse than not trying it: it kills the whole session
+    (see `_encoder_opens` docstring), so we verify before committing."""
     listing = _run_ffmpeg_query(["-hide_banner", "-encoders"])
     for enc in ("h264_nvenc", "h264_qsv", "h264_amf"):
-        if enc in listing:
+        if enc in listing and _encoder_opens(enc):
             return enc
     return "libx264"
 

@@ -29,7 +29,7 @@ straight to a release build without the acceptance protocol in handoff §7.
 | B1 | raw mouse silent failure | `raw_mouse.py`, `session_engine._merge_inputs` | Fallback/retry logic **unit-verified**. Win32 Raw Input registration itself **unverified** (no Windows) |
 | B2/E1/E2 | health checks, self-check gate | `health.py`, `session_engine.py` | **Unit-verified** (12 tests) |
 | D1 | canonical game_title | `games.py` | **Unit-verified** |
-| A1 | capture path (ddagrab/HW encoder) | `ffmpeg_recorder.py` | **Unverified** — no Windows GPU/ddagrab build to test against |
+| A1 | capture path (ddagrab/HW encoder) | `ffmpeg_recorder.py` | **Real-hardware bug found and fixed** (see below) — otherwise unverified end-to-end (no ddagrab capture actually exercised yet) |
 | A3/D2 | real fps + health metadata | `ffprobe.py`, `session_engine.py` | Parsing logic **unit-verified** |
 | C1 | WASAPI loopback audio | `ffmpeg_recorder.py` | **Unverified**, and per the handoff doc, needs Odyssey confirmation before enabling (`RecorderConfig.audio_enabled` defaults `False`) |
 | C2 | black-frame / exclusive-fullscreen | `finalize/blackframe.py` | ffmpeg `blackdetect` wiring **smoke-tested** manually; not tested against a real exclusive-fullscreen title |
@@ -37,9 +37,26 @@ straight to a release build without the acceptance protocol in handoff §7.
 | B6 | focus tracking (event-driven) | `focus_tracker.py` | `SetWinEventHook` usage **unverified** (Windows-only API) |
 | C3 | finalize timeout / fragmented mp4 | `ffmpeg_recorder.py` | Timeout-scaling logic **unit-testable in principle**, not covered by a test; remux-repair path **unverified** (needs a real truncated fragmented MP4) |
 
+## Real-hardware findings (from actual Windows testing)
+
+- **A1, encoder-open vs. encoder-listed.** First real recording on a Windows
+  box with an older NVIDIA driver failed the whole session: `h264_nvenc` was
+  listed in `ffmpeg -encoders` (compiled in) but failed to *open*
+  ("Driver does not support the required nvenc API version. Required: 13.1
+  Found: 12.2"), and `_detect_hw_encoder`'s original name-string check had no
+  way to know that ahead of time. Fixed in `ffmpeg_recorder.py`:
+  `_encoder_opens()` now runs a real preflight encode (tiny synthetic lavfi
+  input through the candidate encoder to `-f null -`) before committing to
+  it, falling through `h264_nvenc -> h264_qsv -> h264_amf -> libx264` on the
+  first one that actually opens. Covered by
+  `tests/test_ffmpeg_recorder.py` (4 tests, mocking the subprocess calls).
+  This is the first defect in this package to get feedback from a real
+  machine — treat every other "unverified" row above as *equally* likely to
+  have a gap like this until it's actually run.
+
 ## Verified vs. unverified — what "verified" means here
 
-**42 pytest tests, all passing** (`capture_tool/tests/`), on macOS with
+**46 pytest tests, all passing** (`capture_tool/tests/`), on macOS with
 `pynput`/`PySide6`/`psutil`/`numpy`/`opencv-python-headless`/`rerun-sdk`
 installed:
 
