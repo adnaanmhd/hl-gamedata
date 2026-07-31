@@ -1,62 +1,40 @@
 // HumynCapture camera-data bridge — BepInEx plugin.
 //
-// *** UNVERIFIED — written and reviewed for correctness, NEVER compiled or
-// run against a real Unity/BepInEx toolchain (none available in this
-// environment: no Windows, no Unity, no .NET/Mono SDK). Treat this the same
-// way as every other "best-effort, clearly marked unverified" fix in
-// capture_tool/README.md — it needs a real build + real BepInEx injection
-// test on the actual Kamla.exe (confirmed Mono build, see the injection
-// diagnostic already run) before it can be trusted. ***
+// Confirmed on real hardware: BepInEx injection + pid-based handshake work
+// (see LogOutput.log from a real Outer Wilds session — plugin loaded,
+// opened camera_bridge/<pid>.jsonl at the expected path). The bug found on
+// that same run: the file stayed at 0 bytes. ResolveCamera() was
+// hard-excluding any camera with a non-null `targetTexture`, meant to skip
+// UI/render-to-texture utility cameras — but Outer Wilds (Unity 2019.4,
+// likely routing its real gameplay camera through a render texture for its
+// post-processing/space-lighting effects) had ZERO cameras that passed that
+// filter at all. No fallback found -> ResolveCamera() returned null every
+// frame -> LateUpdate returned immediately -> nothing written. This also
+// explains why LogOutput.log stayed completely silent: the "using active
+// screen camera" warning only fires when a fallback IS found.
 //
-// WHY THIS EXISTS
-// ----------------
-// HumynCapture (the separate Python capture tool) only ever sees the game's
-// composited screen output + OS-level mouse/keyboard — it has NO way to read
-// the game engine's actual camera transform. Every delivery's frames.csv
-// camera columns (c2w_m00..m33, camera_fx/fy/cx/cy, distortion coefficients)
-// have been 100% empty for every session checked so far, for exactly this
-// reason — the data was never captured, not lost or corrupted.
+// Fix: treat targetTexture as a lower-priority signal, not a hard
+// exclusion — prefer a normal screen-rendering camera, but accept a
+// render-texture camera rather than nothing. Also logs once if truly zero
+// candidates exist, instead of failing silently.
 //
-// This plugin runs INSIDE the game process (injected via BepInEx, since we
-// only have the downloaded .exe, not the Unity project source — see the
-// Mono/IL2CPP diagnostic already run against Kamla.exe) and is the only
-// piece of this whole pipeline that can actually read Camera.main's real
-// transform. It does exactly one job: sample Camera.main every frame and
-// write it to a file HumynCapture can read AFTER the game closes.
+// WHY THIS EXISTS: HumynCapture only sees screen pixels + OS input, never
+// the game engine's real camera. This plugin runs inside the game process
+// (via BepInEx) and is the only piece that can read Camera.main's real
+// transform, writing it to a file HumynCapture reads after the game closes.
 //
-// WHY THIS IS GAME-AGNOSTIC (the "build it modularly" requirement)
-// ------------------------------------------------------------------
-// Everything below calls only Unity's own public Camera/Transform API —
-// nothing here references Kamla by name or by any game-specific class. The
-// exact same compiled DLL should work, unmodified, for any OTHER Mono-build
-// Unity game (drop the same .dll into that game's BepInEx/plugins folder).
-// Only the INJECTION mechanism (BepInEx 5.x for Mono vs. BepInEx 6.x/
-// Il2CppInterop for IL2CPP) needs to vary per title — see
-// unity_plugin/README.md's per-title checklist. This plugin's own code
-// never needs to change for a new Mono Unity title.
+// GAME-AGNOSTIC: only calls Unity's public Camera/Transform API — the same
+// compiled DLL works for any Mono-build Unity title; only the injection
+// setup (BepInEx 5.x Mono vs 6.x IL2CPP) varies per title.
 //
-// WHERE THE OUTPUT GOES AND WHY
-// ------------------------------
-// Writes to `%LOCALAPPDATA%\HumynCapture\camera_bridge\<pid>.jsonl`, keyed
-// by THIS PROCESS'S OWN pid. HumynCapture's own metadata.json already
-// records `game.pid_at_capture` for every session (see
-// app/core/session_engine.py) — so the Python-side finalize step
-// (app/core/finalize/camera_bridge.py) can find this exact file after the
-// session ends just by reading that same pid back out of its own metadata,
-// with zero coordination needed between the two processes while the game
-// is actually running (no shared memory, no sockets, no env var handshake —
-// HumynCapture attaches to an ALREADY-RUNNING game process per
-// process_watcher.py, it doesn't launch it, so it can't hand this plugin
-// anything at startup time).
+// HANDOFF: writes to `%LOCALAPPDATA%\HumynCapture\camera_bridge\<pid>.jsonl`,
+// keyed by this process's own pid — HumynCapture already records
+// `game.pid_at_capture` in metadata.json, so no other coordination is
+// needed (HumynCapture attaches to an already-running game, it doesn't
+// launch it).
 //
-// COORDINATE CONVENTION
-// ----------------------
-// Unity's own convention (left-handed, X-right, Y-up, Z-forward) already
-// matches the client's stated spec ("Top down view game demands for data"
-// §4: "left-handed coordinate system... Right-x, Up-y, Front-z") — logged
-// verbatim here with NO axis conversion. The Python-side bridge is where
-// any camera-to-world MATRIX layout conversion happens, not here — this
-// file's only job is to get the raw numbers out of the process alive.
+// COORDINATES: logged verbatim in Unity's own left-handed X-right/Y-up/
+// Z-forward convention, matching the client's spec — no axis conversion.
 using System;
 using System.Globalization;
 using System.IO;
@@ -70,10 +48,14 @@ namespace HumynCapture.CameraLogger
     {
         public const string PluginGuid = "com.humynlabs.cameralogger";
         public const string PluginName = "HumynCapture Camera Logger";
-        public const string PluginVersion = "1.0.0";
+        public const string PluginVersion = "1.0.1";
 
         private StreamWriter _writer;
         private long _frameIndex;
+        private Camera _fallbackCamera;
+        private Camera[] _cameraBuffer = new Camera[8];
+        private bool _loggedFallbackCamera;
+        private bool _loggedNoCamera;
 
         private void Awake()
         {
@@ -85,17 +67,11 @@ namespace HumynCapture.CameraLogger
                 string dir = Path.Combine(baseDir, "HumynCapture", "camera_bridge");
                 Directory.CreateDirectory(dir);
                 string path = Path.Combine(dir, pid + ".jsonl");
-                // append:false — a stale file from a crashed previous run of
-                // the SAME pid (unlikely but not impossible on Windows pid
-                // reuse across a short window) must never silently blend
-                // with this session's data.
                 _writer = new StreamWriter(path, false) { AutoFlush = true };
                 Logger.LogInfo("[CameraLogger] pid=" + pid + " writing to " + path);
             }
             catch (Exception e)
             {
-                // A logging failure must never crash or otherwise affect the
-                // actual game — this plugin is purely observational.
                 Logger.LogError("[CameraLogger] failed to open output file: " + e);
                 _writer = null;
             }
@@ -103,16 +79,10 @@ namespace HumynCapture.CameraLogger
 
         private void LateUpdate()
         {
-            // LateUpdate (not Update): camera transforms driven by
-            // follow/look-at scripts (very common in Kamla-style
-            // third-person games) are typically finalized in LateUpdate,
-            // so sampling here — after the game's own camera-rig scripts
-            // have already run this frame — avoids reading a stale
-            // position that's one frame behind what actually got rendered.
             if (_writer == null) return;
 
-            Camera cam = Camera.main;
-            if (cam == null) return;  // no active main camera this frame — skip, don't crash
+            Camera cam = ResolveCamera();
+            if (cam == null) return;
 
             try
             {
@@ -122,11 +92,6 @@ namespace HumynCapture.CameraLogger
                 Vector3 e = q.eulerAngles;
                 long wallclockMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
 
-                // Hand-built single-line JSON — deliberately no dependency on
-                // a JSON library the host game may or may not ship (BepInEx
-                // itself doesn't guarantee one is loadable from a plugin).
-                // Schema is the CONTRACT with the Python-side reader
-                // (app/core/finalize/camera_bridge.py) — keep both in sync.
                 string line = string.Format(CultureInfo.InvariantCulture,
                     "{{\"frame\":{0},\"wallclock_ms\":{1},\"unity_time\":{2:F6}," +
                     "\"position\":[{3:F6},{4:F6},{5:F6}]," +
@@ -145,6 +110,104 @@ namespace HumynCapture.CameraLogger
             {
                 Logger.LogWarning("[CameraLogger] frame log failed: " + ex.Message);
             }
+        }
+
+        private Camera ResolveCamera()
+        {
+            Camera main = Camera.main;
+            if (main != null && main.isActiveAndEnabled)
+            {
+                return main;
+            }
+
+            if (_fallbackCamera != null && _fallbackCamera.isActiveAndEnabled)
+            {
+                return _fallbackCamera;
+            }
+
+            int cameraCount = Camera.allCamerasCount;
+            if (cameraCount > _cameraBuffer.Length)
+            {
+                _cameraBuffer = new Camera[cameraCount];
+            }
+
+            int populatedCount = Camera.GetAllCameras(_cameraBuffer);
+            Camera best = null;
+            bool bestRendersToScreen = false;
+            bool bestIsPerspective = false;
+            long bestPixelArea = -1;
+            float bestDepth = float.NegativeInfinity;
+
+            for (int i = 0; i < populatedCount; i++)
+            {
+                Camera candidate = _cameraBuffer[i];
+                if (candidate == null || !candidate.isActiveAndEnabled)
+                {
+                    continue;
+                }
+
+                // Real bug fixed here: a render-texture target used to be a
+                // hard exclusion, meant to skip UI/render-to-texture utility
+                // cameras. On a title whose real gameplay camera ALSO
+                // renders through a texture (common for post-processing —
+                // confirmed the cause of a real 0-byte output on Outer
+                // Wilds), that excluded every candidate outright. Now it's
+                // just a lower-priority signal: a screen-rendering camera
+                // still wins first, but a render-texture camera is accepted
+                // rather than nothing.
+                bool rendersToScreen = candidate.targetTexture == null;
+                bool isPerspective = !candidate.orthographic;
+                long pixelArea = (long)candidate.pixelWidth * candidate.pixelHeight;
+
+                bool better;
+                if (best == null)
+                {
+                    better = true;
+                }
+                else if (rendersToScreen != bestRendersToScreen)
+                {
+                    better = rendersToScreen;
+                }
+                else if (isPerspective != bestIsPerspective)
+                {
+                    better = isPerspective;
+                }
+                else if (pixelArea != bestPixelArea)
+                {
+                    better = pixelArea > bestPixelArea;
+                }
+                else
+                {
+                    better = candidate.depth > bestDepth;
+                }
+
+                if (better)
+                {
+                    best = candidate;
+                    bestRendersToScreen = rendersToScreen;
+                    bestIsPerspective = isPerspective;
+                    bestPixelArea = pixelArea;
+                    bestDepth = candidate.depth;
+                }
+            }
+
+            _fallbackCamera = best;
+            if (_fallbackCamera != null && !_loggedFallbackCamera)
+            {
+                Logger.LogWarning(
+                    "[CameraLogger] Camera.main is unavailable; using active camera '" +
+                    _fallbackCamera.name + "' (rendersToScreen=" + bestRendersToScreen + ").");
+                _loggedFallbackCamera = true;
+            }
+            else if (_fallbackCamera == null && !_loggedNoCamera)
+            {
+                Logger.LogWarning(
+                    "[CameraLogger] no active camera found at all (" + populatedCount +
+                    " candidates scanned) — camera data will not be recorded this session.");
+                _loggedNoCamera = true;
+            }
+
+            return _fallbackCamera;
         }
 
         private void OnApplicationQuit()

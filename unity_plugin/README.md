@@ -50,8 +50,9 @@ whether that's even possible varies per title's Unity build type.
    has one JSON line per frame (`pid` = the game's process id, same value
    HumynCapture already records as `metadata.json`'s `game.pid_at_capture`).
 
-## Building (once BepInEx.Core/UnityEngine.Modules NuGet packages are
-confirmed to resolve for real — untested here)
+## Building
+
+Confirmed working against a real BepInEx 5.x Mono install (Outer Wilds).
 
 ```
 cd unity_plugin/CameraLogger
@@ -68,8 +69,9 @@ per title, not this project or its code.
 
 | Piece | Status |
 |---|---|
-| `Plugin.cs` compiles cleanly and matches BepInEx 5.x's plugin shape | **Unverified** — no toolchain here to build it |
-| Camera.main sampling logic / JSON schema | Reviewed for correctness, not run against a real Unity game |
-| BepInEx actually injects into `Kamla.exe` | **Not yet run** — Mono/IL2CPP diagnostic confirmed Mono; injection itself (checklist step 2) hasn't been tried |
+| `Plugin.cs` compiles cleanly and matches BepInEx 5.x's plugin shape | **Confirmed on real hardware** — built and loaded successfully against Outer Wilds (Unity 2019.4, Mono) |
+| BepInEx actually injects into a real game | **Confirmed** — `LogOutput.log` from a real session shows clean Chainloader startup + plugin load, no crash |
+| pid-based handshake with HumynCapture | **Confirmed** — `camera_bridge/<pid>.jsonl` was created with the exact pid HumynCapture recorded in `metadata.json` |
+| Camera.main sampling / JSON schema | **Real bug found and fixed**: `ResolveCamera()` was hard-excluding any camera with a non-null `targetTexture` (meant to skip UI cameras) — on Outer Wilds this excluded EVERY candidate camera, producing a silent 0-byte output file with no warning logged. Relaxed to a lower-priority signal instead of a hard exclusion; also added a log line for the "genuinely zero cameras found" case so this can't fail silently again. **Not yet re-tested** — needs another real recording with the fixed plugin. |
 | Python-side parsing/matrix math/frame-matching (`camera_bridge.py`) | **Unit-tested**, 17 passing tests — this half is trustworthy |
-| End-to-end (real plugin output -> `patch_frames_csv`) | **Not yet run** — needs a real `<pid>.jsonl` from an actual game session |
+| End-to-end (real plugin output -> `patch_frames_csv`) | **Not yet run** — needs a real non-empty `<pid>.jsonl` from an actual game session with the fixed plugin |
