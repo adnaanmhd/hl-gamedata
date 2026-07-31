@@ -1,6 +1,11 @@
+import asyncio
+import time
+
 import pynput.keyboard as keyboard
 
 from app.core.keyboard_capture import (
+    InputCapture,
+    _AltGrPhantomCtrlDetector,
     _ModifierDebounce,
     _base_letter_from_control_byte,
     _key_to_str,
@@ -96,3 +101,87 @@ def test_modifier_debounce_note_up_clears_state():
     d.note_down("shift_l", 100.000)
     d.note_up("shift_l")
     assert d.should_suppress_down("shift_r", 100.001) is False
+
+
+class TestAltGrPhantomCtrlDetector:
+    def test_logs_warning_when_ctrl_l_immediately_precedes_alt_r(self, caplog):
+        import logging
+        d = _AltGrPhantomCtrlDetector()
+        with caplog.at_level(logging.WARNING, logger="app.core.keyboard_capture"):
+            d.note_down("ctrl_l", 100.000)
+            d.note_down("alt_r", 100.003)
+        assert any("AltGr" in r.message for r in caplog.records)
+
+    def test_no_warning_when_gap_exceeds_the_tight_window(self, caplog):
+        import logging
+        d = _AltGrPhantomCtrlDetector()
+        with caplog.at_level(logging.WARNING, logger="app.core.keyboard_capture"):
+            d.note_down("ctrl_l", 100.000)
+            d.note_down("alt_r", 100.050)
+        assert not any("AltGr" in r.message for r in caplog.records)
+
+    def test_no_warning_when_other_key_intervenes(self, caplog):
+        import logging
+        d = _AltGrPhantomCtrlDetector()
+        with caplog.at_level(logging.WARNING, logger="app.core.keyboard_capture"):
+            d.note_down("ctrl_l", 100.000)
+            d.note_other_key()
+            d.note_down("alt_r", 100.003)
+        assert not any("AltGr" in r.message for r in caplog.records)
+
+    def test_no_warning_for_alt_r_alone(self, caplog):
+        import logging
+        d = _AltGrPhantomCtrlDetector()
+        with caplog.at_level(logging.WARNING, logger="app.core.keyboard_capture"):
+            d.note_down("alt_r", 100.000)
+        assert not any("AltGr" in r.message for r in caplog.records)
+
+
+class TestInputCaptureNoDoubleRecording:
+    async def _drain_queue(self, capture):
+        await asyncio.sleep(0)
+        events = []
+        while not capture.queue.empty():
+            events.append(await capture.queue.get())
+        return events
+
+    def _run(self, coro):
+        return asyncio.run(coro)
+
+    def test_os_key_repeat_emits_only_one_down_event(self):
+        async def scenario():
+            capture = InputCapture(anchor_monotonic=time.perf_counter())
+            capture._loop = asyncio.get_running_loop()
+            key = keyboard.KeyCode.from_char("w")
+            for _ in range(5):
+                capture._on_press(key)
+            return await self._drain_queue(capture)
+
+        events = self._run(scenario())
+        downs = [e for e in events if e["type"] == "key" and e["action"] == "down"]
+        assert len(downs) == 1
+        assert downs[0]["key"] == "w"
+
+    def test_release_then_press_again_emits_a_new_down(self):
+        async def scenario():
+            capture = InputCapture(anchor_monotonic=time.perf_counter())
+            capture._loop = asyncio.get_running_loop()
+            key = keyboard.KeyCode.from_char("w")
+            capture._on_press(key)
+            capture._on_release(key)
+            capture._on_press(key)
+            return await self._drain_queue(capture)
+
+        events = self._run(scenario())
+        downs = [e for e in events if e["type"] == "key" and e["action"] == "down"]
+        assert len(downs) == 2
+
+    def test_disabled_capture_drops_events(self):
+        async def scenario():
+            capture = InputCapture(anchor_monotonic=time.perf_counter())
+            capture._loop = asyncio.get_running_loop()
+            capture.set_enabled(False)
+            capture._on_press(keyboard.KeyCode.from_char("w"))
+            return await self._drain_queue(capture)
+
+        assert self._run(scenario()) == []

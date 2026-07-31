@@ -40,7 +40,8 @@ def detect_black_intro(video_path: Path, sample_s: float = 5.0) -> tuple[bool, f
     cmd = [
         str(ffmpeg_exe()), "-v", "info", "-nostats",
         "-t", str(sample_s), "-i", str(video_path),
-        "-vf", "blackdetect=d=0.5:pix_th=0.10", "-f", "null", "-",
+        # pix_th=0.05: 0.10 false-positived on legitimately dark scenes.
+        "-vf", "blackdetect=d=0.5:pix_th=0.05", "-f", "null", "-",
     ]
     creationflags = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
     try:

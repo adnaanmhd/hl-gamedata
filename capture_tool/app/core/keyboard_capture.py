@@ -46,6 +46,10 @@ duplicate transition for the *other* side of a modifier within a few ms of
 the real one. `_ModifierDebounce` drops a same-pair opposite-side "down"
 that arrives within `BLEED_WINDOW_S` of an already-down side, keeping only
 the side with the real (first) scancode transition.
+
+Known gap (logged, not fixed): AltGr on international layouts can make
+Windows synthesize a phantom left-Ctrl before the real right-Alt.
+`_AltGrPhantomCtrlDetector` only logs it — see its own docstring.
 """
 from __future__ import annotations
 
@@ -130,6 +134,34 @@ def _base_letter_from_control_byte(ch: str) -> str | None:
     if 1 <= o <= 26:
         return chr(ord("a") + o - 1)
     return None
+
+
+# Tighter than B7's 30ms bleed window -- a different physical-key artifact.
+ALTGR_PHANTOM_CTRL_WINDOW_S = 0.01
+
+
+class _AltGrPhantomCtrlDetector:
+    """Logs a warning if ctrl_l down is immediately followed by alt_r down
+    (the AltGr artifact's signature). Observational only, never suppresses."""
+
+    def __init__(self) -> None:
+        self._ctrl_l_down_at: float | None = None
+
+    def note_down(self, name: str, now: float) -> None:
+        if name == "ctrl_l":
+            self._ctrl_l_down_at = now
+            return
+        if name == "alt_r" and self._ctrl_l_down_at is not None:
+            if (now - self._ctrl_l_down_at) < ALTGR_PHANTOM_CTRL_WINDOW_S:
+                log.warning(
+                    "possible AltGr phantom ctrl_l (%.1fms before alt_r)",
+                    (now - self._ctrl_l_down_at) * 1000.0)
+        self._ctrl_l_down_at = None
+
+    def note_other_key(self) -> None:
+        """Any non-modifier key between ctrl_l and alt_r rules out the
+        AltGr pattern (a real Ctrl+<key> combo happened first)."""
+        self._ctrl_l_down_at = None
 
 
 class _ModifierDebounce:
@@ -265,6 +297,7 @@ class InputCapture:
         self._enabled = True
         self._keys_down: set[str] = set()
         self._debounce = _ModifierDebounce()
+        self._altgr_detector = _AltGrPhantomCtrlDetector()
         self._last_raw_kb: tuple[int, int, int] | None = None  # (vk, scanCode, flags)
         self.last_error: str | None = None
 
@@ -346,6 +379,9 @@ class InputCapture:
                 if self._debounce.should_suppress_down(name, now):
                     return
                 self._debounce.note_down(name, now)
+                self._altgr_detector.note_down(name, now)
+            else:
+                self._altgr_detector.note_other_key()
             if name in self._keys_down:
                 return
             self._keys_down.add(name)

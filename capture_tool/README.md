@@ -87,6 +87,42 @@ fix's math is sanity-checked synthetically above; the zero-copy path's
 actual effect on drop rate can only be confirmed on the same real machine
 that produced the 243/16663 number.
 
+## Items #5, #7, #8 — real (not mocked) verification + one new fix (v0.11.0)
+
+Pushed further on the three items that were only unit-tested with mocks,
+where real testing was actually possible without Windows/GPU:
+
+- **#5 black-frame heuristic — real bug found and fixed.** Built real
+  synthetic clips with ffmpeg (pure black, near-black, dark-gray, dark-with-
+  detail, normal) and ran the actual `detect_black_intro` against them.
+  `pix_th=0.10` flagged a legitimately dark scene (~6.3% luma — a cave/night
+  level, one of the client's own REQUIRED scene categories, not an edge
+  case) as a black-capture FAILURE. Tightened to `pix_th=0.05`: still
+  reliably catches true/near-black, no longer false-positives on dark
+  content. 5 new tests in `test_blackframe.py`, all against real ffmpeg
+  output.
+- **#8 remux repair — verified working, for real.** Built a real fragmented
+  MP4 (same movflags `FFmpegRecorder` actually uses) and truncated it at
+  15%/35%/50%/75%/90% — exactly what a `kill -9` mid-write produces.
+  `_attempt_remux_repair` recovered a genuinely valid, ffprobe-readable file
+  every time; confirmed it also fails cleanly (no crash) on a 28-byte
+  truncation matching zero real fragments (an actual `kill -9` repro
+  produced exactly this). 7 new tests in `test_c3_remux_repair.py`.
+- **#7 keyboard hygiene — one new gap found, logged not silently fixed.**
+  Audited `keyboard_capture.py` against a real machine's non-US
+  `keyboard_layout` (`0x40094009`). Found a known Windows quirk this code
+  never handled: AltGr on international layouts makes Windows synthesize a
+  phantom left-Ctrl keydown immediately before the real right-Alt. Didn't
+  blind-suppress it (risks breaking a genuine Ctrl+AltGr combo, and there's
+  no way to verify the fix is right without a real international keyboard)
+  — added `_AltGrPhantomCtrlDetector`, which only logs a warning when the
+  pattern occurs, so the next real test on that machine tells us whether
+  this is actually happening before deciding to suppress it. Also added
+  direct test coverage for `InputCapture`'s no-double-recording dedup
+  (previously only the pure `_key_to_str` helper was tested, never this
+  actual path) — confirmed OS key-repeat correctly collapses to one "down"
+  event. 7 new tests in `test_keyboard_capture.py`.
+
 ## Sync FAIL root-cause update + logging (v0.10.0)
 
 A real delivery with the v0.9.0 drift-aware anchor ACTIVE
