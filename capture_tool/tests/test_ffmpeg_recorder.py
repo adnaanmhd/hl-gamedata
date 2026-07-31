@@ -11,6 +11,8 @@ the selection logic around it without needing a real ffmpeg/GPU.
 import io
 from unittest.mock import patch
 
+import pytest
+
 from app.core import ffmpeg_recorder as fr
 
 
@@ -27,6 +29,12 @@ class TestDdagrabDetectionAndInvocation:
     2. `_build_command` invoked it as `-f ddagrab -i 0` (device syntax) —
        not how it works at all even if detection were fixed alone.
     """
+
+    @pytest.fixture(autouse=True)
+    def _reset_ddagrab_output_idx_cache(self):
+        fr._ddagrab_output_idx_cache = 0
+        yield
+        fr._ddagrab_output_idx_cache = 0
 
     def test_probe_checks_filters_not_devices(self):
         with patch.object(fr, "_run_ffmpeg_query") as query, \
@@ -58,6 +66,42 @@ class TestDdagrabDetectionAndInvocation:
         fake = type("R", (), {"returncode": 0, "stderr": b""})()
         with patch.object(fr.subprocess, "run", return_value=fake):
             assert fr._ddagrab_opens() is True
+
+    def test_ddagrab_opens_passes_output_idx_through(self):
+        with patch.object(fr.subprocess, "run") as run:
+            run.return_value = type("R", (), {"returncode": 0, "stderr": b""})()
+            fr._ddagrab_opens(output_idx=2)
+        cmd = run.call_args[0][0]
+        assert "output_idx=2" in cmd[cmd.index("-i") + 1]
+
+    def test_detect_output_idx_finds_first_working_index(self):
+        """Real bug fixed here (Outer Wilds, real hardware): output_idx=0
+        failed with "Selected output not supported" every time, hardcoded
+        with no fallback to try another index."""
+        with patch.object(fr, "_ddagrab_opens", side_effect=lambda idx: idx == 2):
+            assert fr._detect_ddagrab_output_idx() == 2
+
+    def test_detect_output_idx_returns_none_when_all_fail(self):
+        with patch.object(fr, "_ddagrab_opens", return_value=False):
+            assert fr._detect_ddagrab_output_idx() is None
+
+    def test_detect_output_idx_prefers_lowest_working_index(self):
+        with patch.object(fr, "_ddagrab_opens", side_effect=lambda idx: idx >= 1) as opens:
+            assert fr._detect_ddagrab_output_idx() == 1
+        # must not keep probing once a working index is found
+        assert opens.call_count == 2
+
+    def test_probe_caches_the_detected_output_idx_for_build_command(self):
+        with patch.object(fr, "_run_ffmpeg_query",
+                          return_value="ddagrab  V..... DXGI Desktop Duplication"), \
+             patch.object(fr, "_ddagrab_opens", side_effect=lambda idx: idx == 3):
+            assert fr._probe_ddagrab_support() is True
+        recorder = fr.FFmpegRecorder()
+        with patch.object(fr, "_probe_ddagrab_support", return_value=True), \
+             patch.object(fr, "_detect_hw_encoder", return_value="libx264"):
+            cmd = recorder._build_command((10, 20, 800, 600), "out.mp4")
+        input_arg = cmd[cmd.index("-i") + 1]
+        assert "output_idx=3" in input_arg
 
     def test_build_command_uses_lavfi_filter_syntax_when_ddagrab_available(self):
         recorder = fr.FFmpegRecorder()

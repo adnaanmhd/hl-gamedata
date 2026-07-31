@@ -175,20 +175,22 @@ def _detect_hw_encoder() -> str:
     return "libx264"
 
 
-def _ddagrab_opens() -> bool:
-    """Actually try to open ddagrab's output_idx=0, not just check the
+def _ddagrab_opens(output_idx: int = 0) -> bool:
+    """Actually try to open ddagrab at `output_idx`, not just check the
     filter is listed — same lesson as `_encoder_opens` (A1): "this ffmpeg
     build has the filter compiled in" and "this specific GPU/monitor
     configuration can actually open it" are different things. Confirmed on
     a real machine: the filter was correctly detected AND correctly
     invoked, and ffmpeg still exited with "Selected output not supported" /
-    "Failed to configure output pad" — DXGI output indices don't always
-    map cleanly to a usable output, especially on hybrid-GPU laptops or
-    certain multi-monitor arrangements. Runs a trivial synthetic capture
-    (tiny size, 3 frames, `-f null -`) so a real failure here falls back to
-    gdigrab instead of crashing the whole recording session."""
+    "Failed to configure output pad" at output_idx=0 — DXGI output indices
+    don't always map cleanly to a usable output, especially on hybrid-GPU
+    laptops or certain multi-monitor arrangements. Runs a trivial synthetic
+    capture (tiny size, 3 frames, `-f null -`) so a real failure here falls
+    back to gdigrab (or the next output_idx — see
+    `_detect_ddagrab_output_idx`) instead of crashing the whole recording
+    session."""
     cmd = ["-hide_banner", "-loglevel", "error", "-f", "lavfi",
-           "-i", "ddagrab=output_idx=0:framerate=5:video_size=64x64",
+           "-i", f"ddagrab=output_idx={output_idx}:framerate=5:video_size=64x64",
            "-vf", "hwdownload,format=bgra",
            "-frames:v", "3", "-f", "null", "-"]
     creationflags = CREATE_NO_WINDOW if sys.platform == "win32" else 0
@@ -198,10 +200,33 @@ def _ddagrab_opens() -> bool:
     except (subprocess.SubprocessError, OSError):
         return False
     if result.returncode != 0:
-        log.warning("ddagrab preflight failed: %s",
+        log.warning("ddagrab preflight failed at output_idx=%d: %s", output_idx,
                     (result.stderr or b"").decode("utf-8", errors="replace").strip()[-500:])
         return False
     return True
+
+
+MAX_DDAGRAB_OUTPUT_IDX = 4
+# Confirmed real bug (Outer Wilds, real hardware): output_idx=0 failed with
+# "Selected output not supported" on every session even though the ddagrab
+# filter itself was correctly detected — the machine's actual usable DXGI
+# output doesn't sit at index 0 (typical on hybrid-GPU or multi-monitor
+# setups). The tool was hardcoded to only ever try index 0, so it fell back
+# to gdigrab unconditionally on this machine, hitting C2's exclusive-
+# fullscreen black-capture limitation for real on a real session. Sweeping
+# a few small indices costs one extra ~10ms synthetic preflight per index,
+# once per recording start — negligible next to what a working GPU capture
+# path is worth.
+_ddagrab_output_idx_cache = 0
+
+
+def _detect_ddagrab_output_idx(max_output_idx: int = MAX_DDAGRAB_OUTPUT_IDX) -> int | None:
+    """Returns the first output_idx (0..max_output_idx-1) that actually
+    opens, or None if none do."""
+    for idx in range(max_output_idx):
+        if _ddagrab_opens(idx):
+            return idx
+    return None
 
 
 def _qsv_zerocopy_opens() -> bool:
@@ -230,7 +255,8 @@ def _qsv_zerocopy_opens() -> bool:
     """
     cmd = ["-hide_banner", "-loglevel", "error",
            "-init_hw_device", "qsv=hw", "-filter_hw_device", "hw",
-           "-f", "lavfi", "-i", "ddagrab=output_idx=0:framerate=5:video_size=64x64",
+           "-f", "lavfi",
+           "-i", f"ddagrab=output_idx={_ddagrab_output_idx_cache}:framerate=5:video_size=64x64",
            "-vf", "hwmap=derive_device=qsv,format=qsv",
            "-c:v", "h264_qsv", "-frames:v", "3", "-f", "null", "-"]
     creationflags = CREATE_NO_WINDOW if sys.platform == "win32" else 0
@@ -257,9 +283,18 @@ def _probe_ddagrab_support() -> bool:
 
     Listing the filter alone isn't sufficient either (see `_ddagrab_opens`
     docstring) — a real preflight open-test is required, same as A1's
-    hardware-encoder check."""
+    hardware-encoder check. Sweeps output_idx (see
+    `_detect_ddagrab_output_idx`) rather than only ever trying 0 — real
+    hardware confirmed 0 can fail while another index works."""
+    global _ddagrab_output_idx_cache
     listing = _run_ffmpeg_query(["-hide_banner", "-filters"])
-    return "ddagrab" in listing and _ddagrab_opens()
+    if "ddagrab" not in listing:
+        return False
+    idx = _detect_ddagrab_output_idx()
+    if idx is None:
+        return False
+    _ddagrab_output_idx_cache = idx
+    return True
 
 
 class _StderrMonitor:
@@ -438,7 +473,11 @@ class FFmpegRecorder:
             # filter needed — ddagrab crops natively). It exclusively
             # returns D3D11 hardware frames, so hwdownload+format is still
             # required before any software filter (scale/pad below).
-            ddagrab = (f"ddagrab=output_idx=0:framerate={cfg.fps}:"
+            # output_idx from the real preflight sweep (_probe_ddagrab_support
+            # -> _detect_ddagrab_output_idx), not hardcoded 0 — real hardware
+            # confirmed 0 can fail "Selected output not supported" while
+            # another index opens fine.
+            ddagrab = (f"ddagrab=output_idx={_ddagrab_output_idx_cache}:framerate={cfg.fps}:"
                        f"video_size={w}x{h}:offset_x={x}:offset_y={y}")
             cmd += ["-f", "lavfi", *wallclock_ts, "-i", ddagrab]
             # Partial-fix #4: keep frames in GPU memory end-to-end when

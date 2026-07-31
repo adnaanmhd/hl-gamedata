@@ -87,6 +87,27 @@ fix's math is sanity-checked synthetically above; the zero-copy path's
 actual effect on drop rate can only be confirmed on the same real machine
 that produced the 243/16663 number.
 
+## ddagrab output_idx sweep — real C2 black-frame FAIL root-caused (v0.12.0)
+
+Real black-frame FAIL on Outer Wilds (99% black for the sampled intro),
+confirmed genuine by sampling real frames from the delivered video (0-2.5s
+real content, 3s onward 93%+ black — exactly when `focus regained` fired in
+the log, i.e. when the game took over the screen, almost certainly
+exclusive fullscreen). Root cause: this machine's `ddagrab` preflight has
+failed with `"Selected output not supported"` on every single session so
+far, forcing the `gdigrab` fallback and its C2 exclusive-fullscreen
+blindspot — `output_idx` was hardcoded to 0, with no fallback to try
+another index. `_detect_ddagrab_output_idx` now sweeps 0-3 and uses the
+first that actually opens; `_probe_ddagrab_support` caches the winning
+index for `_build_command` (and `_qsv_zerocopy_opens`) instead of
+hardcoding 0. **Unverified whether THIS machine's usable output is at
+1/2/3** — the sweep logic itself is tested (9 tests in
+`test_ffmpeg_recorder.py`), but only a real session on that hardware can
+confirm it actually finds a working index there. If it's genuinely stuck
+at every index (a real hybrid-GPU/driver limitation, not just an index
+mismatch), switching the game to Borderless/Windowed mode is the
+zero-code-change workaround.
+
 ## Items #5, #7, #8 — real (not mocked) verification + one new fix (v0.11.0)
 
 Pushed further on the three items that were only unit-tested with mocks,
