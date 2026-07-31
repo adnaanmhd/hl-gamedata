@@ -241,6 +241,12 @@ def compute_anchor_correction(
                 correction_us = (
                     round((frame0_monotonic - old_anchor_monotonic_s) * 1_000_000)
                     if frame0_monotonic is not None else 0)
+                log.info(
+                    "anchor drift-fit: slope=%.8f intercept=%.6f n=%d "
+                    "equivalent_correction_us=%d (over full session, "
+                    "drift-only contribution=%.1fms per elapsed second)",
+                    slope, intercept, len(progress_samples), correction_us,
+                    (slope - 1.0) * 1000.0)
                 return AnchorResult(
                     method="ffmpeg_progress_time_drift_fit",
                     correction_us=correction_us, launch_pairing=launch_pairing,

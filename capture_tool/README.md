@@ -87,6 +87,53 @@ fix's math is sanity-checked synthetically above; the zero-copy path's
 actual effect on drop rate can only be confirmed on the same real machine
 that produced the 243/16663 number.
 
+## Sync FAIL root-cause update + logging (v0.10.0)
+
+A real delivery with the v0.9.0 drift-aware anchor ACTIVE
+(`time_anchor=ffmpeg_progress_time_drift_fit`, `drift_sample_count=614`,
+`frames_dropped=0`) still measured a **2533ms** sync FAIL — worse than an
+earlier session that DID have frame drops. Reproduced this exactly outside
+the app using the real video + `frames.csv` (see the forensic session that
+produced this): `drift_slope=1.0000388` contributes only ~12ms of
+correction across the whole 5-minute session, and testing a second,
+higher-activity window of the same video gives a similarly large lag
+(2133ms) in the same direction — ruling out both "it's frame-drop/cfr
+drift" (this fix's own working theory) and "it's just noisy/weak
+correlation" (a different window with much more signal shows the same
+result). **The actual root cause is still unidentified.** A crude
+sign-flip test hinted the anchor correction itself might be miscalibrated
+for this session, but a rigorous re-bin using the real per-frame PTS
+couldn't reproduce the delivered `frames.csv` closely enough to trust that
+conclusion (either the drift-fit affine math needs replaying exactly rather
+than approximated, or something else in the real pipeline isn't accounted
+for) — flagged, not fixed, pending the *original* (non-WhatsApp-recompressed)
+video file for a clean re-test.
+
+Two concrete changes landed instead of a guessed fix:
+
+1. **`lag_correct` flipped `False` -> `True`** in `finalize/pipeline.py`'s
+   call to `translate_bundle_v2`. This enables an already-implemented,
+   already-tested empirical correction loop in `translator/v2.py`
+   (measure real lag via the client's own algorithm -> shift by the
+   measured amount -> re-bin -> re-measure, up to 3 rounds, converging
+   toward `TARGET_ABS_LAG_MS`) that was previously disabled on purpose —
+   the original reasoning was to observe A2 in isolation, which was the
+   right call until real hardware proved A2 alone insufficient. This is a
+   real safety net, not a guess: every round's before/after numbers are
+   still fully logged (see below), so a session where this loop has to do
+   a lot of work is still visible as "something upstream needs fixing," it
+   just isn't shipped broken in the meantime. **Unverified against a real
+   ddagrab/gdigrab session** — no hardware here to confirm it actually
+   converges below 150ms on the sessions we've seen fail.
+2. **Debugging gap closed**: every sync/anchor number that used to exist
+   ONLY in the "Session saved" popup and/or `metadata.json` — which is why
+   every investigation so far needed a screenshot AND file exports handed
+   over manually — is now also written to `humyncapture.log` directly:
+   the anchor method/correction/drift fit (`pipeline.py`), each round of
+   the correction loop (`translator/v2.py`), and the full finalize
+   qa_status/issues/self-check result (`pipeline.py`). Next real-hardware
+   test should need far less back-and-forth to diagnose.
+
 ## Issue #2 — camera pose/intrinsics data (v0.9.0)
 
 Every real delivery checked so far had `frames.csv`'s camera columns

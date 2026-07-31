@@ -117,14 +117,44 @@ def run_finalize(
         corrected = apply_correction(raw_lines, anchor.correction_us)
     inputs_path.write_text("\n".join(json.dumps(e) for e in corrected) + ("\n" if corrected else ""))
 
+    # Debug-ability fix: this whole anchor computation used to be invisible
+    # outside metadata.json's capture_health block — every sync-FAIL
+    # investigation so far has needed the user to hand over metadata.json
+    # AND a screenshot of the popup just to reconstruct what actually ran.
+    # Put it in humyncapture.log directly, in one line, every time.
+    log.info(
+        "anchor: method=%s correction_us=%s drift_slope=%s "
+        "drift_intercept=%s drift_sample_count=%s events_corrected=%d",
+        anchor.method, anchor.correction_us, anchor.drift_slope,
+        anchor.drift_intercept, anchor.drift_sample_count, len(corrected))
+
     meta_path = raw_session_dir / "metadata.json"
     meta = json.loads(meta_path.read_text())
     meta.setdefault("capture_health", {}).update(anchor.to_capture_health_dict())
     meta_path.write_text(json.dumps(meta, indent=2))
 
-    # --- trim -> re-anchor & bin -> write v2 files. lag_correct=False is ---
-    # deliberate: we want to MEASURE whether A2 actually fixed the root
-    # cause, not paper over a regression the way the old post-hoc rescue did.
+    # --- trim -> re-anchor & bin -> write v2 files. ---
+    #
+    # lag_correct WAS False here deliberately, so real sessions would show
+    # whether A2 alone was sufficient rather than being papered over. Real
+    # hardware data has since PROVEN it isn't: a session with the drift-aware
+    # anchor active (time_anchor=ffmpeg_progress_time_drift_fit), zero frames
+    # dropped, and a drift_slope within 0.004% of 1.0 (i.e. no meaningful
+    # drift to correct) still measured a 2533ms FAIL — worse than an earlier
+    # session that DID have drops. That rules out both the startup-anchor
+    # gap and cfr-drift as the dominant cause of the residual lag; whatever
+    # it actually is remains unidentified (see README's "still open"
+    # section). Given the client's own stated bar is accurate data, not
+    # "our best guess at why it's inaccurate," it's better to also run the
+    # already-implemented, already-tested empirical correction loop below
+    # (measure -> shift by the measured lag -> re-bin -> re-measure, up to 3
+    # rounds, converging toward TARGET_ABS_LAG_MS) as a real safety net,
+    # rather than ship data we already know is out of spec while root-causing
+    # the anchor bug separately. This does NOT hide the anchor bug — the
+    # "before" numbers are still fully logged below and in metadata, so a
+    # session where this loop has to do a lot of work is still visible as a
+    # sign something upstream needs fixing, it just isn't SHIPPED broken in
+    # the meantime.
     #
     # rrd_in_process=True is required here specifically (not just a nicety):
     # translator.rrd.generate()'s default subprocess path runs
@@ -135,9 +165,21 @@ def run_finalize(
     # rrd_creation.py was written, session.rrd was not. in_process imports
     # and calls the written script's log_session() directly instead.
     result = translator_v2.translate_bundle_v2(
-        raw_session_dir, out_root, lag_correct=False, make_rrd=True,
+        raw_session_dir, out_root, lag_correct=True, make_rrd=True,
         rrd_in_process=True)
     out_dir = Path(result["out_dir"])
+
+    sync_report = result.get("sync", {})
+    if sync_report.get("measured"):
+        log.info(
+            "sync: pre-correction lag=%sms corr=%s active=%s -> "
+            "applied_shift=%sms -> residual lag=%sms corr=%s status=%s",
+            sync_report.get("measured_lag_ms"), sync_report.get("measured_correlation"),
+            sync_report.get("active_fraction"), sync_report.get("applied_shift_ms"),
+            sync_report.get("residual_lag_ms"), sync_report.get("residual_correlation"),
+            sync_report.get("status"))
+    else:
+        log.info("sync: not measured (%s)", sync_report)
 
     # --- fix #2: patch in real camera pose/intrinsics if a BepInEx camera
     # log exists for this game's pid. UNVERIFIED end-to-end (no Unity/
@@ -200,6 +242,19 @@ def run_finalize(
     )
 
     ready = self_check.ready_for_upload and qa.status != "FAIL"
+    # This is the exact content the "Session saved" popup shows the user —
+    # until now it only ever existed in the popup and in metadata.json,
+    # never in humyncapture.log. Every real-hardware debugging session so
+    # far has had to work backward from a screenshot of that popup; this
+    # makes the same information available directly from the log file.
+    log.info("finalize result: ready_for_upload=%s qa_status=%s out_dir=%s",
+              ready, qa.status, out_dir)
+    for issue in qa.issues:
+        log.info("finalize qa issue: %s", issue)
+    for failure in self_check.failures:
+        log.warning("finalize self-check FAILURE: %s", failure)
+    for warning in self_check.warnings + result.get("warnings", []):
+        log.info("finalize self-check warning: %s", warning)
     return FinalizeResult(
         out_dir=out_dir,
         ready_for_upload=ready,
