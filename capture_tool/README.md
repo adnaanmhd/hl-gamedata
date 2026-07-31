@@ -37,6 +37,99 @@ straight to a release build without the acceptance protocol in handoff §7.
 | B6 | focus tracking (event-driven) | `focus_tracker.py` | `SetWinEventHook` usage **unverified** (Windows-only API) |
 | C3 | finalize timeout / fragmented mp4 | `ffmpeg_recorder.py` | Timeout-scaling logic **unit-testable in principle**, not covered by a test; remux-repair path **unverified** (needs a real truncated fragmented MP4) |
 
+## Partial fixes for the real-hardware sync FAIL and frame-drop WARN (v0.8.0)
+
+A real delivery (`kamla`, 9m14s, `backend=ddagrab`, `encoder=h264_qsv`) still
+came back with `qa_status: FAIL` — `controls-to-video sync: video 900.0ms
+behind inputs`, `correlation -0.24` — AND `frames_dropped 243/16663 (1.5%)`,
+even though this session used the fast GPU capture + hardware encoder path,
+not the CPU-only gdigrab/libx264 fallback this tool was mostly hardened
+against. Two independent partial fixes below; **both are UNVERIFIED on real
+hardware** (no Windows/Intel GPU here) — same disclaimer as everywhere else
+in this file.
+
+**Sync (drift-aware anchor).** The existing A2 anchor (`anchor.py`) measures
+a SINGLE `(monotonic, encoded)` sample near the start of the recording and
+applies one constant correction for the whole session. That can only ever
+fix a fixed startup gap — it cannot track drift that grows over the rest of
+a long recording. `-fps_mode cfr` forces a constant *output* rate by
+duplicating/dropping frames when the real capture can't sustain exactly
+`cfg.fps` (the same mechanism behind `frames_dropped`); every duplicate/drop
+nudges the video's internal content-time further from real wallclock time.
+`_StderrMonitor` now keeps EVERY progress sample from the whole recording
+(not just the first), and `anchor.fit_progress_drift` fits a line through
+them (`encoded_s = slope * monotonic_s + intercept`). A slope measurably
+different from 1.0 is direct evidence of exactly this drift; when the fit is
+usable (≥8 samples, slope in a plausible 0.5–1.5 range), the new
+`apply_drift_correction` applies that full affine map per-event instead of
+one constant shift — falls back to the old single-sample method otherwise.
+Sanity-checked with a synthetic 0.15%/s drift: the old method would leave a
+500s-in event fully uncorrected, the new fit corrects it by ~750ms — the
+same order of magnitude as the real session's 900ms FAIL. Covered by 8 new
+tests in `test_anchor.py`.
+
+**Frame drops (QSV zero-copy).** The `ddagrab`+`h264_qsv` pipeline currently
+round-trips every frame GPU→CPU (`hwdownload`+software `scale`/`pad`
+filters) →GPU (`h264_qsv` re-uploads internally to encode) — that CPU-bound
+work runs on every single frame and competes with the game for CPU, a
+plausible mechanical cause of encoder-backpressure drops. When capture dims
+already match the target (no scale/pad needed — the common native-resolution
+case) and a real preflight (`_qsv_zerocopy_opens`, same pattern as
+`_ddagrab_opens`/`_encoder_opens`) confirms it, frames now stay in GPU memory
+the whole way via `hwmap=derive_device=qsv,format=qsv`, skipping `hwdownload`
+and the forced `-pix_fmt yuv420p` (which would otherwise silently reintroduce
+the round trip). Falls back to the existing CPU-roundtrip path on any
+preflight failure, mismatched dims, or a non-QSV encoder. Covered by 6 new
+tests in `test_ffmpeg_recorder.py`.
+
+Neither fix has been run against a real ddagrab+QSV capture yet — the sync
+fix's math is sanity-checked synthetically above; the zero-copy path's
+actual effect on drop rate can only be confirmed on the same real machine
+that produced the 243/16663 number.
+
+## Issue #2 — camera pose/intrinsics data (v0.9.0)
+
+Every real delivery checked so far had `frames.csv`'s camera columns
+(`c2w_m00`..`m33`, `camera_fx/fy/cx/cy`, distortion coefficients) 100% empty
+— not corrupted, never captured: HumynCapture only sees screen pixels + OS
+input, never the game engine's real camera. Fixing this needed something
+that runs INSIDE the game process, which is a different kind of fix than
+everything else in this repo:
+
+- **`unity_plugin/CameraLogger/`** — a BepInEx plugin (game confirmed Unity
+  Mono build via a real on-machine check: `MonoBleedingEdge\` present, no
+  `GameAssembly.dll`) that samples `Camera.main`'s transform every frame and
+  writes it to `%LOCALAPPDATA%\HumynCapture\camera_bridge\<pid>.jsonl`,
+  keyed by the game's own pid (already recorded in `metadata.json` as
+  `game.pid_at_capture` — the only handshake that works given HumynCapture
+  attaches to an already-running game rather than launching it). Designed
+  to be game-agnostic: the same compiled DLL should work unmodified for any
+  other Mono-build Unity title, only the injection setup repeats per game
+  (IL2CPP titles need a different BepInEx variant — see
+  `unity_plugin/README.md`'s per-title checklist).
+  **UNVERIFIED** — no Unity/BepInEx/.NET toolchain available here to
+  compile or inject it for real.
+- **`app/core/finalize/camera_bridge.py`** — reads that log, converts
+  Unity's position+quaternion into the delivery's camera-to-world matrix
+  format (no axis conversion — Unity's own left-handed X-right/Y-up/
+  Z-forward convention already matches the client's spec), derives
+  `fx=fy`/`cx`/`cy` from the logged FOV (satisfies the client's own stated
+  acceptance criterion, spec §4.3#8: "camera_intrinsics parameters, fx =
+  fy"), and patches `frames.csv` in place for every frame with a
+  close-enough-in-time sample (frames with no close sample are left blank,
+  never guessed at). **Unit-tested — 17 passing tests**
+  (`test_camera_bridge.py`), this half is trustworthy independent of the
+  plugin.
+- Wired into `finalize/pipeline.py`: runs automatically after
+  `translate_bundle_v2` if a camera log exists for the session's pid;
+  silently no-ops (columns stay blank, exactly as today) if it doesn't —
+  never blocks finalize for a title without the plugin installed.
+
+**Next real step**: run `unity_plugin/README.md`'s injection checklist
+against the real `Kamla.exe` to confirm BepInEx actually loads the plugin,
+then a real recording to confirm `camera_bridge.py` correctly merges its
+output — this cannot be verified further without that hardware.
+
 ## ddagrab: listed and correctly invoked, still needed a real preflight
 
 Immediate follow-up to the detection/invocation fix above — same lesson as

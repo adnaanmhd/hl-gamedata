@@ -86,6 +86,78 @@ class TestDdagrabDetectionAndInvocation:
         assert cmd[cmd.index("-f") + 1] == "gdigrab"
 
 
+class TestQsvZeroCopyPipeline:
+    """Partial-fix #4: a real session's capture_health showed backend=ddagrab,
+    encoder=h264_qsv, and still 243/16663 (~1.5%) frames dropped — ruling out
+    the "it's just the CPU-only gdigrab fallback" theory this tool was built
+    around. Hypothesis: the existing pipeline round-trips every frame
+    GPU->CPU (hwdownload+software scale/pad) ->GPU (h264_qsv re-uploads
+    internally) even though ddagrab and h264_qsv can both stay in GPU memory
+    the whole way via `hwmap=derive_device=qsv`. UNVERIFIED on real hardware
+    (no Windows/Intel GPU here) — these tests only cover the command
+    construction and fallback logic, same as the rest of this file's
+    ddagrab/encoder coverage."""
+
+    def test_uses_zerocopy_chain_when_dims_match_and_preflight_opens(self):
+        recorder = fr.FFmpegRecorder()
+        with patch.object(fr, "_probe_ddagrab_support", return_value=True), \
+             patch.object(fr, "_detect_hw_encoder", return_value="h264_qsv"), \
+             patch.object(fr, "_qsv_zerocopy_opens", return_value=True):
+            cmd = recorder._build_command((0, 0, 1920, 1080), "out.mp4")
+        assert "hwdownload" not in cmd
+        assert "-init_hw_device" in cmd
+        vf = cmd[cmd.index("-vf") + 1]
+        assert vf == "hwmap=derive_device=qsv,format=qsv"
+        # forcing yuv420p here would silently reintroduce the GPU->CPU
+        # round trip the whole point of this path is to avoid.
+        assert "-pix_fmt" not in cmd
+        assert recorder.health.hw_pipeline == "qsv_zerocopy"
+
+    def test_falls_back_to_cpu_roundtrip_when_preflight_fails(self):
+        recorder = fr.FFmpegRecorder()
+        with patch.object(fr, "_probe_ddagrab_support", return_value=True), \
+             patch.object(fr, "_detect_hw_encoder", return_value="h264_qsv"), \
+             patch.object(fr, "_qsv_zerocopy_opens", return_value=False):
+            cmd = recorder._build_command((0, 0, 1920, 1080), "out.mp4")
+        assert "hwdownload" in cmd[cmd.index("-vf") + 1]
+        assert "-pix_fmt" in cmd
+        assert recorder.health.hw_pipeline == "cpu_roundtrip"
+
+    def test_falls_back_when_dims_dont_match_target_even_if_preflight_opens(self):
+        """A mismatched aspect ratio still needs the CPU-side scale/pad
+        filters (letterboxing) — scale_qsv can't do that without more work,
+        so this must never silently drop the padding to take the fast path."""
+        recorder = fr.FFmpegRecorder()
+        with patch.object(fr, "_probe_ddagrab_support", return_value=True), \
+             patch.object(fr, "_detect_hw_encoder", return_value="h264_qsv"), \
+             patch.object(fr, "_qsv_zerocopy_opens", return_value=True):
+            cmd = recorder._build_command((0, 0, 1600, 900), "out.mp4")
+        assert recorder.health.hw_pipeline == "cpu_roundtrip"
+        assert "pad=1920:1080" in cmd[cmd.index("-vf") + 1]
+
+    def test_never_attempted_for_non_qsv_encoders(self):
+        """nvenc/amf have their own (different, unimplemented) zero-copy
+        derivation paths — must not accidentally take the qsv-specific chain."""
+        recorder = fr.FFmpegRecorder()
+        with patch.object(fr, "_probe_ddagrab_support", return_value=True), \
+             patch.object(fr, "_detect_hw_encoder", return_value="h264_nvenc"), \
+             patch.object(fr, "_qsv_zerocopy_opens") as zerocopy_probe:
+            cmd = recorder._build_command((0, 0, 1920, 1080), "out.mp4")
+        zerocopy_probe.assert_not_called()
+        assert recorder.health.hw_pipeline == "cpu_roundtrip"
+        assert "hwdownload" in cmd[cmd.index("-vf") + 1]
+
+    def test_zerocopy_opens_false_on_nonzero_exit(self):
+        fake = type("R", (), {"returncode": 1, "stderr": b"unsupported"})()
+        with patch.object(fr.subprocess, "run", return_value=fake):
+            assert fr._qsv_zerocopy_opens() is False
+
+    def test_zerocopy_opens_true_on_success(self):
+        fake = type("R", (), {"returncode": 0, "stderr": b""})()
+        with patch.object(fr.subprocess, "run", return_value=fake):
+            assert fr._qsv_zerocopy_opens() is True
+
+
 def test_detect_hw_encoder_picks_first_that_lists_and_opens():
     with patch.object(fr, "_run_ffmpeg_query", return_value="h264_nvenc h264_qsv"), \
          patch.object(fr, "_encoder_opens", return_value=True) as opens:

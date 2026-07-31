@@ -126,11 +126,23 @@ def first_frame_pts_wallclock_s(video_path: Path) -> float | None:
 
 @dataclass
 class AnchorResult:
-    method: str                       # "first_frame_pts_wallclock" | "unavailable"
+    method: str                       # "first_frame_pts_wallclock" | "unavailable" | ...
     correction_us: int
     launch_pairing: ClockPairing | None
     frame0_wallclock_s: float | None
     frame0_monotonic_s: float | None
+    # Partial-fix #3: populated only for method="ffmpeg_progress_time_drift_fit".
+    # `e = drift_slope * m + drift_intercept` fit across every progress
+    # sample seen during the WHOLE recording (m=monotonic_s, e=encoded_s) —
+    # see fit_progress_drift(). A drift_slope != 1.0 is direct evidence that
+    # the video's internal content-time clock and real wallclock time
+    # diverge over the session (see ffmpeg_recorder.py's _StderrMonitor
+    # docstring for why -fps_mode cfr can cause exactly this), which a
+    # single fixed correction_us cannot track — apply_drift_correction below
+    # applies the full affine map instead of a constant shift.
+    drift_slope: float | None = None
+    drift_intercept: float | None = None
+    drift_sample_count: int = 0
 
     def to_capture_health_dict(self) -> dict:
         """Exact shape written into metadata.json's capture_health block —
@@ -142,7 +154,42 @@ class AnchorResult:
             "launch_monotonic_s": self.launch_pairing.monotonic_s if self.launch_pairing else None,
             "frame0_wallclock_s": self.frame0_wallclock_s,
             "frame0_monotonic_s": self.frame0_monotonic_s,
+            "drift_slope": self.drift_slope,
+            "drift_sample_count": self.drift_sample_count,
         }
+
+
+# Real fps mismatches this is meant to catch are small (e.g. a monitor
+# actually running 29.97Hz-locked capture against a nominal 30fps encode
+# target) — a slope this far from 1.0 means the samples are noise/garbage,
+# not a real drift signal, so fall back to the single-sample method instead
+# of trusting it.
+MIN_PLAUSIBLE_DRIFT_SLOPE = 0.5
+MAX_PLAUSIBLE_DRIFT_SLOPE = 1.5
+MIN_DRIFT_FIT_SAMPLES = 8
+
+
+def fit_progress_drift(samples: list[tuple[float, float]]) -> tuple[float, float] | None:
+    """Ordinary least-squares fit of `encoded_s = slope * monotonic_s +
+    intercept` across every ffmpeg progress sample seen in one recording.
+
+    Returns None if there aren't enough samples to fit meaningfully, or the
+    monotonic values have no spread (can't estimate a slope from a single
+    point in time — this is exactly the single-sample case the old method
+    already handles).
+    """
+    n = len(samples)
+    if n < MIN_DRIFT_FIT_SAMPLES:
+        return None
+    mean_m = sum(m for m, _ in samples) / n
+    mean_e = sum(e for _, e in samples) / n
+    num = sum((m - mean_m) * (e - mean_e) for m, e in samples)
+    den = sum((m - mean_m) ** 2 for m, _ in samples)
+    if den == 0:
+        return None
+    slope = num / den
+    intercept = mean_e - slope * mean_m
+    return slope, intercept
 
 
 MAX_PLAUSIBLE_CORRECTION_S = 10.0
@@ -157,6 +204,7 @@ def compute_anchor_correction(
     video_path: Path,
     first_progress_monotonic_s: float | None = None,
     first_progress_encoded_s: float | None = None,
+    progress_samples: list[tuple[float, float]] | None = None,
 ) -> AnchorResult:
     """Returns the correction (in µs) to ADD to every recorded event's `t`
     so that t=0 lands on the first video frame's real presentation instant
@@ -170,7 +218,40 @@ def compute_anchor_correction(
     `_StderrMonitor` — see module docstring "v2") when available; falls
     back to the v1 ffprobe/wallclock-PTS approach only if a progress line
     was never captured (e.g. a near-instant recording).
+
+    Partial-fix #3: when enough progress samples were captured across the
+    WHOLE recording (not just the first line), prefers a drift-aware affine
+    fit over the single-sample constant offset — see `fit_progress_drift`.
+    A single sample can only ever measure the startup gap; it cannot detect
+    or correct drift that accumulates for the rest of the session (e.g. from
+    `-fps_mode cfr` duplicating/dropping frames to hold a constant output
+    rate the real capture can't quite sustain). Falls back to the
+    single-sample method if the fit isn't available or isn't plausible.
     """
+    if progress_samples:
+        fit = fit_progress_drift(progress_samples)
+        if fit is not None:
+            slope, intercept = fit
+            if MIN_PLAUSIBLE_DRIFT_SLOPE <= slope <= MAX_PLAUSIBLE_DRIFT_SLOPE:
+                # correction_us is still reported for backward-compat/logging
+                # (the startup-instant correction the old method would have
+                # produced), but callers should use apply_drift_correction
+                # with drift_slope/drift_intercept for the real per-event fix.
+                frame0_monotonic = -intercept / slope if slope else None
+                correction_us = (
+                    round((frame0_monotonic - old_anchor_monotonic_s) * 1_000_000)
+                    if frame0_monotonic is not None else 0)
+                return AnchorResult(
+                    method="ffmpeg_progress_time_drift_fit",
+                    correction_us=correction_us, launch_pairing=launch_pairing,
+                    frame0_wallclock_s=None, frame0_monotonic_s=frame0_monotonic,
+                    drift_slope=slope, drift_intercept=intercept,
+                    drift_sample_count=len(progress_samples))
+            log.warning(
+                "progress-drift fit implausible (slope=%.6f from %d samples) "
+                "— falling back to the single-sample anchor method",
+                slope, len(progress_samples))
+
     if first_progress_monotonic_s is not None and first_progress_encoded_s is not None:
         frame0_monotonic = first_progress_monotonic_s - first_progress_encoded_s
         correction_us = round((frame0_monotonic - old_anchor_monotonic_s) * 1_000_000)
@@ -238,5 +319,34 @@ def apply_correction(events: list[dict], correction_us: int) -> list[dict]:
         if isinstance(t, int):
             e = dict(e)
             e["t"] = t - correction_us
+        out.append(e)
+    return out
+
+
+def apply_drift_correction(
+    events: list[dict], *, old_anchor_monotonic_s: float,
+    drift_slope: float, drift_intercept: float,
+) -> list[dict]:
+    """Partial-fix #3's real per-event correction: unlike `apply_correction`
+    (a constant shift, i.e. implicitly assuming slope=1.0 — video content
+    time advances at exactly the same rate as real wallclock time), this
+    applies the full affine map fit by `fit_progress_drift` so a session
+    where those two clocks measurably diverge gets a correction that grows
+    over the recording instead of a single fixed number that's only exactly
+    right at one instant (typically start-of-recording) and increasingly
+    wrong everywhere else.
+
+    Each event's `t` (µs since the OLD anchor) is converted back to a real
+    monotonic instant, mapped through the fit (`video_s = slope*monotonic_s
+    + intercept`), then re-expressed as µs since frame 0 (video_s=0).
+    """
+    out = []
+    for e in events:
+        t = e.get("t")
+        if isinstance(t, int):
+            monotonic_s = old_anchor_monotonic_s + t / 1_000_000
+            video_s = drift_slope * monotonic_s + drift_intercept
+            e = dict(e)
+            e["t"] = round(video_s * 1_000_000)
         out.append(e)
     return out

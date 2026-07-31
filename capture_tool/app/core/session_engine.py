@@ -343,6 +343,7 @@ class SessionEngine:
             video_path=video_path,
             first_progress_monotonic_s=recorder.health.first_progress_monotonic_s,
             first_progress_encoded_s=recorder.health.first_progress_encoded_s,
+            progress_samples=recorder.health.progress_samples,
         )
         if anchor.method == "unavailable":
             warnings.append("A2 anchor correction unavailable (first-frame "
@@ -354,6 +355,7 @@ class SessionEngine:
             raw_session_dir=raw_dir,
             out_root=SESSIONS_DIR,
             anchor=anchor,
+            old_anchor_monotonic_s=old_anchor_monotonic,
             game_slug=game_slug,
             game_slug_is_known=game_slug_is_known,
             subsystem_issues=final_issues,

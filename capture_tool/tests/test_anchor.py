@@ -1,8 +1,8 @@
 from unittest.mock import MagicMock, patch
 
 from app.core.finalize.anchor import (
-    AnchorResult, ClockPairing, apply_correction, compute_anchor_correction,
-    first_frame_pts_wallclock_s,
+    AnchorResult, ClockPairing, apply_correction, apply_drift_correction,
+    compute_anchor_correction, first_frame_pts_wallclock_s, fit_progress_drift,
 )
 
 
@@ -114,3 +114,76 @@ def test_progress_based_anchor_falls_back_to_ffprobe_if_implausible(tmp_path):
             first_progress_monotonic_s=100.5, first_progress_encoded_s=999_999.0)
     ffprobe_call.assert_called_once()
     assert result.method == "unavailable"
+
+
+class TestDriftAwareAnchor:
+    """Partial-fix #3: a single (monotonic, encoded) sample can only ever
+    measure the startup gap. If the video's internal content-time clock and
+    real wallclock time diverge over a long recording (e.g. -fps_mode cfr
+    duplicating/dropping frames to hold a constant rate the real capture
+    can't sustain), a single fixed correction is right at one instant and
+    increasingly wrong for the rest of the session. These tests cover the
+    multi-sample linear fit that replaces it when enough samples exist."""
+
+    def _drifting_samples(self, true_slope: float, true_intercept: float,
+                           n: int = 20, start_m: float = 100.0, step: float = 1.0):
+        return [(start_m + i * step, true_slope * (start_m + i * step) + true_intercept)
+                for i in range(n)]
+
+    def test_fit_recovers_true_slope_and_intercept(self):
+        samples = self._drifting_samples(true_slope=0.9985, true_intercept=-0.05)
+        slope, intercept = fit_progress_drift(samples)
+        assert abs(slope - 0.9985) < 1e-9
+        assert abs(intercept - (-0.05)) < 1e-9
+
+    def test_fit_returns_none_with_too_few_samples(self):
+        samples = self._drifting_samples(true_slope=0.9985, true_intercept=0.0, n=3)
+        assert fit_progress_drift(samples) is None
+
+    def test_fit_returns_none_when_all_samples_at_same_instant(self):
+        assert fit_progress_drift([(100.0, 0.0)] * 10) is None
+
+    def test_compute_anchor_correction_prefers_drift_fit_when_available(self, tmp_path):
+        launch_pairing = ClockPairing(wallclock_s=1_785_000_000.0, monotonic_s=100.0)
+        samples = self._drifting_samples(true_slope=0.999, true_intercept=-99.9)
+        with patch("app.core.finalize.anchor.first_frame_pts_wallclock_s") as ffprobe_call:
+            result = compute_anchor_correction(
+                launch_pairing=launch_pairing, old_anchor_monotonic_s=100.0,
+                video_path=tmp_path / "video.mp4", progress_samples=samples,
+                # a single-sample anchor is also available but must be ignored
+                # in favor of the drift fit when the fit is usable.
+                first_progress_monotonic_s=100.5, first_progress_encoded_s=0.45)
+        ffprobe_call.assert_not_called()
+        assert result.method == "ffmpeg_progress_time_drift_fit"
+        assert abs(result.drift_slope - 0.999) < 1e-9
+        assert result.drift_sample_count == len(samples)
+
+    def test_compute_anchor_correction_falls_back_on_implausible_slope(self, tmp_path):
+        """A slope wildly off 1.0 (e.g. from garbage/duplicate samples) is
+        noise, not a real drift signal — must fall back to the single-sample
+        method rather than trust it."""
+        launch_pairing = ClockPairing(wallclock_s=1_785_000_000.0, monotonic_s=100.0)
+        samples = self._drifting_samples(true_slope=5.0, true_intercept=0.0)
+        result = compute_anchor_correction(
+            launch_pairing=launch_pairing, old_anchor_monotonic_s=100.0,
+            video_path=tmp_path / "video.mp4", progress_samples=samples,
+            first_progress_monotonic_s=100.5, first_progress_encoded_s=0.45)
+        assert result.method == "ffmpeg_progress_time"
+
+    def test_apply_drift_correction_grows_over_the_session(self):
+        """The core behavior this whole fix exists for: the correction for
+        an event near the end of a long recording must differ from the
+        correction near the start — a constant shift cannot do this."""
+        events = [{"t": 1_000_000}, {"t": 500_000_000}]  # 1s and 500s in
+        out = apply_drift_correction(
+            events, old_anchor_monotonic_s=100.0,
+            drift_slope=0.998, drift_intercept=-99.8)
+        early_shift = 1_000_000 - out[0]["t"]
+        late_shift = 500_000_000 - out[1]["t"]
+        assert late_shift > early_shift * 100  # grows with elapsed time, not fixed
+
+    def test_apply_drift_correction_skips_events_without_int_t(self):
+        events = [{"type": "focus", "focused": True}]
+        out = apply_drift_correction(
+            events, old_anchor_monotonic_s=100.0, drift_slope=1.0, drift_intercept=0.0)
+        assert out == events

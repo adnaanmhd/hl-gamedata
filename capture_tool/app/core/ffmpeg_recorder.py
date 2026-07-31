@@ -108,6 +108,8 @@ class RecorderHealth:
     fields and the A1/E2 self-check drop-threshold gate."""
     backend: str = "unknown"          # "ddagrab" | "gdigrab"
     encoder: str = "unknown"          # "h264_nvenc" | "h264_qsv" | "h264_amf" | "libx264"
+    # Partial-fix #4 (frame drops) diagnosability: which path actually ran.
+    hw_pipeline: str = "cpu_roundtrip"  # "qsv_zerocopy" | "cpu_roundtrip"
     frames_dropped: int = 0
     frames_encoded: int = 0
     finalize_forced_kill: bool = False
@@ -117,6 +119,10 @@ class RecorderHealth:
     # replaced the ffprobe/wallclock-PTS approach.
     first_progress_monotonic_s: float | None = None
     first_progress_encoded_s: float | None = None
+    # Partial-fix #3 follow-up: every (monotonic_s, encoded_s) sample seen
+    # during the recording, not just the first — lets anchor.py fit a drift
+    # slope across the whole session instead of a single fixed offset.
+    progress_samples: list[tuple[float, float]] = field(default_factory=list)
 
 
 def _run_ffmpeg_query(args: list[str], timeout: float = 5.0) -> str:
@@ -198,6 +204,48 @@ def _ddagrab_opens() -> bool:
     return True
 
 
+def _qsv_zerocopy_opens() -> bool:
+    """Partial-fix #4 (frame drops, ~1.5% on a real ddagrab+h264_qsv
+    session): real hypothesis, UNVERIFIED on real hardware (no Windows/Intel
+    GPU available here — see capture_tool/README.md's disclaimer).
+
+    The current pipeline for ddagrab+h264_qsv is: ddagrab produces D3D11
+    hardware frames -> `hwdownload` pulls every one back to CPU memory ->
+    CPU-bound `scale`/`pad` filters run on it -> `h264_qsv` (a HARDWARE
+    encoder) re-uploads it to GPU memory internally to actually encode. That
+    GPU->CPU->GPU round trip runs on every single frame and is a well-known
+    cause of exactly this kind of encoder-backpressure frame drop under game
+    load — the CPU-side hwdownload+scale/pad work is competing with the game
+    for the same CPU the A1 fix was already trying to protect ffmpeg from.
+
+    ffmpeg supports deriving a QSV hardware-frames context directly from
+    ddagrab's D3D11 frames (`hwmap=derive_device=qsv,format=qsv`) so frames
+    never leave GPU memory before h264_qsv encodes them. This preflights
+    that exact chain with a tiny synthetic capture, same pattern as
+    `_ddagrab_opens`/`_encoder_opens` — "the filter graph is theoretically
+    valid" and "this exact ffmpeg build + Intel driver combination actually
+    opens it" are different questions, and trusting the former without
+    checking has already caused two real regressions in this file (A1, C2).
+    Falls back to the existing hwdownload+CPU-scale path on ANY failure.
+    """
+    cmd = ["-hide_banner", "-loglevel", "error",
+           "-init_hw_device", "qsv=hw", "-filter_hw_device", "hw",
+           "-f", "lavfi", "-i", "ddagrab=output_idx=0:framerate=5:video_size=64x64",
+           "-vf", "hwmap=derive_device=qsv,format=qsv",
+           "-c:v", "h264_qsv", "-frames:v", "3", "-f", "null", "-"]
+    creationflags = CREATE_NO_WINDOW if sys.platform == "win32" else 0
+    try:
+        result = subprocess.run([str(ffmpeg_exe()), *cmd], capture_output=True,
+                                 timeout=10, creationflags=creationflags)
+    except (subprocess.SubprocessError, OSError):
+        return False
+    if result.returncode != 0:
+        log.warning("qsv zero-copy preflight failed: %s",
+                    (result.stderr or b"").decode("utf-8", errors="replace").strip()[-500:])
+        return False
+    return True
+
+
 def _probe_ddagrab_support() -> bool:
     """Real bug found here: `ddagrab` is an avfilter SOURCE (invoked as
     `-f lavfi -i "ddagrab=..."`), not an avdevice — ffmpeg lists it under
@@ -241,6 +289,25 @@ class _StderrMonitor:
         self.frames_dropped = 0
         self.first_progress_monotonic_s: float | None = None
         self.first_progress_encoded_s: float | None = None
+        # Real hypothesis under investigation (partial-fix #3/#4 follow-up):
+        # `-fps_mode cfr` forces a constant OUTPUT frame rate by duplicating
+        # or dropping frames when the real capture can't sustain exactly
+        # `cfg.fps` — that's the same mechanism producing `frames_dropped`.
+        # Every duplicate/drop nudges "video content time" further away from
+        # real wallclock time, so the single-sample anchor (`first_progress_*`,
+        # which only ever measures a single (monotonic, encoded) point near
+        # the START of the recording) can correct the startup offset but
+        # CANNOT correct drift that accumulates over the rest of the
+        # recording — a fixed correction is, by definition, unable to track
+        # a value that changes over time. Recording EVERY progress sample
+        # (not just the first) lets anchor.py fit a line through
+        # (monotonic_s, encoded_s) across the whole session: if ffmpeg's
+        # `time=` truly advanced in lockstep with real wallclock time, that
+        # line's slope would be 1.0; a slope that measurably differs from
+        # 1.0 is direct, physical evidence of exactly this drift, and lets
+        # the correction scale with elapsed time instead of being a single
+        # constant — see anchor.py's `fit_progress_drift`.
+        self.progress_samples: list[tuple[float, float]] = []
         self._lines: list[str] = []
         self._thread = threading.Thread(target=self._run, daemon=True)
 
@@ -283,11 +350,13 @@ class _StderrMonitor:
         m = _DROP_RE.search(line)
         if m:
             self.frames_dropped = int(m.group(1))
-        if self.first_progress_monotonic_s is None:
-            m = _TIME_RE.search(line)
-            if m:
-                h, mi, s = m.groups()
-                self.first_progress_encoded_s = int(h) * 3600 + int(mi) * 60 + float(s)
+        m = _TIME_RE.search(line)
+        if m:
+            h, mi, s = m.groups()
+            encoded_s = int(h) * 3600 + int(mi) * 60 + float(s)
+            self.progress_samples.append((read_at, encoded_s))
+            if self.first_progress_monotonic_s is None:
+                self.first_progress_encoded_s = encoded_s
                 self.first_progress_monotonic_s = read_at
 
     def tail(self, n: int = 20) -> list[str]:
@@ -339,7 +408,21 @@ class FFmpegRecorder:
         encoder = _detect_hw_encoder()
         self.health.encoder = encoder
 
+        # Partial-fix #4: only take the zero-copy path when there's no
+        # scale/pad work to do anyway (capture rect already matches the
+        # target dims — the common case for a native-resolution capture).
+        # A mismatched aspect ratio still needs the CPU-side scale/pad
+        # filters, so it falls back to the existing hwdownload path rather
+        # than trying to reimplement pad-with-black-bars in scale_qsv.
+        use_qsv_zerocopy = (
+            use_ddagrab and encoder == "h264_qsv"
+            and w == cfg.width and h == cfg.height
+            and _qsv_zerocopy_opens())
+        self.health.hw_pipeline = "qsv_zerocopy" if use_qsv_zerocopy else "cpu_roundtrip"
+
         cmd = [str(ffmpeg_exe()), "-y", "-loglevel", "warning", "-stats"]
+        if use_qsv_zerocopy:
+            cmd += ["-init_hw_device", "qsv=hw", "-filter_hw_device", "hw"]
 
         # A2: stamp frame PTS from the wallclock rather than a pipeline-
         # relative clock, so finalize's anchor step (app/core/finalize/
@@ -358,7 +441,13 @@ class FFmpegRecorder:
             ddagrab = (f"ddagrab=output_idx=0:framerate={cfg.fps}:"
                        f"video_size={w}x{h}:offset_x={x}:offset_y={y}")
             cmd += ["-f", "lavfi", *wallclock_ts, "-i", ddagrab]
-            vf = "hwdownload,format=bgra"
+            # Partial-fix #4: keep frames in GPU memory end-to-end when
+            # possible (no hwdownload/CPU-scale round trip) — see
+            # _qsv_zerocopy_opens's docstring. Dims already match cfg.width/
+            # height here (checked above), so no scale/pad filter is needed
+            # either way — the two paths differ only in whether the frame
+            # ever touches CPU memory before h264_qsv encodes it.
+            vf = "hwmap=derive_device=qsv,format=qsv" if use_qsv_zerocopy else "hwdownload,format=bgra"
         else:
             # Fallback path — same limitations as the original tool (issue
             # C2 applies): a desktop GDI surface, not the composited output.
@@ -370,10 +459,17 @@ class FFmpegRecorder:
         if cfg.audio_enabled:
             cmd += ["-f", "wasapi", "-i", "default"]
 
-        scale_pad = (f"scale='min({cfg.width},iw)':'min({cfg.height},ih)':"
-                     f"force_original_aspect_ratio=decrease,"
-                     f"pad={cfg.width}:{cfg.height}:(ow-iw)/2:(oh-ih)/2:black")
-        vf = f"{vf},{scale_pad}" if vf else scale_pad
+        if use_qsv_zerocopy:
+            # Dims already match cfg.width/height (checked above) — skip
+            # scale/pad entirely. Appending it here would force the QSV
+            # hardware frame back through a software filter anyway,
+            # defeating the whole point of the zero-copy path.
+            pass
+        else:
+            scale_pad = (f"scale='min({cfg.width},iw)':'min({cfg.height},ih)':"
+                         f"force_original_aspect_ratio=decrease,"
+                         f"pad={cfg.width}:{cfg.height}:(ow-iw)/2:(oh-ih)/2:black")
+            vf = f"{vf},{scale_pad}" if vf else scale_pad
         cmd += ["-vf", vf, "-fps_mode", "cfr"]
 
         if encoder == "h264_nvenc":
@@ -387,7 +483,16 @@ class FFmpegRecorder:
         else:
             cmd += ["-c:v", "libx264", "-preset", cfg.preset, "-crf", str(cfg.crf)]
 
-        cmd += ["-pix_fmt", "yuv420p"]
+        if not use_qsv_zerocopy:
+            # `-pix_fmt yuv420p` names a SOFTWARE pixel format. On the
+            # zero-copy path the frame is still a QSV hardware surface at
+            # this point (nv12 internally) — forcing yuv420p here would
+            # make ffmpeg convert it back to a software frame right before
+            # h264_qsv encodes it, silently re-introducing the exact
+            # GPU->CPU round trip this whole path exists to avoid. The
+            # hardware encoder picks its own correct internal format
+            # without this flag.
+            cmd += ["-pix_fmt", "yuv420p"]
         if cfg.audio_enabled:
             cmd += ["-c:a", "aac", "-b:a", "160k"]
         # C3: fragmented MP4 so a forced kill leaves a structurally valid
@@ -512,6 +617,7 @@ class FFmpegRecorder:
             self.health.frames_dropped = self._stderr_monitor.frames_dropped
             self.health.first_progress_monotonic_s = self._stderr_monitor.first_progress_monotonic_s
             self.health.first_progress_encoded_s = self._stderr_monitor.first_progress_encoded_s
+            self.health.progress_samples = list(self._stderr_monitor.progress_samples)
 
         return self._output_path
 
