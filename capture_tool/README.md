@@ -87,6 +87,50 @@ fix's math is sanity-checked synthetically above; the zero-copy path's
 actual effect on drop rate can only be confirmed on the same real machine
 that produced the 243/16663 number.
 
+## Real crash: RawMouseCapture took down the whole app mid-session (v0.13.0)
+
+Real crash on a live recording: `raw_mouse.py`'s Win32 message pump hit
+`OSError: [WinError -1073741795]` (`STATUS_ILLEGAL_INSTRUCTION`) inside
+`GetMessageW` a couple minutes into a session. `humyncapture.log` shows
+total silence immediately after — no further activity at all, not even the
+health monitor's own ~2s-later "subsystem failed mid-session" log line that
+should have fired, strongly suggesting the whole process went down, not
+just this one background thread.
+
+Investigated whether `_wndproc_ref` (the ctypes callback trampoline) could
+be getting garbage-collected mid-flight — a well-known class of native-
+callback bug — and ruled it out: the `RawMouseCapture` instance stays
+properly referenced for the whole session (both a local variable in
+`session_engine.run()` and inside `SubsystemMonitor`), so that's not it.
+Root cause of the illegal-instruction fault itself remains **unconfirmed**
+— it may be a genuine OS/driver-level fault on that specific machine; a
+Windows Event Viewer crash record would be needed to say more, and that
+can't be obtained from here.
+
+Two real, confirmed gaps fixed instead of guessing at the native crash:
+
+1. **No process-wide safety net existed at all.** `main.py` had zero
+   `threading.excepthook` — an unhandled exception in any background
+   thread not already wrapped in its own try/except prints to stderr only,
+   which is invisible on a packaged exe. Added one; every future
+   background-thread crash now reaches `humyncapture.log`.
+2. **A dead subsystem mid-session only ever got logged, never stopped
+   the recording.** `_poll_health` (`session_engine.py`) detected fatal
+   subsystem failures via a 2s poll but the main `run()` loop only waited
+   on user-cancel or game-exit — a subsystem could die and the recording
+   would carry on for however much longer the user kept playing, silently
+   missing that modality's data for the rest of the session (the same
+   class of silent-data-loss bug B1 fixed at start-of-session, just not
+   mid-session). Poll interval tightened 2.0s -> 0.5s, and a fatal
+   subsystem failure now sets an `asyncio.Event` that stops recording
+   immediately, same as a user cancel or game exit.
+
+Both are unit-tested (2 tests in `test_thread_excepthook.py`, 2 in
+`test_session_engine.py`). **Neither can be verified to have actually
+prevented THIS specific crash** — that depends on whether the underlying
+fault was Python-catchable at all, which is unknown without a real repro
+or crash dump.
+
 ## ddagrab output_idx sweep — real C2 black-frame FAIL root-caused (v0.12.0)
 
 Real black-frame FAIL on Outer Wilds (99% black for the sampled intro),

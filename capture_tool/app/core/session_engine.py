@@ -282,10 +282,22 @@ class SessionEngine:
         drain_task = asyncio.create_task(self._drain_queue(input_capture))
         cancel_task = asyncio.create_task(self._poll_cancel())
         watch_task = asyncio.create_task(wait_for_exit(meta.game_pid))
-        health_task = asyncio.create_task(self._poll_health(monitor))
+        # Real gap fixed here: a subsystem dying mid-session (confirmed on
+        # real hardware — RawMouseCapture's Win32 message pump crashed) used
+        # to only get logged by _poll_health; the recording just kept going
+        # for however much longer the user played, silently missing that
+        # modality for the rest of the session — the exact "silent data
+        # loss" class of bug B1 already fixed at start-of-session, just not
+        # mid-session. subsystem_failed is set by _poll_health the moment it
+        # detects a dead subsystem, and now stops recording immediately
+        # instead of only warning.
+        subsystem_failed = asyncio.Event()
+        subsystem_fail_task = asyncio.create_task(subsystem_failed.wait())
+        health_task = asyncio.create_task(self._poll_health(monitor, subsystem_failed))
 
         done, pending = await asyncio.wait(
-            {cancel_task, watch_task}, return_when=asyncio.FIRST_COMPLETED)
+            {cancel_task, watch_task, subsystem_fail_task},
+            return_when=asyncio.FIRST_COMPLETED)
         for t in pending:
             t.cancel()
         health_task.cancel()
@@ -385,17 +397,27 @@ class SessionEngine:
         while not self._cancelled:
             await asyncio.sleep(0.25)
 
-    async def _poll_health(self, monitor: SubsystemMonitor) -> None:
+    async def _poll_health(self, monitor: SubsystemMonitor,
+                          subsystem_failed: asyncio.Event) -> None:
         """B2/E1: periodic live health poll during recording (not just at
-        start/end) so a subsystem that dies mid-session is caught promptly."""
+        start/end) so a subsystem that dies mid-session is caught promptly.
+
+        Poll interval tightened 2.0s -> 0.5s, and now sets
+        `subsystem_failed` (stopping the recording — see run()) instead of
+        only logging: a dead capture subsystem left running for the rest of
+        a session just silently loses that modality's data for however much
+        longer the user keeps playing — confirmed on a real session where
+        RawMouseCapture crashed a couple minutes in and recording carried on.
+        """
         try:
             while True:
-                await asyncio.sleep(2.0)
+                await asyncio.sleep(0.5)
                 for issue in monitor.poll():
                     log.error("subsystem '%s' failed mid-session: %s",
                               issue.name, issue.error)
                     self._status("subsystem_warning",
                                   f"{issue.name}: {issue.error}", None)
+                    subsystem_failed.set()
         except asyncio.CancelledError:
             pass
 

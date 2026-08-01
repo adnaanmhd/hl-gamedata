@@ -17,7 +17,31 @@ import logging
 import logging.handlers
 import os
 import sys
+import threading
 from pathlib import Path
+
+
+def _install_thread_excepthook() -> None:
+    """Real gap found: a genuine crash (RawMouseCapture's Win32 message
+    pump, `raw_mouse.py`) took down the whole app with total log silence
+    right after — no further activity at all, not even the health monitor's
+    own ~2s-later "subsystem failed mid-session" log line that should have
+    fired. There was no `threading.excepthook` at all: an exception in any
+    background thread that ISN'T already wrapped in its own try/except
+    prints to stderr only and never reaches humyncapture.log — on a
+    packaged exe, stderr usually isn't visible to the user or preserved
+    anywhere, so this is effectively silent. This won't necessarily catch
+    every failure mode (a hard native-level crash may not go through Python
+    exception handling at all), but it closes a real, confirmed blind spot
+    for any other thread's unhandled exception.
+    """
+    log = logging.getLogger("app.thread_excepthook")
+
+    def _hook(args: threading.ExceptHookArgs) -> None:
+        log.error("unhandled exception in thread %r", args.thread.name,
+                  exc_info=(args.exc_type, args.exc_value, args.exc_traceback))
+
+    threading.excepthook = _hook
 
 
 def _setup_logging() -> Path:
@@ -53,6 +77,7 @@ def _setup_logging() -> Path:
     root.addHandler(sh)
     logging.getLogger("urllib3").setLevel(logging.WARNING)
     logging.getLogger("PIL").setLevel(logging.WARNING)
+    _install_thread_excepthook()
 
     # app._version is deliberately tiny and dependency-free (no PySide6/
     # pynput/etc.) so it's safe to import here, before any heavy app module

@@ -1,6 +1,55 @@
+import asyncio
 import json
 
+from app.core.health import SubsystemIssue, SubsystemMonitor
 from app.core.session_engine import SessionEngine, _clamp_rect_to_bounds, _slugify
+
+
+class _FakeDeadSubsystem:
+    def __init__(self):
+        self.last_error = "boom"
+
+    def is_alive(self):
+        return False
+
+
+class _FakeHealthySubsystem:
+    last_error = None
+
+    def is_alive(self):
+        return True
+
+
+def test_poll_health_stops_recording_when_a_subsystem_dies_mid_session():
+    """Real gap fixed here: a subsystem dying mid-session (confirmed on real
+    hardware) used to only be logged — recording carried on for however
+    much longer the user kept playing, silently missing that modality.
+    _poll_health must now set subsystem_failed so run() stops immediately."""
+    async def scenario():
+        monitor = SubsystemMonitor()
+        monitor.register("raw_mouse_motion", _FakeDeadSubsystem())
+        engine = SessionEngine()
+        subsystem_failed = asyncio.Event()
+        task = asyncio.create_task(engine._poll_health(monitor, subsystem_failed))
+        await asyncio.wait_for(subsystem_failed.wait(), timeout=2.0)
+        task.cancel()
+        return subsystem_failed.is_set()
+
+    assert asyncio.run(scenario())
+
+
+def test_poll_health_does_not_fire_for_a_healthy_session():
+    async def scenario():
+        monitor = SubsystemMonitor()
+        monitor.register("raw_mouse_motion", _FakeHealthySubsystem())
+        engine = SessionEngine()
+        subsystem_failed = asyncio.Event()
+        task = asyncio.create_task(engine._poll_health(monitor, subsystem_failed))
+        await asyncio.sleep(1.2)  # a couple of the tightened 0.5s poll ticks
+        task.cancel()
+        return subsystem_failed.is_set()
+
+    assert asyncio.run(scenario()) is False
 
 
 def test_clamp_rect_shrinks_window_that_overflows_monitor_edge():
