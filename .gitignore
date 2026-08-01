@@ -8,6 +8,12 @@ game-data/
 __pycache__/
 *.pyc
 
+# Python virtual environments (any location in the repo, any common name)
+.venv/
+venv/
+env/
+ENV/
+
 # PyInstaller build output (capture_tool/HumynCapture.spec)
 capture_tool/build/
 capture_tool/dist/
