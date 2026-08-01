@@ -69,7 +69,8 @@ per title, not this project or its code.
 
 | Piece | Status |
 |---|---|
-| `Plugin.cs` compiles cleanly and matches BepInEx 5.x's plugin shape | **Confirmed on real hardware** — built and loaded successfully against Outer Wilds (Unity 2019.4, Mono) |
+| `Plugin.cs` matches BepInEx 5.x's plugin shape and loads correctly | **Confirmed on real hardware** — the compiled DLL loaded successfully against Outer Wilds (Unity 2019.4, Mono), no crash, correct pid-keyed file created |
+| `dotnet build` itself | **Real bug found and fixed**: `CameraLogger.csproj`'s extra restore source pointed at `nuget.org` again (copy-paste mistake) instead of BepInEx's own feed — nuget.org doesn't carry `BepInEx.Core`/`Analyzers`/`PluginInfoProps` at all, so every real build failed with `NU1101`. Added a proper `NuGet.config` pointing at `https://nuget.bepinex.dev/v3/index.json`. **Not yet re-verified** — needs a real `dotnet build` run with the fixed config. |
 | BepInEx actually injects into a real game | **Confirmed** — `LogOutput.log` from a real session shows clean Chainloader startup + plugin load, no crash |
 | pid-based handshake with HumynCapture | **Confirmed** — `camera_bridge/<pid>.jsonl` was created with the exact pid HumynCapture recorded in `metadata.json` |
 | Camera.main sampling / JSON schema | **Real bug found and fixed**: `ResolveCamera()` was hard-excluding any camera with a non-null `targetTexture` (meant to skip UI cameras) — on Outer Wilds this excluded EVERY candidate camera, producing a silent 0-byte output file with no warning logged. Relaxed to a lower-priority signal instead of a hard exclusion; also added a log line for the "genuinely zero cameras found" case so this can't fail silently again. **Not yet re-tested** — needs another real recording with the fixed plugin. |

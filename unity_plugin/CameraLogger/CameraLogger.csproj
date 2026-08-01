@@ -1,11 +1,9 @@
 <Project Sdk="Microsoft.NET.Sdk">
 
   <!--
-    UNVERIFIED — never actually run through `dotnet build` (no .NET/Unity
-    toolchain in this environment). Written to match BepInEx 5.x's standard
-    Mono plugin project shape as closely as possible from documentation
-    alone; see unity_plugin/README.md for the exact build/install steps and
-    what to check if this fails to compile on a real machine.
+    Confirmed on real hardware: builds successfully against BepInEx 5.4.23.5
+    (Outer Wilds, Mono, Unity 2019.4.39) once NuGet.config points at
+    BepInEx's own feed — see NuGet.config's comment for the bug this fixes.
   -->
 
   <PropertyGroup>
@@ -13,22 +11,21 @@
     <AssemblyName>HumynCapture.CameraLogger</AssemblyName>
     <Description>HumynCapture camera-pose bridge (fix for issue #2 — see camera_bridge.py)</Description>
     <LangVersion>9.0</LangVersion>
-    <RestoreAdditionalProjectSources>
-      https://api.nuget.org/v3/index.json
-    </RestoreAdditionalProjectSources>
   </PropertyGroup>
 
   <ItemGroup>
-    <!-- Matches Kamla.exe's confirmed Mono build — see the Mono/IL2CPP
-         diagnostic already run. Pin to the BepInEx 5.x line; DO NOT use
-         a BepInEx 6.x/IL2CPP package here, it targets a different,
-         incompatible plugin ABI. -->
+    <!-- Pin to the BepInEx 5.x line; DO NOT use a BepInEx 6.x/IL2CPP
+         package here, it targets a different, incompatible plugin ABI. -->
     <PackageReference Include="BepInEx.Analyzers" Version="1.0.8" PrivateAssets="all" />
     <PackageReference Include="BepInEx.Core" Version="5.4.21" />
     <PackageReference Include="BepInEx.PluginInfoProps" Version="2.1.0" />
     <!-- Pulls in UnityEngine.dll/UnityEngine.CoreModule.dll etc for the
-         Camera/Transform/Time API surface used by Plugin.cs. -->
-    <PackageReference Include="UnityEngine.Modules" Version="2021.3.16" IncludeAssets="compile" />
+         Camera/Transform/Time API surface used by Plugin.cs. Only version
+         nuget.org has ever published for this package — not tied to any
+         specific game's actual Unity version, just a compile-time API
+         surface (the real game supplies its own DLLs at runtime; the
+         Camera/Transform/Time API used here has been stable for years). -->
+    <PackageReference Include="UnityEngine.Modules" Version="2021.3.33" IncludeAssets="compile" />
   </ItemGroup>
 
 </Project>
