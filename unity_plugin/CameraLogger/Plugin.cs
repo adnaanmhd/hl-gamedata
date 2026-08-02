@@ -48,7 +48,7 @@ namespace HumynCapture.CameraLogger
     {
         public const string PluginGuid = "com.humynlabs.cameralogger";
         public const string PluginName = "HumynCapture Camera Logger";
-        public const string PluginVersion = "1.0.1";
+        public const string PluginVersion = "1.0.2";
 
         private StreamWriter _writer;
         private long _frameIndex;
@@ -56,6 +56,17 @@ namespace HumynCapture.CameraLogger
         private Camera[] _cameraBuffer = new Camera[8];
         private bool _loggedFallbackCamera;
         private bool _loggedNoCamera;
+        // Diagnostic only (real bug found: a real session's camera_bridge
+        // file came back completely 0-byte, with NO further log lines at
+        // all after Awake's "writing to ..." line -- not even the "no
+        // active camera found" warning, which only needs LateUpdate to run
+        // ONCE to fire. That absence points at LateUpdate never executing
+        // at all for this plugin on this game, a different and earlier
+        // problem than camera selection. These flags log once, unconditionally,
+        // the first time each lifecycle method is actually invoked by Unity,
+        // to confirm definitively whether that's happening at all.
+        private bool _loggedAwakeComplete;
+        private bool _loggedFirstLateUpdate;
 
         private void Awake()
         {
@@ -75,10 +86,24 @@ namespace HumynCapture.CameraLogger
                 Logger.LogError("[CameraLogger] failed to open output file: " + e);
                 _writer = null;
             }
+            // Diagnostic: proves Awake ran to completion without an
+            // exception escaping past the try/catch above (which would
+            // otherwise disable the component silently in some Unity
+            // versions).
+            Logger.LogInfo("[CameraLogger] Awake() complete, writer=" +
+                            (_writer != null ? "open" : "null") +
+                            ", enabled=" + enabled + ", gameObject.activeInHierarchy=" +
+                            gameObject.activeInHierarchy);
+            _loggedAwakeComplete = true;
         }
 
         private void LateUpdate()
         {
+            if (!_loggedFirstLateUpdate)
+            {
+                Logger.LogInfo("[CameraLogger] LateUpdate() is running (first call).");
+                _loggedFirstLateUpdate = true;
+            }
             if (_writer == null) return;
 
             Camera cam = ResolveCamera();
