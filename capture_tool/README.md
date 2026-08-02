@@ -87,6 +87,37 @@ fix's math is sanity-checked synthetically above; the zero-copy path's
 actual effect on drop rate can only be confirmed on the same real machine
 that produced the 243/16663 number.
 
+## Black-frame check false-positived on legitimately dark game content (v0.14.0)
+
+Real FAIL on a real Outer Wilds delivery: "capture region is black for 78%
+of the sampled intro." Confirmed by extracting and looking at the actual
+frames (not just trusting the percentage) that this was **not** a broken
+capture — "Full Screen Mode" was even off (windowed), ruling out C2's usual
+exclusive-fullscreen cause. The video's first ~2 minutes were genuinely the
+game's own narrative opening: the Annapurna Interactive splash screen, then
+Outer Wilds' "wake up" beat, played out in near-total darkness by design —
+pixel-indistinguishable from a real broken capture using brightness alone.
+A checkpoint further into the same video (t=180-240s) showed real, detailed
+gameplay, proving the capture itself was working the whole time.
+
+`detect_black_intro` only ever sampled the first 5 seconds, so it had no
+way to tell "legitimately dark intro" from "genuinely broken forever" —
+both look identical in that one window. Added
+`detect_persistent_black_capture` (`blackframe.py`): samples 4 checkpoints
+spread across the WHOLE video (including the original intro window) and
+only fails if literally every checkpoint is majority-black. A real C2
+failure has no escape from that; a dark intro resolves into real content
+within a minute or two, same as it did in the real delivery that surfaced
+this. Falls back to the original intro-only check for videos too short to
+spread checkpoints across. `pipeline.py` now downgrades an all-black-intro-
+but-real-content-later case to a WARN instead of a hard FAIL.
+
+Verified with real, non-mocked ffmpeg clips built to reproduce the exact
+scenario (a concatenated black-then-real-content clip, matching what the
+real delivery's frames showed) — 4 new tests in `test_blackframe.py`,
+9 total in that file, all passing. This is a genuine, tested fix, not
+theoretical — the exact case that triggered it now passes correctly.
+
 ## Real crash: RawMouseCapture took down the whole app mid-session (v0.13.0)
 
 Real crash on a live recording: `raw_mouse.py`'s Win32 message pump hit

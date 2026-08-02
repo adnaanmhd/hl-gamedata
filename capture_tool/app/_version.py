@@ -11,4 +11,4 @@ exe actually running the latest fixes" is answerable by reading one line
 instead of guessing from symptoms — several rounds of back-and-forth here
 were spent on exactly that ambiguity.
 """
-HUMYN_VERSION = "0.13.0"
+HUMYN_VERSION = "0.14.0"

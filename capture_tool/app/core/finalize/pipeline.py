@@ -201,11 +201,23 @@ def run_finalize(
     # --- independent full v2 contract + sync + off-by-one check. ---
     qa = translator_v2.check_session_v2(out_dir, raw_bundle=raw_session_dir)
 
-    looks_black, black_fraction = blackframe.detect_black_intro(out_dir / "video.mp4")
+    # Real false positive confirmed on a real delivery: a legitimately dark
+    # game intro (narrative black-screen opening) is pixel-indistinguishable
+    # from a genuinely broken exclusive-fullscreen capture if only the first
+    # few seconds are sampled. Checking multiple points across the whole
+    # video instead — a real C2 failure stays black everywhere; a dark
+    # intro resolves into real content later on. See blackframe.py's
+    # detect_persistent_black_capture docstring.
+    looks_black, black_detail = blackframe.detect_persistent_black_capture(out_dir / "video.mp4")
     if looks_black:
-        qa.fail(f"capture region is black for {black_fraction:.0%} of the "
-                f"sampled intro — see issue C2 (exclusive-fullscreen bypasses "
-                f"composition, or the capture rect is wrong)")
+        qa.fail(f"capture region is black across the entire sampled video "
+                f"(intro {black_detail['intro_fraction']:.0%}) — see issue C2 "
+                f"(exclusive-fullscreen bypasses composition, or the capture "
+                f"rect is wrong)")
+    elif black_detail["intro_fraction"] >= blackframe.BLACK_FRACTION_FAIL_THRESHOLD:
+        qa.warn(f"intro is {black_detail['intro_fraction']:.0%} black but "
+                f"later checkpoints show real content — likely a legitimate "
+                f"dark opening, not a broken capture")
 
     dq = result["data_quality"]
     sync_status = dq["controls_video_sync"]
