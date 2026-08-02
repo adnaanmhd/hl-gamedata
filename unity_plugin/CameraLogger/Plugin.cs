@@ -48,7 +48,7 @@ namespace HumynCapture.CameraLogger
     {
         public const string PluginGuid = "com.humynlabs.cameralogger";
         public const string PluginName = "HumynCapture Camera Logger";
-        public const string PluginVersion = "1.0.2";
+        public const string PluginVersion = "1.0.3";
 
         private StreamWriter _writer;
         private long _frameIndex;
@@ -67,6 +67,7 @@ namespace HumynCapture.CameraLogger
         // to confirm definitively whether that's happening at all.
         private bool _loggedAwakeComplete;
         private bool _loggedFirstLateUpdate;
+        private bool _loggedFirstUpdate;
 
         private void Awake()
         {
@@ -97,6 +98,18 @@ namespace HumynCapture.CameraLogger
             _loggedAwakeComplete = true;
         }
 
+        private int _lastSampledUnityFrame = -1;
+
+        private void Update()
+        {
+            if (!_loggedFirstUpdate)
+            {
+                Logger.LogInfo("[CameraLogger] Update() is running (first call).");
+                _loggedFirstUpdate = true;
+            }
+            Sample();
+        }
+
         private void LateUpdate()
         {
             if (!_loggedFirstLateUpdate)
@@ -104,6 +117,24 @@ namespace HumynCapture.CameraLogger
                 Logger.LogInfo("[CameraLogger] LateUpdate() is running (first call).");
                 _loggedFirstLateUpdate = true;
             }
+            Sample();
+        }
+
+        private void Sample()
+        {
+            // Diagnostic hardening: real session confirmed Awake() runs and
+            // the component stays enabled/active, but LateUpdate() never
+            // logged even once across a full 4-minute recording -- Unity's
+            // frame-update loop wasn't reaching it at all, for reasons still
+            // unconfirmed. Also hooking Update() (a different callback,
+            // called earlier in the frame) to see whether ONE of the two
+            // fires when the other doesn't -- if so, that's the real fix,
+            // not just a diagnostic. Guarded by frame number so double-
+            // sampling the same frame (if both somehow fire) still only
+            // writes one line.
+            if (Time.frameCount == _lastSampledUnityFrame) return;
+            _lastSampledUnityFrame = Time.frameCount;
+
             if (_writer == null) return;
 
             Camera cam = ResolveCamera();
