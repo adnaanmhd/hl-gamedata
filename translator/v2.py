@@ -15,9 +15,12 @@ from __future__ import annotations
 
 import csv
 import json
+import logging
 import re
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+
+log = logging.getLogger(__name__)
 
 from . import rrd
 from . import sync
@@ -143,6 +146,7 @@ def translate_bundle_v2(bundle_dir: Path, out_root: Path, *,
                         tail_s: float = trimmod.TAIL_S,
                         make_rrd: bool = True,
                         rrd_python: str | None = None,
+                        rrd_in_process: bool = False,
                         lag_correct: bool = True) -> dict:
     bundle_dir = Path(bundle_dir)
     meta = json.loads((bundle_dir / "metadata.json").read_text())
@@ -196,6 +200,8 @@ def translate_bundle_v2(bundle_dir: Path, out_root: Path, *,
             return sync.estimate_lag(mdx, mdy, adx, ady)
 
         est = _measure(rows)
+        log.info("sync iter0 (pre-correction): lag=%.1fms corr=%.4f active=%.4f",
+                 est.lag_ms(info.fps), est.correlation, est.active_fraction)
         sync_report.update(
             measured=True,
             measured_lag_ms=round(est.lag_ms(info.fps), 1),
@@ -208,7 +214,7 @@ def translate_bundle_v2(bundle_dir: Path, out_root: Path, *,
                 f"controls-to-video sync unverifiable (active "
                 f"{est.active_fraction:.2%}, |corr| {abs(est.correlation):.3f}) "
                 f"— no correction applied")
-        for _ in range(3):
+        for i in range(3):
             if not (measurable and abs(est.lag_ms(info.fps)) > sync.TARGET_ABS_LAG_MS):
                 break
             shift_us += round(-est.lag_frames / info.fps * 1_000_000)
@@ -218,12 +224,19 @@ def translate_bundle_v2(bundle_dir: Path, out_root: Path, *,
             rows, stats = bin_session(events, info, keybind, rules, bound,
                                       frame_pts_us=pts)
             est = _measure(rows)
+            log.info(
+                "sync iter%d: applied cumulative shift=%.1fms -> lag=%.1fms "
+                "corr=%.4f", i + 1, shift_us / 1000.0, est.lag_ms(info.fps),
+                est.correlation)
         sync_report.update(
             applied_shift_ms=round(shift_us / 1000.0, 1),
             residual_lag_ms=round(est.lag_ms(info.fps), 1),
             residual_correlation=round(est.correlation, 4))
         status, msg = sync.verdict(est, info.fps)
         sync_report["status"] = status
+        log.info("sync final: status=%s applied_shift=%.1fms residual_lag=%.1fms "
+                 "residual_corr=%.4f", status, shift_us / 1000.0,
+                 est.lag_ms(info.fps), est.correlation)
         if status == "FAIL":
             warnings.append(f"controls-to-video sync STILL FAILING after "
                             f"correction: {msg}")
@@ -244,7 +257,7 @@ def translate_bundle_v2(bundle_dir: Path, out_root: Path, *,
     (out_dir / "session.json").write_text(json.dumps(session, indent=2))
 
     if make_rrd:
-        rrd.generate(out_dir, python=rrd_python)
+        rrd.generate(out_dir, python=rrd_python, in_process=rrd_in_process)
     else:
         rrd.write_script(out_dir)
 
