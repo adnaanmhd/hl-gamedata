@@ -24,11 +24,6 @@ in-tool self-test" source (§6.4, §7). The only genuinely new work here is:
   2. Run the C2 black-frame heuristic (translator has no visual check).
   3. Fold the v2 QA result together with capture-time subsystem health
      (app.core.health) into the single `ready_for_upload` gate (E2).
-  4. Fix #2 (camera pose/intrinsics columns 100% empty): patch them in from
-     the BepInEx camera-logger plugin's output, if that game's log exists
-     for this session's pid — see camera_bridge.py. Same "post-process
-     rather than touch translator's own writer" reasoning as above: this
-     only ever fills in columns `translate_bundle_v2` already writes blank.
 
 This requires the sibling `translator/` package to be importable
 (`PYTHONPATH=<repo root>` — see capture_tool/README.md's packaging note for
@@ -42,10 +37,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from app.core.finalize import blackframe, camera_bridge
+from app.core.finalize import blackframe
 from app.core.finalize.anchor import AnchorResult, apply_correction, apply_drift_correction
 from app.core.health import SubsystemIssue, run_self_check
-from app.core.paths import ROOT as _APPDATA_ROOT
 
 log = logging.getLogger(__name__)
 
@@ -180,23 +174,6 @@ def run_finalize(
             sync_report.get("status"))
     else:
         log.info("sync: not measured (%s)", sync_report)
-
-    # --- fix #2: patch in real camera pose/intrinsics if a BepInEx camera
-    # log exists for this game's pid. UNVERIFIED end-to-end (no Unity/
-    # BepInEx toolchain here to produce a real log to test against) —
-    # see camera_bridge.py and unity_plugin/CameraLogger/Plugin.cs. Missing
-    # entirely (no plugin installed for this title, or a non-Unity game) is
-    # the expected, silent, non-fatal case — camera columns simply stay
-    # blank exactly as they are today, this never blocks finalize.
-    pid_at_capture = meta.get("game", {}).get("pid_at_capture")
-    if pid_at_capture is not None:
-        camera_log = camera_bridge.find_camera_log(
-            pid_at_capture, _APPDATA_ROOT / "camera_bridge")
-        if camera_log is not None:
-            patched = camera_bridge.patch_frames_csv(
-                out_dir / "frames.csv", out_dir / "session.json", camera_log)
-            log.info("camera_bridge: patched %d/%d frames.csv rows from %s",
-                      patched, result["frames"], camera_log)
 
     # --- independent full v2 contract + sync + off-by-one check. ---
     qa = translator_v2.check_session_v2(out_dir, raw_bundle=raw_session_dir)

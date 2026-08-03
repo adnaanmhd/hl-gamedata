@@ -266,48 +266,15 @@ Two concrete changes landed instead of a guessed fix:
    qa_status/issues/self-check result (`pipeline.py`). Next real-hardware
    test should need far less back-and-forth to diagnose.
 
-## Issue #2 — camera pose/intrinsics data (v0.9.0)
+## Issue #2 — camera pose/intrinsics data — descoped
 
-Every real delivery checked so far had `frames.csv`'s camera columns
-(`c2w_m00`..`m33`, `camera_fx/fy/cx/cy`, distortion coefficients) 100% empty
-— not corrupted, never captured: HumynCapture only sees screen pixels + OS
-input, never the game engine's real camera. Fixing this needed something
-that runs INSIDE the game process, which is a different kind of fix than
-everything else in this repo:
-
-- **`unity_plugin/CameraLogger/`** — a BepInEx plugin (game confirmed Unity
-  Mono build via a real on-machine check: `MonoBleedingEdge\` present, no
-  `GameAssembly.dll`) that samples `Camera.main`'s transform every frame and
-  writes it to `%LOCALAPPDATA%\HumynCapture\camera_bridge\<pid>.jsonl`,
-  keyed by the game's own pid (already recorded in `metadata.json` as
-  `game.pid_at_capture` — the only handshake that works given HumynCapture
-  attaches to an already-running game rather than launching it). Designed
-  to be game-agnostic: the same compiled DLL should work unmodified for any
-  other Mono-build Unity title, only the injection setup repeats per game
-  (IL2CPP titles need a different BepInEx variant — see
-  `unity_plugin/README.md`'s per-title checklist).
-  **UNVERIFIED** — no Unity/BepInEx/.NET toolchain available here to
-  compile or inject it for real.
-- **`app/core/finalize/camera_bridge.py`** — reads that log, converts
-  Unity's position+quaternion into the delivery's camera-to-world matrix
-  format (no axis conversion — Unity's own left-handed X-right/Y-up/
-  Z-forward convention already matches the client's spec), derives
-  `fx=fy`/`cx`/`cy` from the logged FOV (satisfies the client's own stated
-  acceptance criterion, spec §4.3#8: "camera_intrinsics parameters, fx =
-  fy"), and patches `frames.csv` in place for every frame with a
-  close-enough-in-time sample (frames with no close sample are left blank,
-  never guessed at). **Unit-tested — 17 passing tests**
-  (`test_camera_bridge.py`), this half is trustworthy independent of the
-  plugin.
-- Wired into `finalize/pipeline.py`: runs automatically after
-  `translate_bundle_v2` if a camera log exists for the session's pid;
-  silently no-ops (columns stay blank, exactly as today) if it doesn't —
-  never blocks finalize for a title without the plugin installed.
-
-**Next real step**: run `unity_plugin/README.md`'s injection checklist
-against the real `Kamla.exe` to confirm BepInEx actually loads the plugin,
-then a real recording to confirm `camera_bridge.py` correctly merges its
-output — this cannot be verified further without that hardware.
+A BepInEx-based Unity camera-logger plugin (`unity_plugin/CameraLogger/`)
+and a matching `app/core/finalize/camera_bridge.py` merge step were built
+and partially verified on real hardware (BepInEx injection + pid handshake
+confirmed working) to fill in `frames.csv`'s always-empty camera columns.
+**Removed per product decision** — this session only needs per-frame input
+data, not camera telemetry. `frames.csv`'s camera columns remain
+intentionally blank, same as the original tool.
 
 ## ddagrab: listed and correctly invoked, still needed a real preflight
 

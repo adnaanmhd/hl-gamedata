@@ -11,7 +11,7 @@ from pathlib import Path
 
 # qa_checks.py must sit alongside this script
 sys.path.insert(0, str(Path(__file__).parent))
-from qa_checks import QAConfig, run_checks  # noqa: E402
+from qa_checks import QAConfig, QALevel, run_checks  # noqa: E402
 
 
 def main() -> None:
@@ -50,8 +50,21 @@ def main() -> None:
     video_path = folder / "video.mp4"
 
     # --- run checks ---
+    # Camera pose/intrinsics are intentionally not captured (input-only
+    # capture, no engine-side camera plugin) — skip the checks that depend
+    # on that data rather than have every session FAIL on missing columns
+    # that were never supposed to be there. See qa_checks.py's own
+    # docstring: "Pass a QAConfig to skip or downgrade checks for data that
+    # is not provided (e.g. no camera matrices)" — this is exactly that case.
+    qa_config = QAConfig(
+        camera_matrix=QALevel.SKIP,
+        camera_intrinsics=QALevel.SKIP,
+        camera_orientation=QALevel.SKIP,
+        camera_stationary=QALevel.SKIP,
+        camera_spin=QALevel.SKIP,
+    )
     result = run_checks(rows, vendor=vendor, task_id=task_id, game=game,
-                        qa_config=QAConfig(), video_path=video_path)
+                        qa_config=qa_config, video_path=video_path)
 
     # --- report ---
     status_icon = {"PASS": "✓", "WARN": "⚠", "FAIL": "✗"}.get(result.status, "?")
