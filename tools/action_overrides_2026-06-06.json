@@ -1,0 +1,28 @@
+{
+  "_comment": [
+    "Video-verified labels for the 2026-06-06 Outer Wilds sessions.",
+    "ambiguous: suit-context Space runs, jump vs jetpack_boost, decided from the",
+    "  suit HUD GRAVITY readout / airborne view at each press moment (2.0x on a",
+    "  gravity floor = grounded jump; 0.0x / elevated view = airborne boost).",
+    "  The tap-vs-hold heuristic agrees on only 3 of 7 runs - overrides win.",
+    "context: f2968-3011 is the 1.8s 'Remote Pilot [E]' hold that STARTS model",
+    "  piloting; the segment smoothing pulls model_ship back over the press, but",
+    "  the press itself is a world interact (general_primary_interact)."
+  ],
+  "2026-06-06T16-01-50Z_outerwild_c_82f637f618cc1ec0": {
+    "ambiguous": {
+      "19490": "movement_jump",
+      "19909": "movement_jump",
+      "19935": "movement_jetpack_boost",
+      "20069": "movement_jump",
+      "20091": "movement_jetpack_boost",
+      "20104": "movement_jetpack_boost",
+      "20116": "movement_jump"
+    }
+  },
+  "2026-06-06T18-50-54Z_outer_wild_c_82f637f618cc1ec0": {
+    "context": {
+      "2968-3011": "on_foot"
+    }
+  }
+}

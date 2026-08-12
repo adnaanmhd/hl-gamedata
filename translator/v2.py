@@ -19,13 +19,16 @@ import re
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+from . import context as ctxmod
 from . import rrd
 from . import sync
 from . import trim as trimmod
 from . import video as V
 from .binner import C2W_COLS, CAMERA_COLS, bin_session
-from .keybind import bound_literals, build_resolver
-from .keybinds import game_key_from_name
+from .keybind import (bound_literals, build_resolver, collapse_ambiguous_runs,
+                      invert_keybind, resolve_actions)
+from .keybinds import (AMBIGUOUS_PAIRS, CONTEXT_ALLOWED, KEYBINDS,
+                       game_key_from_name)
 from .translate import VENDOR, load_events, resolve_keybind
 
 # --------------------------------------------------------------------------- #
@@ -79,6 +82,82 @@ def key_display(tok: str) -> str:
     if len(tok) == 1:
         return tok.upper()
     return "".join(p.capitalize() for p in tok.split("_"))
+
+
+_KEY_DISPLAY_INV = {v: k for k, v in _KEY_DISPLAY.items()}
+_BTN_DISPLAY_INV = {v: k for k, v in _BTN_DISPLAY.items()}
+
+
+def key_canonical(disp: str) -> str:
+    """v2 display name -> canonical token (inverse of key_display)."""
+    if disp in _KEY_DISPLAY_INV:
+        return _KEY_DISPLAY_INV[disp]
+    if len(disp) == 1:
+        return disp.lower()
+    return re.sub(r"(?<!^)(?=[A-Z])", "_", disp).lower()
+
+
+# --------------------------------------------------------------------------- #
+# context-gated action resolution over binner rows
+# --------------------------------------------------------------------------- #
+def apply_context_to_rows(rows: list[list], ctx_track: list[str], slug: str,
+                          rules, fps: float, *,
+                          ambig_overrides: dict[int, str] | None = None) -> dict:
+    """Re-resolve input_actions per row using the per-frame context track and
+    strip context-dead literals from input_keys (in place, v1-canonical rows).
+
+    Returns a summary: frames whose actions changed, dead-press strip counts
+    per literal, and the ambiguous-pair choices made.
+    """
+    allowed = CONTEXT_ALLOWED[slug]
+    per_frame: list[list[str]] = []
+    dead_strips: dict[str, int] = {}
+    changed = 0
+    def _active(v) -> bool:
+        """Mouse delta counts as motion: not blank and not (float) zero."""
+        return v not in ("", None) and float(v) != 0.0
+
+    for i, row in enumerate(rows):
+        keys, _actions, btns, dx, dy = row[-5:]
+        kset = set(keys.split("|")) - {""} if keys else set()
+        bset = set(btns.split("|")) - {""} if btns else set()
+        motion = (_active(dx), _active(dy))
+        acts, dead = resolve_actions(kset | bset, motion, rules,
+                                     context=ctx_track[i], allowed=allowed)
+        if dead:
+            for t in sorted(dead & (kset | bset)):
+                dead_strips[t] = dead_strips.get(t, 0) + 1
+            if dead & kset:
+                kset -= dead
+                row[-5] = "|".join(sorted(kset))
+            if dead & bset:      # context-dead buttons strip too (07-31 rule)
+                bset -= dead
+                row[-3] = "|".join(sorted(bset))
+        per_frame.append(acts)
+    pair = AMBIGUOUS_PAIRS.get(slug)
+    chosen = (collapse_ambiguous_runs(per_frame, pair, fps,
+                                      overrides=ambig_overrides)
+              if pair else {})
+    for i, row in enumerate(rows):
+        new = "|".join(per_frame[i])
+        if row[-4] != new:
+            changed += 1
+            row[-4] = new
+    return {"frames_changed": changed, "dead_press_strips": dead_strips,
+            "ambiguous_choices": {start: action
+                                  for action, starts in _group_runs(chosen).items()
+                                  for start in starts}}
+
+
+def _group_runs(chosen: dict[int, str]) -> dict[str, list[int]]:
+    """{action: [run-start frames]} — for reporting collapse decisions."""
+    out: dict[str, list[int]] = {}
+    prev = None
+    for i in sorted(chosen):
+        if prev is None or i != prev + 1:
+            out.setdefault(chosen[i], []).append(i)
+        prev = i
+    return out
 
 
 # --------------------------------------------------------------------------- #
@@ -143,7 +222,8 @@ def translate_bundle_v2(bundle_dir: Path, out_root: Path, *,
                         tail_s: float = trimmod.TAIL_S,
                         make_rrd: bool = True,
                         rrd_python: str | None = None,
-                        lag_correct: bool = True) -> dict:
+                        lag_correct: bool = True,
+                        action_overrides: dict[int, str] | None = None) -> dict:
     bundle_dir = Path(bundle_dir)
     meta = json.loads((bundle_dir / "metadata.json").read_text())
     game_info = meta.get("game", {})
@@ -232,6 +312,27 @@ def translate_bundle_v2(bundle_dir: Path, out_root: Path, *,
                         "unavailable (add --with numpy --with "
                         "opencv-python-headless)")
 
+    # Context-gated action resolution: place each multi-bound key's press onto
+    # the ONE semantic the game mode supports (customer feedback: no fan-out).
+    ctx_summary: dict = {}
+    if slug in ctxmod.CONTEXT_GAMES:
+        if ctxmod.available():
+            ctx_track = ctxmod.classify_video(out_dir / "video.mp4", info.fps, slug)
+            if len(ctx_track) == len(rows):
+                ctx_summary = apply_context_to_rows(
+                    rows, ctx_track, slug, rules, info.fps,
+                    ambig_overrides=action_overrides)
+            else:
+                warnings.append(
+                    f"context track {len(ctx_track)} frames != {len(rows)} rows "
+                    f"— context gating SKIPPED; multi-bound keys fan out, DO NOT "
+                    f"SHIP without review")
+        else:
+            warnings.append(
+                "context gating SKIPPED (numpy/opencv unavailable) — multi-bound "
+                "keys fan out, DO NOT SHIP without review (add --with numpy "
+                "--with opencv-python-headless)")
+
     strip_stats: dict[str, int] = {}
     v2rows = _v2_rows(rows, bound, strip_stats)
     with (out_dir / "frames.csv").open("w", newline="") as f:
@@ -273,13 +374,15 @@ def translate_bundle_v2(bundle_dir: Path, out_root: Path, *,
         "warnings": warnings, "stripped_keys": strip_stats, "sync": sync_report,
         "trim": {"head_cut_s": tr.head_cut_s, "end_cut_s": tr.end_cut_s,
                  "new_duration_s": tr.new_duration_s},
+        "context": ctx_summary,
         "data_quality": {
             "controls_video_sync": sync_dq,
             "keyboard_capture": "ok" if stats.has_keyboard else "missing",
             "mouse_capture": "ok" if stats.has_mouse_motion else "missing",
             "mouse_buttons": "ok" if stats.has_mouse_buttons else "missing",
             "input_bleed_frames": len(stats.bleed_frames),
-            "distinct_actions": sorted(stats.actions_seen),
+            "distinct_actions": sorted({a for row in rows
+                                        for a in (row[-4] or "").split("|") if a}),
             "frame_timing": stats.frame_timing,
         },
     }
@@ -451,6 +554,36 @@ def check_session_v2(session_dir: Path, raw_bundle: Path | None = None) -> V2Res
             any_motion = True
     if keys_no_action:
         r.fail(f"{keys_no_action} frames have input_keys but null input_actions")
+
+    # same-literal fan-out (customer feedback): a frame must never list two
+    # actions that are alternative meanings of ONE held key — only the action
+    # the character is actually performing. Reconstructed from the built-in
+    # keybind for the session's game.
+    qa_slug = game_key_from_name(s.get("game_title", ""))
+    if qa_slug in KEYBINDS:
+        kb = dict(KEYBINDS[qa_slug])
+        kb.update(KEYBIND_PATCHES.get(qa_slug, {}))
+        lit2sem = invert_keybind(kb)
+        fanout = 0
+        example = ""
+        for x in rows:
+            acts = set((x[col["input_actions"]] or "").split("|")) - {""}
+            if len(acts) < 2:
+                continue
+            toks = ([key_canonical(t) for t in x[col["input_keys"]].split("|") if t]
+                    + [_BTN_DISPLAY_INV.get(b, b)
+                       for b in x[col["input_mouse_buttons"]].split("|") if b])
+            for t in toks:
+                hit = acts & set(lit2sem.get(t, ()))
+                if len(hit) >= 2:
+                    fanout += 1
+                    example = example or (f"frame {x[col['frame_id']]}: "
+                                          f"{t} -> {sorted(hit)}")
+                    break
+        if fanout:
+            r.fail(f"same-literal action fan-out in {fanout} frames — key(s) "
+                   f"emit multiple conditional actions (e.g. {example}); "
+                   f"context gating missing or failed")
     if bad_tokens:
         r.fail(f"non-v2 key tokens in input_keys: {sorted(bad_tokens)}")
     if bad_btns:

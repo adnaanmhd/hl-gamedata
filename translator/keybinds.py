@@ -57,6 +57,65 @@ KEYBINDS: dict[str, dict] = {
 }
 
 
+# --------------------------------------------------------------------------- #
+# Per-game context gating (customer feedback 2026-07 via Jack Davis: a key with
+# >1 conditional action must emit only the action the character is performing).
+#
+# Semantics listed here fire ONLY in the given contexts (translator/context.py
+# classifies frames from the video); semantics NOT listed are ungated — they
+# keep firing in every context, deliberately, so we never invent strips beyond
+# the video evidence. Contexts: on_foot, suit, dialogue, model_ship, cockpit,
+# map, pause_menu.
+#
+# Evidence (2026-06-06 sessions, frame-verified against in-game prompts):
+#   cockpit "Unbuckle [E]" -> E stays interact; F toggles ship HEADLIGHTS ->
+#   flashlight stays ungated; map "Zoom View [LShift/LCtl]" -> thrust gated
+#   out of map; model console "Down/Up Thrust [LCtl/LShift]" -> thrust live in
+#   model_ship; suit jetpack shares the flight thrust binds (approved 07-31).
+#   model_ship Space = flight_match_velocity is UNVERIFIED (no press exists in
+#   any sample; the model is flown with the ship control set).
+_WORLD_LIVE = frozenset({"on_foot", "suit", "cockpit", "model_ship", "map"})
+
+CONTEXT_ALLOWED: dict[str, dict[str, frozenset[str]]] = {
+    "outer_wilds": {
+        "general_confirm":               frozenset({"dialogue", "pause_menu"}),
+        "general_primary_interact":      frozenset({"on_foot", "suit", "cockpit"}),
+        "general_secondary_interact":    frozenset({"on_foot", "suit"}),
+        "movement_jump":                 frozenset({"on_foot", "suit"}),
+        "movement_jetpack_boost":        frozenset({"suit"}),
+        "equipment_secondary_tool_action": frozenset({"on_foot", "suit"}),
+        "flight_match_velocity":         frozenset({"cockpit", "model_ship"}),
+        "flight_up_thrust":              frozenset({"cockpit", "model_ship", "suit"}),
+        "flight_down_thrust":            frozenset({"cockpit", "model_ship", "suit"}),
+        "flight_roll_mode":              frozenset({"cockpit"}),
+        "flight_landing_camera":         frozenset({"cockpit"}),
+        "flight_autopilot":              frozenset({"cockpit"}),
+        "flight_cockpit_free_look":      frozenset({"cockpit"}),
+        "flight_lock_on":                frozenset({"cockpit", "map"}),
+        # dialogue/pause freeze world input (approved 07-31): movement/look axes
+        # and tool/button actions go dead there. They stay live in map — the
+        # map's own prompts bind WASD to Pan View and the mouse to Rotate View.
+        "movement_move_x_axis":          _WORLD_LIVE,
+        "movement_move_y_axis":          _WORLD_LIVE,
+        "movement_look_x_axis":          _WORLD_LIVE,
+        "movement_look_y_axis":          _WORLD_LIVE,
+        "equipment_primary_tool_action": _WORLD_LIVE,
+        "equipment_retrieve_scout":      _WORLD_LIVE,
+        "equipment_tool_x_axis":         _WORLD_LIVE,
+        "equipment_tool_y_axis":         _WORLD_LIVE,
+        "equipment_signalscope":         _WORLD_LIVE,
+    },
+}
+
+# Exclusive pair that can survive gating on ONE literal in ONE context:
+# suit-context Space = jump (press on the ground) vs jetpack boost (airborne).
+# Collapsed per held-run: tap -> jump, hold -> boost, overridable with
+# video-verified per-run labels (keybind.collapse_ambiguous_runs).
+AMBIGUOUS_PAIRS: dict[str, tuple[str, str]] = {
+    "outer_wilds": ("movement_jump", "movement_jetpack_boost"),
+}
+
+
 def _collapse(s: str) -> str:
     """Lowercase, strip every non-alphanumeric — for fuzzy game-name matching."""
     return re.sub(r"[^a-z0-9]+", "", (s or "").lower())

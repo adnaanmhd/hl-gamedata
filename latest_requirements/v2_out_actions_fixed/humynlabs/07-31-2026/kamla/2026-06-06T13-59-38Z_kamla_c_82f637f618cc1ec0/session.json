@@ -1,0 +1,24 @@
+{
+  "vendor_name": "humynlabs",
+  "game_title": "Kamla",
+  "session_id": "2026-06-06T13-59-38Z_kamla_c_82f637f618cc1ec0",
+  "created_at_utc": "2026-06-06T14:01:10.699218Z",
+  "ended_at_utc": "2026-06-06T14:18:44.232551Z",
+  "duration_ms": 1053533,
+  "duration_seconds": 1053.533,
+  "fps": 26.077010702422644,
+  "frame_count": 27473,
+  "record_width_px": 1920,
+  "record_height_px": 1080,
+  "screen_width_px": 1920,
+  "screen_height_px": 1080,
+  "localization": "en-IN",
+  "platform": "PC",
+  "input_mouse_convention": {
+    "maps_to": "camera_look_velocity",
+    "dx_positive": "right",
+    "dx_negative": "left",
+    "dy_positive": "down",
+    "dy_negative": "up"
+  }
+}

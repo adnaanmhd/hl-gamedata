@@ -36,20 +36,25 @@ def _alts(token: str) -> tuple[str, ...]:
     return _MOD_ALTS.get(token, (token,))
 
 
-def _binding_groups(value) -> list[tuple[list[tuple[str, ...]], bool]]:
-    """Flatten one keybind value into (groups, is_motion).
+# motion-bind literal -> which mouse axis fires it
+_MOTION_AXES = {"mouse": "any", "mouse_x": "x", "mouse_y": "y"}
+
+
+def _binding_groups(value) -> list[tuple[list[tuple[str, ...]], str | None]]:
+    """Flatten one keybind value into (groups, motion_axis).
 
     A group is a list of alt-sets; ALL alt-sets must be satisfied (AND), each
-    alt-set is satisfied if ANY of its tokens is held (OR). is_motion marks a
-    mouse-motion bind (fires on dx/dy, not on a held key).
+    alt-set is satisfied if ANY of its tokens is held (OR). motion_axis is
+    'x'/'y'/'any' for a mouse-motion bind (fires on dx/dy, not a held key),
+    None for a key bind.
     """
-    out: list[tuple[list[tuple[str, ...]], bool]] = []
+    out: list[tuple[list[tuple[str, ...]], str | None]] = []
     if isinstance(value, str):
         tok = normalize_literal(value)
         if is_motion_literal(tok):
-            out.append(([], True))
+            out.append(([], _MOTION_AXES[tok]))
         else:
-            out.append(([_alts(tok)], False))
+            out.append(([_alts(tok)], None))
     elif isinstance(value, list):
         for item in value:
             out.extend(_binding_groups(item))
@@ -62,33 +67,100 @@ def _binding_groups(value) -> list[tuple[list[tuple[str, ...]], bool]]:
         if key:
             t = normalize_literal(key)
             if is_motion_literal(t):
-                out.append(([], True))
+                out.append(([], _MOTION_AXES[t]))
                 return out
             groups.append(_alts(t))
         if groups:
-            out.append((groups, False))
+            out.append((groups, None))
     return out
 
 
 def build_resolver(keybind: dict):
-    """Return list of (groups, is_motion, semantic) rules."""
+    """Return list of (groups, motion_axis, semantic) rules."""
     rules = []
     for semantic, value in keybind.items():
-        for groups, is_motion in _binding_groups(value):
-            rules.append((groups, is_motion, semantic))
+        for groups, motion_axis in _binding_groups(value):
+            rules.append((groups, motion_axis, semantic))
     return rules
 
 
-def resolve_actions(held: set[str], moving: bool, rules) -> list[str]:
-    """Semantic actions active this frame, in keybind insertion order, deduped."""
+def resolve_actions(held: set[str], motion, rules, *,
+                    context: str | None = None,
+                    allowed: dict[str, frozenset[str]] | None = None):
+    """Resolve one frame -> (actions, dead_literals).
+
+    `motion` is (dx_active, dy_active); a bare bool means both axes (legacy).
+    `context`/`allowed` enable per-game context gating: a rule whose semantic
+    has an `allowed` context-set fires only when `context` is in it. A held
+    literal whose satisfied rules were ALL blocked by context gating is
+    returned in dead_literals — the key does nothing in this game mode, so the
+    caller can strip it from input_keys (v2 "unbound in this context" rule).
+    With context=None nothing is gated and dead_literals is always empty.
+
+    Actions keep keybind insertion order, deduped. Note a literal may fire >1
+    semantic in one context (Space in suit: jump + jetpack_boost); the caller
+    collapses those runs (collapse_ambiguous_runs) using press evidence.
+    """
+    if isinstance(motion, bool):
+        motion = (motion, motion)
+    dx_active, dy_active = motion
     fired: dict[str, None] = {}
-    for groups, is_motion, semantic in rules:
-        if is_motion:
-            if moving:
-                fired[semantic] = None
-        elif groups and all(any(t in held for t in alt) for alt in groups):
+    credited: set[str] = set()
+    blocked: set[str] = set()
+    for groups, motion_axis, semantic in rules:
+        if motion_axis is not None:
+            satisfied = (dx_active if motion_axis == "x" else
+                         dy_active if motion_axis == "y" else
+                         dx_active or dy_active)
+            lits: set[str] = set()
+        else:
+            satisfied = bool(groups) and all(any(t in held for t in alt)
+                                             for alt in groups)
+            lits = {t for alt in groups for t in alt if t in held}
+        if not satisfied:
+            continue
+        ctx_ok = (context is None or allowed is None
+                  or semantic not in allowed
+                  or context in allowed[semantic])
+        if ctx_ok:
             fired[semantic] = None
-    return list(fired.keys())
+            credited |= lits
+        else:
+            blocked |= lits
+    return list(fired.keys()), blocked - credited
+
+
+def collapse_ambiguous_runs(per_frame: list[list[str]], pair: tuple[str, str],
+                            fps: float, *, tap_s: float = 0.30,
+                            overrides: dict[int, str] | None = None) -> dict[int, str]:
+    """Pick one of an exclusive action pair per contiguous run of frames.
+
+    `pair` = (tap_action, hold_action), e.g. (movement_jump,
+    movement_jetpack_boost) for suit Space. Runs where both fired are
+    collapsed: run shorter than `tap_s` -> tap_action, else hold_action —
+    UNLESS `overrides` maps the run's start frame to an explicit action
+    (video-verified label). Returns {frame_index: chosen_action} and edits
+    per_frame in place.
+    """
+    tap, hold = pair
+    chosen: dict[int, str] = {}
+    i, n = 0, len(per_frame)
+    while i < n:
+        if tap in per_frame[i] and hold in per_frame[i]:
+            j = i
+            while j < n and tap in per_frame[j] and hold in per_frame[j]:
+                j += 1
+            pick = (overrides or {}).get(i)
+            if pick is None:
+                pick = tap if (j - i) < tap_s * fps else hold
+            drop = hold if pick == tap else tap
+            for k in range(i, j):
+                per_frame[k] = [a for a in per_frame[k] if a != drop]
+                chosen[k] = pick
+            i = j
+        else:
+            i += 1
+    return chosen
 
 
 def bound_literals(keybind: dict) -> frozenset[str]:

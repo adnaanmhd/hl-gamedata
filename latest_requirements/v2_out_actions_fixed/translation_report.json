@@ -1,0 +1,47 @@
+{
+  "2026-06-06T16-01-50Z_outerwild_c_82f637f618cc1ec0": {
+    "method": "v1+v2 binned remap (raw inputs.jsonl unavailable)",
+    "measured": true,
+    "measured_lag_ms": -151.5,
+    "measured_correlation": -0.4623,
+    "active_fraction": 0.1894,
+    "applied_shift_ms": 151.5,
+    "residual_lag_ms": 0.0,
+    "residual_correlation": -0.4519,
+    "status": "PASS",
+    "shift_us": 151531,
+    "head_frames_without_source": 4,
+    "out_dir": "latest_requirements/v2_out_fixed/humynlabs/07-23-2026/outer_wilds/2026-06-06T16-01-50Z_outerwild_c_82f637f618cc1ec0",
+    "fixed_at_utc": "2026-07-23T13:05:15.800773+00:00"
+  },
+  "2026-06-06T18-50-54Z_outer_wild_c_82f637f618cc1ec0": {
+    "method": "v1+v2 binned remap (raw inputs.jsonl unavailable)",
+    "measured": true,
+    "measured_lag_ms": -207.7,
+    "measured_correlation": -0.3872,
+    "active_fraction": 0.1964,
+    "applied_shift_ms": 207.7,
+    "residual_lag_ms": 0.0,
+    "residual_correlation": -0.3819,
+    "status": "PASS",
+    "shift_us": 207742,
+    "head_frames_without_source": 7,
+    "out_dir": "latest_requirements/v2_out_fixed/humynlabs/07-23-2026/outer_wilds/2026-06-06T18-50-54Z_outer_wild_c_82f637f618cc1ec0",
+    "fixed_at_utc": "2026-07-23T13:05:29.400873+00:00"
+  },
+  "2026-06-06T13-59-38Z_kamla_c_82f637f618cc1ec0": {
+    "method": "v1+v2 binned remap (raw inputs.jsonl unavailable)",
+    "measured": true,
+    "measured_lag_ms": -2288.7,
+    "measured_correlation": -0.1934,
+    "active_fraction": 0.1511,
+    "applied_shift_ms": -38.1,
+    "residual_lag_ms": 0.0,
+    "residual_correlation": -0.2157,
+    "status": "PASS",
+    "shift_us": -38145,
+    "head_frames_without_source": 0,
+    "out_dir": "latest_requirements/v2_out_fixed/humynlabs/07-23-2026/kamla/2026-06-06T13-59-38Z_kamla_c_82f637f618cc1ec0",
+    "fixed_at_utc": "2026-07-23T13:07:53.844036+00:00"
+  }
+}

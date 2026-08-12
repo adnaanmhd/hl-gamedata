@@ -101,6 +101,9 @@ Camera columns null.
 
 ## Notes
 
+- **Analyzing a sample the user hands over (any format: raw bundle, v1/v2
+  delivery, zip)? Follow `SAMPLE_ANALYSIS_PLAYBOOK.md`** — the full check
+  battery, thresholds, commands, and verdict rules.
 - Use the `translator/` package only; `translate_samples.py` / `translate_sessions.py`
   are superseded (wrong fps, no QA) — don’t use them.
 - The client’s own `qa_checks.py` / `run_qa.py` spuriously FAIL on empty camera

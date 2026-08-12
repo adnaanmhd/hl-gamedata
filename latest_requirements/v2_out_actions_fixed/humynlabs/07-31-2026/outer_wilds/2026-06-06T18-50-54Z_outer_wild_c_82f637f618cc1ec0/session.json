@@ -1,0 +1,24 @@
+{
+  "vendor_name": "humynlabs",
+  "game_title": "Outer Wilds",
+  "session_id": "2026-06-06T18-50-54Z_outer_wild_c_82f637f618cc1ec0",
+  "created_at_utc": "2026-06-06T18:51:05.037100Z",
+  "ended_at_utc": "2026-06-06T18:58:18.637100Z",
+  "duration_ms": 433600,
+  "duration_seconds": 433.6,
+  "fps": 24.068265682656826,
+  "frame_count": 10436,
+  "record_width_px": 1920,
+  "record_height_px": 1080,
+  "screen_width_px": 1920,
+  "screen_height_px": 1080,
+  "localization": "en-US",
+  "platform": "PC",
+  "input_mouse_convention": {
+    "maps_to": "camera_look_velocity",
+    "dx_positive": "right",
+    "dx_negative": "left",
+    "dy_positive": "down",
+    "dy_negative": "up"
+  }
+}

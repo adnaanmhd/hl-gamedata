@@ -45,6 +45,10 @@ def main(argv=None) -> int:
                      help="head trim seconds (default 5; tail is always 5)")
     pt2.add_argument("--no-lag-correct", action="store_true",
                      help="skip the controls-to-video sync measurement/correction")
+    pt2.add_argument("--action-overrides", type=Path, default=None,
+                     help="JSON {session_id: {run_start_frame: action}} — "
+                          "video-verified labels for ambiguous action runs "
+                          "(suit Space: jump vs jetpack boost)")
     _add_common(pt2)
 
     pq2 = sub.add_parser("qa-v2", help="validate v2 session(s) against spec §1.5")
@@ -83,11 +87,23 @@ def main(argv=None) -> int:
         return 0 if worst < 2 else 1
 
     if args.cmd == "translate-v2":
+        import json as _json
+        all_overrides = {}
+        if args.action_overrides:
+            all_overrides = _json.loads(args.action_overrides.read_text())
         for b in args.bundles:
+            sid = b.name
+            try:
+                sid = _json.loads((b / "metadata.json").read_text()).get(
+                    "session_id") or b.name
+            except Exception:
+                pass
+            ov = {int(k): v for k, v in (all_overrides.get(sid) or {}).items()}
             res = translate_bundle_v2(b, args.out, head_s=args.head_s,
                                       make_rrd=not args.no_rrd,
                                       rrd_python=args.rrd_python,
-                                      lag_correct=not args.no_lag_correct)
+                                      lag_correct=not args.no_lag_correct,
+                                      action_overrides=ov or None)
             print(f"✓ {res['session']}  frames={res['frames']}  "
                   f"trim={res['trim']['head_cut_s']:.1f}s head  "
                   f"dq={res['data_quality']}")
@@ -98,6 +114,8 @@ def main(argv=None) -> int:
                       f"[{res['sync'].get('status', '?')}]")
             if res["stripped_keys"]:
                 print(f"    stripped unbound keys (frames): {res['stripped_keys']}")
+            if res.get("context"):
+                print(f"    context: {res['context']}")
             for w in res["warnings"]:
                 print(f"    ⚠ {w}")
         return 0

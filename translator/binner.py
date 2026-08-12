@@ -156,8 +156,10 @@ def bin_session(events: list[dict], video, keybind: dict, rules, bound: frozense
         kset = _resolve_bleed(keys_in[f], bound, f, stats)
         keys = sorted(kset)
         btns = sorted(btns_in[f])
-        moving = bool(dx_sum[f] or dy_sum[f])
-        actions = resolve_actions(kset | set(btns), moving, rules) if rules else []
+        # per-axis: a dx-only frame must not fire the look-Y bind (and v.v.)
+        motion = (bool(dx_sum[f]), bool(dy_sum[f]))
+        actions = (resolve_actions(kset | set(btns), motion, rules)[0]
+                   if rules else [])
         stats.keys_seen.update(keys)
         stats.actions_seen.update(actions)
         if use_pts:
