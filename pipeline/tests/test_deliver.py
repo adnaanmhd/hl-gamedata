@@ -22,10 +22,22 @@ def test_rrd_sampling_deterministic_and_near_20pct():
 
 
 def _fake_session(cfg, ledger, sid, game="kamla"):
+    from datetime import datetime, timezone
     from pipeline.tests.conftest import make_session_entries
     ingest.scan(cfg, ledger, entries=make_session_entries(
         sid=sid, game=game, md5="m"))
     ledger.set_state(sid, "READY")
+    # satisfy the §1.4 15% floor: one sampled delivery already today
+    filler = f"filler-{game}"
+    if ledger.get(filler) is None:
+        ledger.insert_session(
+            session_id=filler, game=game, operator_email="f@x.com",
+            player_email="f@x.com", drive_path=f"{game}/f/f/{filler}",
+            drive_ctime="2026-08-14T00:00:00.000Z", md5_video="fm",
+            bytes_=1, state="DELIVERED")
+        ledger.update(filler, rrd_sampled=1, duration_delivered_s=100.0,
+                      delivered_at=datetime.now(timezone.utc).isoformat(
+                          timespec="seconds"))
     work = cfg.work / sid
     work.mkdir(parents=True, exist_ok=True)
     (work / "video.mp4").write_bytes(b"vv")

@@ -202,15 +202,16 @@ def _map_game_identity(rep: dict, expected_game: str | None,
                 and v / max(total, 1) >= C.TRIPWIRE_MIN_VOTE_FRAC
                 and v / n_frames >= C.TRIPWIRE_MIN_FRAME_FRAC)
 
-    if tripwire:
-        if not C.VLM_GAME_TRIPWIRE_GATES:
-            # Adnaan 08-14 (post-plan): VLM game identity is report-only in
-            # Phase 1 — log the unanimous mismatch loudly, gate nothing
-            advisories.append(
-                f"VLM GAME MISMATCH (report-only per Adnaan 08-14 ruling): "
-                f"video looks like '{top}' ({v}/{total} votes, "
-                f"unanimous-level) but session claims '{claimed}'")
-            return
+    if tripwire and not C.VLM_GAME_TRIPWIRE_GATES:
+        # Adnaan 08-14 (post-plan): VLM game identity is report-only in
+        # Phase 1 — log the unanimous mismatch loudly, gate nothing, and
+        # FALL THROUGH to the label checks below: the R1 scope reject and
+        # the misfile check are metadata rules, not VLM gates (review-2 #15)
+        advisories.append(
+            f"VLM GAME MISMATCH (report-only per Adnaan 08-14 ruling): "
+            f"video looks like '{top}' ({v}/{total} votes, "
+            f"unanimous-level) but session claims '{claimed}'")
+    elif tripwire:
         if top in C.GAMES:
             reasons.append(_reason(
                 "STR_GAME_MISMATCH", True, True, {"actual": top},
@@ -228,9 +229,11 @@ def _map_game_identity(rep: dict, expected_game: str | None,
             f"session claims '{claimed}' — out of Phase-1 scope (R1)"))
         return
     if expected_game and claimed and expected_game != claimed:
+        # reroute target is the VETTED in-scope claim — never a
+        # below-tripwire VLM guess (review-2 #6)
         reasons.append(_reason(
             "STR_GAME_MISMATCH", True, True,
-            {"actual": top or claimed},
+            {"actual": claimed},
             f"Drive folder says '{expected_game}' but session claims "
             f"'{claimed}' — misfiled; reroute"))
         return
@@ -635,6 +638,10 @@ def validate_session(work_dir: Path, dossier_dir: Path, *,
     if (raw_dir / "metadata.json").exists() and \
             (raw_dir / "inputs.jsonl").exists():
         raw_by_sid[work_dir.name] = raw_dir
+        try:
+            _seed_shift_record(work_dir)
+        except Exception:
+            pass          # inference is best-effort; the recheck decides
 
     analysis = eng.analyze(work_dir, raw_by_sid, gem, vlm_interval,
                            refine_step)
@@ -665,6 +672,85 @@ def validate_session(work_dir: Path, dossier_dir: Path, *,
     _write_verdict(dossier_dir, work_dir.name, res)
     _archive_analysis(work_dir, dossier_dir)
     return res
+
+
+def _seed_shift_record(work_dir: Path) -> None:
+    """Uploaded translate-v2 sessions carry a sync shift baked into the CSV
+    but NOT the out-root translation_report.json that records it — qa's raw
+    recomputation would re-bin at shift 0 and spuriously fail, burning a
+    fix attempt and a paid VLM sweep (review-2 #13). Recover the constant
+    by exact-match search over the raw mouse events (±15 frames covers
+    every shift the corrector has ever applied) and write the record where
+    _applied_shift_us looks."""
+    from bisect import bisect_right
+    from datetime import datetime as _dt
+
+    report_path = work_dir.parent / "translation_report.json"
+    try:
+        existing = json.loads(report_path.read_text())
+    except (FileNotFoundError, json.JSONDecodeError):
+        existing = {}
+    if work_dir.name in existing:
+        return
+    raw = work_dir / "raw"
+    from translator import video as V
+    s = json.loads((work_dir / "session.json").read_text())
+    meta = json.loads((raw / "metadata.json").read_text())
+    started = _dt.fromisoformat(
+        meta["recording"]["started_at_utc"].replace("Z", "+00:00"))
+    created = _dt.fromisoformat(s["created_at_utc"].replace("Z", "+00:00"))
+    base_head_us = (created - started).total_seconds() * 1e6
+    dur_us = float(s["duration_seconds"]) * 1e6
+    fps = float(s.get("fps") or 30.0)
+    frame_us = 1e6 / fps
+
+    pts = V.frame_pts(work_dir / "video.mp4")
+    csv_dx: list[float] = []
+    csv_dy: list[float] = []
+    with (work_dir / "frames.csv").open(newline="") as f:
+        for row in csv.DictReader(f):
+            csv_dx.append(float(row["input_mouse_dx"] or 0))
+            csv_dy.append(float(row["input_mouse_dy"] or 0))
+    n = len(csv_dx)
+    if not pts or len(pts) != n:
+        return
+    events = []
+    for line in (raw / "inputs.jsonl").open():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            e = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if e.get("type") == "mouse_raw" and isinstance(e.get("t"), int):
+            events.append((e["t"], int(e.get("dx", 0) or 0),
+                           int(e.get("dy", 0) or 0)))
+
+    def matches(shift_us: float) -> bool:
+        head = base_head_us - shift_us
+        dx = [0.0] * n
+        dy = [0.0] * n
+        for t, edx, edy in events:
+            if not (head <= t < head + dur_us):
+                continue
+            f = bisect_right(pts, int(t - head)) - 1
+            if 0 <= f < n:
+                dx[f] += edx
+                dy[f] += edy
+        return all(dx[i] == csv_dx[i] and dy[i] == csv_dy[i]
+                   for i in range(n))
+
+    if matches(0):
+        return                     # no shift was applied; nothing to seed
+    for k in range(-15, 16):
+        if k == 0:
+            continue
+        su = round(k * frame_us)
+        if matches(su):
+            existing[work_dir.name] = {"shift_us": su, "inferred": True}
+            report_path.write_text(json.dumps(existing, indent=2))
+            return
 
 
 def _write_verdict(dossier_dir: Path, session_id: str, res: MapResult) -> None:
@@ -759,9 +845,16 @@ def _build_aux(work_dir: Path, rep: dict, gem, *, gemini_key: str,
                 refined[(w["t0"], w["t1"])] = r
         aux["refined"] = refined
 
+        # only HIGH-tier windows already gate; a low-tier (single-sample)
+        # engine window must NOT shadow the scanner's independent static
+        # detection of the same span, or 1-sample pauses ship ungated —
+        # one sample would be strictly worse than none (review-2 #3)
+        acted_windows = [w for w in engine_windows
+                         if w.get("tier") == "high"]
+
         def _overlaps_engine(t0: float, t1: float) -> bool:
             return any(t0 < w["t1"] + 1.0 and t1 > w["t0"] - 1.0
-                       for w in engine_windows)
+                       for w in acted_windows)
 
         # static candidates the 4s VLM sweep can miss entirely (a 2s pause
         # between samples) — the whole reason the scanner exists (§10.3)
@@ -825,11 +918,19 @@ def _build_aux(work_dir: Path, rep: dict, gem, *, gemini_key: str,
                 by_t = {s["t"]: s for s in labels}
                 for (a, b), mid in zip(afk_cands, mids):
                     lab = by_t.get(round(mid, 2), {})
-                    # a MISSING VLM reply must never confirm a cut of real
-                    # content — require an actual non-dialogue/map label
+                    # cutting real content needs a CONFIDENT non-reading
+                    # label; a missing or low-confidence reply must never
+                    # confirm the cut (review-2 #12 — OW Nomai reading is
+                    # gameplay per the locked AFK rule)
                     if lab.get("label") and \
+                            lab.get("conf") in ("high", "medium") and \
                             lab["label"] not in ("dialogue", "map"):
                         afk_windows.append((a, b))
+                    else:
+                        aux.setdefault("notes", []).append(
+                            f"AFK candidate {a:.0f}-{b:.0f}s NOT cut "
+                            f"(label={lab.get('label')!r} "
+                            f"conf={lab.get('conf')!r})")
             for t in vlm_rep.get("notif_ts", []):
                 fr = grabber.at(t)
                 if fr is None:

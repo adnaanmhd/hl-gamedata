@@ -106,8 +106,26 @@ def _download_phase(cfg, ledger, sids, alerts) -> None:
         try:
             ingest.download(cfg, ledger, sid)
         except ingest.DownloadError as e:
-            ledger.set_state(sid, "QUARANTINED", str(e)[:300])
-            _alert(cfg, f"download quarantined {sid}: {e}", alerts)
+            msg = str(e)
+            if "zip" in msg:
+                # a multi-part zip still mid-upload reassembles as garbage;
+                # the missing parts appear later — this must stay retryable,
+                # never terminal (review-2 #10)
+                ledger.set_state(sid, "DISCOVERED",
+                                 f"zip payload incomplete/unreadable — "
+                                 f"retrying next run: {msg}"[:300])
+                ledger.incomplete_seen(row["drive_path"],
+                                       ["zip parts incomplete"])
+            elif "md5 mismatch" in msg:
+                ledger.set_state(sid, "QUARANTINED", msg[:300])
+                _alert(cfg, f"download quarantined {sid}: {e}", alerts)
+            else:
+                # transient transfer failure: back to the queue, alert once
+                ledger.set_state(sid, "DISCOVERED",
+                                 f"download failed — retrying next run: "
+                                 f"{msg}"[:300])
+                _alert(cfg, f"download failed for {sid} (will retry): {e}",
+                       alerts)
 
 
 def _validate_phase(cfg, ledger, sids, alerts, *, workers: int) -> None:
@@ -130,12 +148,32 @@ def _validate_phase(cfg, ledger, sids, alerts, *, workers: int) -> None:
                      "gemini_model": cfg.gemini_model})
     if not jobs:
         return
+    results: list[dict] = []
     if workers > 1 and len(jobs) > 1:
-        with concurrent.futures.ProcessPoolExecutor(
-                max_workers=workers) as ex:
-            results = list(ex.map(_validate_worker, jobs))
+        try:
+            with concurrent.futures.ProcessPoolExecutor(
+                    max_workers=workers) as ex:
+                results = list(ex.map(_validate_worker, jobs))
+        except concurrent.futures.process.BrokenProcessPool:
+            # a native crash (cv2/ffmpeg segfault, OOM kill) took the pool
+            # down — retry each job in its own single-worker pool so only
+            # the killer session quarantines, not the whole batch, and the
+            # run never wedges (review-2 #4)
+            results = []
+            for j in jobs:
+                try:
+                    with concurrent.futures.ProcessPoolExecutor(
+                            max_workers=1) as ex1:
+                        results.append(
+                            list(ex1.map(_validate_worker, [j]))[0])
+                except concurrent.futures.process.BrokenProcessPool:
+                    results.append(
+                        {"sid": j["sid"],
+                         "error": "validation worker died (native crash "
+                                  "decoding this session)"})
     else:
-        results = [_validate_worker(j) for j in jobs]
+        for j in jobs:
+            results.append(_validate_worker(j))
     for r in results:
         sid = r["sid"]
         if "error" in r:
@@ -227,7 +265,7 @@ def _fix_phase(cfg, ledger, sids, alerts, *, workers: int) -> list[str]:
                 for seg in out["children"]["segments"]:
                     if ledger.get(seg["id"]) is None:
                         ledger.insert_session(
-                            session_id=seg["id"], game=row["game"],
+                            session_id=seg["id"], game=game,
                             operator_email=row["operator_email"],
                             player_email=row["player_email"],
                             drive_path=row["drive_path"],
@@ -297,8 +335,10 @@ def _deliver_phase(cfg, ledger, sids, alerts,
                                    3 if any(not x["fixable"]
                                             for x in reasons
                                             if x["blocking"]) else 2)
-            ledger.update(sid, fix_attempts=r["fix_attempts"] + 1)
-            if r["fix_attempts"] + 1 >= C.FIX_RETRIES + 1:
+            # no attempt increment here — the fix phase charges its own
+            # budget when it runs; incrementing on requeue made the fix
+            # dead-on-arrival at the budget check (review-2 #11)
+            if r["fix_attempts"] >= C.FIX_RETRIES:
                 ledger.set_state(sid, "REJECTED",
                                  f"final gate: {out.detail}"[:300])
             else:
@@ -463,20 +503,24 @@ def run(cfg: C.Config, *, max_batches: int = 50,
         except RuntimeError as e:
             _alert(cfg, f"Drive scan failed: {e}", alerts)
 
-        hold_retried = False
+        attempted: set[str] = set()
         for _ in range(max_batches):
-            resume = [r["session_id"] for r in ledger.by_state(*RESUMABLE)]
-            batch = resume or ingest.next_batch(ledger)
-            if not batch and not hold_retried:
-                # HOLD_VLM sessions get ONE retry per run (§13: retried
-                # next cycle) — an unbounded loop would spin full
-                # re-validations against a down Gemini
+            # each session gets at most ONE pass per run — a stuck
+            # PACKAGED/HOLD_VLM set must not spin the loop for hours while
+            # holding the run lock (review-2 #9); the next launchd tick is
+            # the retry cadence (§13)
+            resume = [r["session_id"] for r in ledger.by_state(*RESUMABLE)
+                      if r["session_id"] not in attempted]
+            batch = resume or [s for s in ingest.next_batch(ledger)
+                               if s not in attempted]
+            if not batch:
                 batch = [r["session_id"]
-                         for r in ledger.by_state("HOLD_VLM")]
-                hold_retried = bool(batch)
+                         for r in ledger.by_state("HOLD_VLM")
+                         if r["session_id"] not in attempted]
             if not batch:
                 break
             batch = batch[:C.BATCH_SIZE]
+            attempted.update(batch)
             try:
                 caff = subprocess.Popen(["caffeinate", "-i"])
             except FileNotFoundError:

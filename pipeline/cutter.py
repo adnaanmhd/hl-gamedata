@@ -69,6 +69,8 @@ def cut_segments(session_dir: Path, keep: list[tuple[float, float]],
     sid = s["session_id"]
     created = datetime.fromisoformat(
         s["created_at_utc"].replace("Z", "+00:00"))
+    if created.tzinfo is None:
+        created = created.replace(tzinfo=timezone.utc)   # naive == UTC
 
     src_pts = V.frame_pts(src_video)             # µs, first frame == 0
     if not src_pts:

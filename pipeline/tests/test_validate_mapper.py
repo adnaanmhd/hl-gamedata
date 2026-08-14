@@ -437,3 +437,22 @@ def test_map_gate_failures_produces_fix_plan_material():
     from pipeline import fix
     plan = fix.plan_fixes(reasons, game="kamla", has_raw=False)
     assert plan["steps"], "gate failures must yield a real fix plan"
+
+
+def test_report_only_tripwire_still_enforces_r1_label_scope():
+    """Review-2 #15: the report-only advisory must not skip the R1
+    label-scope reject when both conditions hold at once."""
+    r = rep(game_title="valorant")
+    r["vlm"]["game_votes"] = {"kamla": 28}      # unanimous, mismatch
+    res = map_reasons(r, aux(), None)
+    assert res.bin == 3 and "CNT_WRONG_GAME" in codes(res)
+    assert any("report-only" in a for a in res.advisories)
+
+
+def test_misfile_reroute_target_is_claimed_not_vlm_guess():
+    """Review-2 #6: sub-tripwire VLM noise must not steer the reroute."""
+    r = rep(game_title="Kamla")
+    r["vlm"]["game_votes"] = {"outer_wilds": 3}     # noise, sub-tripwire
+    res = map_reasons(r, aux(), "outer_wilds")      # misfiled folder
+    m = next(x for x in res.reasons if x["code"] == "STR_GAME_MISMATCH")
+    assert m["params"]["actual"] == "kamla"

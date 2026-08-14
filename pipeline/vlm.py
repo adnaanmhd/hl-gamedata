@@ -11,6 +11,7 @@ substitute.
 from __future__ import annotations
 
 import base64
+import http.client
 import json
 import re
 import time
@@ -59,7 +60,7 @@ def generate(api_key: str, model: str, parts: list[dict]) -> str:
                     continue
             raise VLMError(last)
         except (urllib.error.URLError, TimeoutError, OSError,
-                json.JSONDecodeError) as e:
+                http.client.HTTPException, json.JSONDecodeError) as e:
             last = f"network error: {e}"
             if attempt < C.VLM_MAX_TRIES - 1:
                 time.sleep(min(C.VLM_BACKOFF_BASE_S * (2 ** attempt),
@@ -126,7 +127,9 @@ def classify_stills(api_key: str, model: str, grabber, game_title: str,
                 except (TypeError, ValueError):
                     continue
         for k, (t, _) in enumerate(chunk):
-            o = by_idx.get(k, {})
+            o = by_idx.get(k)
+            if o is None:
+                continue        # no reply for this frame — never fabricate
             lab = str(o.get("label", "gameplay"))
             conf = str(o.get("confidence", "low")).lower()
             out.append({"t": round(t, 2),

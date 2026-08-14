@@ -224,3 +224,63 @@ def test_session_id_collision_across_paths_never_supersedes(cfg, ledger):
         player="p2@x.com", md5="evil"))
     assert res2.superseded == []
     assert ledger.get(SID1)["md5_video"] == "orig"
+
+
+def test_supersede_refuses_other_sessions_video(cfg, ledger):
+    """Review-2 #1: a rejected slot must not be superseded by bytes that
+    already exist under another session (payment side door)."""
+    ingest.scan(cfg, ledger, entries=make_session_entries(md5="mineA"))
+    ledger.set_state(SID1, "DELIVERED")
+    ingest.scan(cfg, ledger, entries=make_session_entries(
+        sid=SID2, player="p2@x.com", md5="theirsB",
+        ctime="2026-08-14T11:00:00.000Z"))
+    ledger.set_state(SID2, "REJECTED")
+    # p2 re-uploads SID2's slot carrying SID1's already-delivered bytes
+    res = ingest.scan(cfg, ledger, entries=make_session_entries(
+        sid=SID2, player="p2@x.com", md5="mineA",
+        ctime="2026-08-14T12:00:00.000Z"))
+    assert res.superseded == []
+    assert ledger.get(SID2)["state"] == "REJECTED"
+    assert ledger.get(SID2)["md5_video"] == "theirsB"     # untouched
+    assert any("not superseding" in f for f in res.integrity_flags)
+
+
+def test_zip_payload_md5_backfilled_and_deduped(cfg, ledger, monkeypatch):
+    """Review-2 #2: zip payloads must land inside the dedupe rules."""
+    import hashlib
+    payload = b"shared-video-bytes"
+    md5 = hashlib.md5(payload).hexdigest()
+    # an existing delivered session with the same bytes, other player
+    ingest.scan(cfg, ledger, entries=make_session_entries(md5=md5))
+    ledger.set_state(SID1, "DELIVERED")
+    # zip upload by another player, no Drive-side video md5
+    ingest.scan(cfg, ledger, entries=make_session_entries(
+        sid=SID2, player="p2@x.com", files=["bundle.zip"],
+        ctime="2026-08-14T12:00:00.000Z"))
+    assert ledger.get(SID2)["md5_video"] == ""
+
+    def fake_rclone(args, **kw):
+        import io
+        import subprocess
+        import zipfile
+        for a in args:
+            if str(cfg.work) in str(a):
+                d = ingest.Path(a)
+                d.mkdir(parents=True, exist_ok=True)
+                buf = io.BytesIO()
+                with zipfile.ZipFile(buf, "w") as z:
+                    z.writestr("video.mp4", payload)
+                    z.writestr("frames.csv", "frame_id\n")
+                    z.writestr("session.json", '{"game_title": "Kamla"}')
+                    z.writestr("inputs.jsonl", "")
+                    z.writestr("metadata.json", "{}")
+                (d / "bundle.zip").write_bytes(buf.getvalue())
+        return subprocess.CompletedProcess(args, 0, "", "")
+
+    monkeypatch.setattr(ingest, "run_rclone", fake_rclone)
+    kind = ingest.download(cfg, ledger, SID2)
+    assert kind == "duplicate"
+    row = ledger.get(SID2)
+    assert row["state"] == "REJECTED"
+    assert row["md5_video"] == md5
+    assert "INT_DUP_CROSS" in row["reasons_json"]

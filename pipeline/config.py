@@ -148,6 +148,7 @@ def load(home: Path | None = None, *, secrets_path: Path = SECRETS_PATH,
         cfg.workers = int(w)
     if test_mode is not None:
         cfg.test_mode = test_mode
-    elif os.environ.get("HL_PIPELINE_TEST_MODE"):
+    elif os.environ.get("HL_PIPELINE_TEST_MODE", "").lower() in (
+            "1", "true", "yes"):
         cfg.test_mode = True
     return cfg

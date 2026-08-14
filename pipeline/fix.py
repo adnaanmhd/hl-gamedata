@@ -169,10 +169,12 @@ def plan_fixes(reasons: list[dict], *, game: str, has_raw: bool) -> dict:
         csv_fixes = []                    # superseded by the re-translate
     def _pre_cut_csv_fixes():
         """Row/timestamp surgery must precede a cut — the cutter maps CSV
-        rows onto video frames and needs them aligned first."""
-        for fid, p in csv_fixes:
-            if fid in ("FIX_ROWS_SURGERY", "FIX_TSREPAIR_PTS"):
-                steps.append((fid, p))
+        rows onto video frames and needs them aligned first (rows before
+        timestamps: the row delta is what tsrepair hard-fails on)."""
+        for want in ("FIX_ROWS_SURGERY", "FIX_TSREPAIR_PTS"):
+            for fid, p in csv_fixes:
+                if fid == want:
+                    steps.append((fid, p))
 
     if cut_windows or (head_cut and tail_cut):
         cuts = list(cut_windows)
@@ -198,16 +200,26 @@ def plan_fixes(reasons: list[dict], *, game: str, has_raw: bool) -> dict:
         steps.append(("FIX_GATE_WINDOW", {"windows": sorted(gate_windows)}))
     # hygiene before context (canonical CONTEXT/HYGIENE slot)
     seen = set()
+    hygiene_planned = False
     for fid, p in csv_fixes:
         if fid == "FIX_KEY_HYGIENE" and fid in seen:
             continue
         seen.add(fid)
         if fid == "FIX_KEY_HYGIENE":
+            hygiene_planned = True
             steps.append((fid, p))
-    if context_fix and not retranslate:
+    # hygiene re-resolves actions WITHOUT context — on OW that re-fans-out
+    # multi-bound keys, so context gating must always follow it there
+    if (context_fix or (hygiene_planned and game == "outer_wilds")) \
+            and not retranslate:
         steps.append(("FIX_ACTIONS_CONTEXT", {}))
-    for fid, p in csv_fixes:
-        if fid != "FIX_KEY_HYGIENE" and (fid, json.dumps(p)) not in seen:
+    # row/timestamp surgery order matters: the row-count delta is the very
+    # thing tsrepair hard-fails on (review-2 #14)
+    _CSV_ORDER = {"FIX_ROWS_SURGERY": 0, "FIX_TSREPAIR_PTS": 1}
+    for fid, p in sorted((fp for fp in csv_fixes
+                          if fp[0] != "FIX_KEY_HYGIENE"),
+                         key=lambda fp: _CSV_ORDER.get(fp[0], 2)):
+        if (fid, json.dumps(p)) not in seen:
             seen.add((fid, json.dumps(p)))
             steps.append((fid, p))
     if steps:
@@ -274,7 +286,8 @@ def _dispatch(fix_id: str, params: dict, work: Path, game: str,
         return f"rerouted to {params.get('actual')} (ledger updates game; " \
                f"re-translate under the correct keybind follows)"
     if fix_id == "FIX_RETRANSLATE":
-        return retranslate_from_sidecars(work)
+        return retranslate_from_sidecars(
+            work, game_override=game if game in C.GAMES else None)
     if fix_id == "FIX_CUT_SEGMENTS":
         # the PROBED duration, not session.json's (which may be the very
         # thing that's wrong) — a stale short duration would silently
@@ -402,32 +415,48 @@ def fix_translate_raw(work: Path) -> str:
     return f"translated raw bundle: {res['data_quality']}"
 
 
-def retranslate_from_sidecars(work: Path) -> str:
+def retranslate_from_sidecars(work: Path, *,
+                              game_override: str | None = None) -> str:
     """FIX_RETRANSLATE for a v2 upload with raw sidecars (R3): re-bin the
     events onto the DELIVERED video (no re-trim — the head offset comes from
     metadata started_at vs session created_at), re-run lag correction and
-    context gating, rewrite frames.csv. The universal strong fix."""
+    context gating, rewrite frames.csv. The universal strong fix.
+
+    `game_override` is the REROUTED game: the raw metadata is exactly what
+    the mismatch falsified, so on reroute the built-in keybind for the
+    corrected game governs, never the metadata-derived one (review-2 #5)."""
+    from translator.v2 import GAME_TITLES
     raw = work / "raw"
     meta = json.loads((raw / "metadata.json").read_text())
     s = json.loads((work / "session.json").read_text())
     game_info = meta.get("game", {})
-    game_name = game_info.get("name") or meta.get("game_name") \
-        or s.get("game_title")
-    slug = game_key_from_name(game_name or "", game_info.get("exe_name")) \
-        or "unknown_game"
+    if game_override:
+        slug = game_override
+        game_name = GAME_TITLES.get(slug, slug)
+    else:
+        game_name = game_info.get("name") or meta.get("game_name") \
+            or s.get("game_title")
+        slug = game_key_from_name(game_name or "",
+                                  game_info.get("exe_name")) \
+            or "unknown_game"
 
-    started = datetime.fromisoformat(
-        meta["recording"]["started_at_utc"].replace("Z", "+00:00"))
-    created = datetime.fromisoformat(
-        s["created_at_utc"].replace("Z", "+00:00"))
+    def _utc(ts: str) -> datetime:
+        d = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+        return d if d.tzinfo else d.replace(tzinfo=timezone.utc)
+
+    started = _utc(meta["recording"]["started_at_utc"])
+    created = _utc(s["created_at_utc"])
     head_s = max((created - started).total_seconds(), 0.0)
 
     info = V.probe(work / "video.mp4")
     pts = V.frame_pts(work / "video.mp4")
     raw_events = load_events(raw / "inputs.jsonl")
-    keybind = resolve_keybind(keybind_path=raw / "keybind.json",
-                              game_name=game_name,
-                              exe_name=game_info.get("exe_name"))
+    if game_override:
+        keybind = dict(KEYBINDS.get(slug, {}))
+    else:
+        keybind = resolve_keybind(keybind_path=raw / "keybind.json",
+                                  game_name=game_name,
+                                  exe_name=game_info.get("exe_name"))
     keybind.update(KEYBIND_PATCHES.get(slug, {}))
     rules = build_resolver(keybind)
     bound = bound_literals(keybind)
@@ -521,7 +550,17 @@ def fix_key_hygiene(work: Path, game: str) -> str:
         btns = [_BTN_DISPLAY_INV.get(b, b)
                 for b in (r[bi] or "").split("|") if b]
         if rules is not None:
-            motion = (r[dxi] not in ("", "0.0"), r[dyi] not in ("", "0.0"))
+            # numeric-zero test, not a string sentinel test — "0"/"-0.0"
+            # cells are motionless and must not fire look actions
+            # (review-2 #7; matches translator/v2.py's own _active)
+            def _moving(v: str) -> bool:
+                if v in ("", None):
+                    return False
+                try:
+                    return float(v) != 0.0
+                except ValueError:
+                    return False
+            motion = (_moving(r[dxi]), _moving(r[dyi]))
             acts, _ = resolve_actions(kset | set(btns), motion, rules)
             r[ai] = "|".join(acts)
         r[ki] = "|".join(key_display(t) for t in sorted(kset))
@@ -781,6 +820,12 @@ def fix_v1_to_v2(work: Path, game: str) -> str:
     """ARR_V1_FORMAT: mechanical v1→v2 (playbook §6 — actions are already
     resolved; raws not needed)."""
     s = json.loads((work / "session.json").read_text())
+    if "canonical" not in s and "game_title" in s:
+        # already a flat v2 session that merely carries a stray
+        # key_binding.json — the correct fix is deleting the file, never
+        # running the v1 conversion over v2 display-case keys (review-2 #8)
+        (work / "key_binding.json").unlink(missing_ok=True)
+        return "stray key_binding.json deleted (session was already v2)"
     canonical = s.get("canonical", {})
     header, rows = _read_csv(work)
     col = {c: i for i, c in enumerate(header)}
@@ -803,7 +848,10 @@ def fix_v1_to_v2(work: Path, game: str) -> str:
                      for r in rows)
     for r in rows:
         keys = [t for t in (r[col["input_keys"]] or "").split("|") if t]
-        kept = [key_display(t) for t in keys if not bound or t in bound]
+        # canonicalize before the bound test — bound_literals is lowercase
+        # canonical while v1 files may carry either case (review-2 #8)
+        kept = [key_display(key_canonical(t)) for t in keys
+                if not bound or key_canonical(t) in bound]
         btns = [_BTN_DISPLAY.get(b, b)
                 for b in (r[col["input_mouse_buttons"]] or "").split("|")
                 if b]

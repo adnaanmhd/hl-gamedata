@@ -303,3 +303,86 @@ def test_failed_gate_requeues_with_real_reasons(cfg, ledger, monkeypatch):
     row = ledger.get(SID1)
     assert row["state"] == "FIX_QUEUED"
     assert "STR_CAMERA_NONNULL" in row["reasons_json"]
+
+
+def test_gate_requeue_fix_actually_runs_at_attempts_one(cfg, ledger,
+                                                        monkeypatch):
+    """Review-2 #11: a session that used one fix attempt and then fails
+    the final gate must still get its gate-failure fix, not a
+    dead-on-arrival budget reject."""
+    _seed(cfg, ledger)
+    _stub_phases(monkeypatch, {SID1: [
+        {"bin": 2, "reasons": [{"code": "INP_OSKEYS", "blocking": True,
+                                "fixable": True, "params": {},
+                                "evidence": ""}]},
+        {"bin": 1},          # after fix 1
+        {"bin": 1}]})        # after gate-failure fix
+    fixes_ran = []
+    monkeypatch.setattr(runmod.fix, "apply_fixes",
+                        lambda *a, **k: fixes_ran.append(1) or
+                        {"applied": [], "children": None, "error": None})
+    gate_state = {"failed_once": False}
+    real_deliver = None
+
+    def deliver_once_fails(cfg_, ledger_, sid, dest_prefix=C.VENDOR):
+        from pipeline.deliver import DeliveryOutcome
+        if not gate_state["failed_once"]:
+            gate_state["failed_once"] = True
+            return DeliveryOutcome(sid, "failed_gate", detail="camera",
+                                   gate_fails=["FAIL: camera columns "
+                                               "non-null in 1 rows "
+                                               "(input-only session)"])
+        ledger_.set_state(sid, "PACKAGED")
+        ledger_.set_state(sid, "UPLOADED")
+        ledger_.update(sid, duration_delivered_s=100.0,
+                       delivered_at="2026-08-14T12:00:00+00:00")
+        ledger_.set_state(sid, "DELIVERED")
+        from pipeline.deliver import DeliveryOutcome as DO
+        return DO(sid, "delivered", hours=0.03)
+
+    monkeypatch.setattr(runmod.deliver, "deliver_session",
+                        deliver_once_fails)
+    runmod.process_batch(cfg, ledger, [SID1], alerts=[])       # gate fails
+    assert ledger.get(SID1)["state"] == "FIX_QUEUED"
+    runmod.process_batch(cfg, ledger, [SID1], alerts=[])       # fix + ship
+    assert ledger.get(SID1)["state"] == "DELIVERED"
+    assert len(fixes_ran) == 2          # the gate-failure fix really ran
+
+
+def test_run_processes_each_session_once_per_run(cfg, monkeypatch):
+    """Review-2 #9: a stuck PACKAGED session must not spin the batch loop
+    for the whole run while holding the lock."""
+    from pipeline.ledger import Ledger
+    led = Ledger(cfg.ledger_path)
+    led.insert_session(session_id="stuck", game="kamla",
+                       operator_email="o@x.com", player_email="p@x.com",
+                       drive_path="kamla/o/p/stuck", drive_ctime="2026",
+                       md5_video="m", bytes_=1, state="PACKAGED")
+    led.close()
+    calls = []
+    monkeypatch.setattr(runmod.ingest, "scan",
+                        lambda cfg, ledger: ingest.ScanResult())
+    monkeypatch.setattr(
+        runmod, "process_batch",
+        lambda cfg, ledger, sids, alerts, dest_prefix:
+        calls.append(list(sids)) or __import__(
+            "pipeline.reports", fromlist=["BatchStats"]).BatchStats(
+            batch_no=1, finished_ist=datetime.now(C.IST), duration_min=1,
+            delivered=0, total=0, auto_fixed=0, rejected=0))
+    monkeypatch.setattr(runmod, "send_daily_report_if_due",
+                        lambda cfg, ledger: False)
+    runmod.run(cfg, max_batches=50, send_telegram=False)
+    assert calls == [["stuck"]]          # exactly one pass, not fifty
+
+
+def test_zip_download_error_stays_retryable(cfg, ledger, monkeypatch):
+    _seed(cfg, ledger)
+
+    def bad_zip(cfg_, ledger_, sid):
+        ledger_.set_state(sid, "DOWNLOADING")
+        raise ingest.DownloadError("unreadable zip payload: BadZipFile")
+
+    monkeypatch.setattr(ingest, "download", bad_zip)
+    runmod._download_phase(cfg, ledger, [SID1], [])
+    assert ledger.get(SID1)["state"] == "DISCOVERED"     # not QUARANTINED
+    assert ledger.incomplete_list()

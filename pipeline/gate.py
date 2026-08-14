@@ -38,9 +38,11 @@ def gate_windows(session_dir: Path,
                 gated += 1
             r[ki] = ""
             r[ai] = ""
-    with path.open("w", newline="") as f:
+    tmp = session_dir / "frames.csv.tmp"
+    with tmp.open("w", newline="") as f:
         w = csv.writer(f)
         w.writerow(header)
         w.writerows(rows)
+    tmp.replace(path)                       # atomic (§13)
     return {"gated_frames": gated,
             "windows": [[round(a, 3), round(b, 3)] for a, b in windows]}

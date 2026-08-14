@@ -121,7 +121,8 @@ def upload_and_verify(cfg: C.Config, stage_dir: Path,
     """rclone copy --checksum, then verify the remote listing's sizes+md5s
     against the staged files. Raises on any mismatch."""
     p = run_rclone(["copy", "--checksum", "--transfers", "4",
-                    str(stage_dir), f"{cfg.remote_deliver}{remote_dir}"])
+                    str(stage_dir), f"{cfg.remote_deliver}{remote_dir}"],
+                   timeout_s=21600)         # rrd-sampled uploads are big
     if p.returncode != 0:
         raise DeliverError(f"upload failed: {p.stderr.strip()[:300]}")
     q = run_rclone(["lsjson", "--hash", f"{cfg.remote_deliver}{remote_dir}"])
@@ -156,6 +157,22 @@ def deliver_session(cfg: C.Config, ledger: Ledger, session_id: str, *,
     game = row["game"]
     stage_dir, sampled = stage_session(cfg, session_id, game,
                                        dest_prefix=dest_prefix)
+    if not sampled:
+        # spec §1.4 floor: the deterministic 20% draw can undershoot on
+        # small daily counts — force-sample when today's delivered set for
+        # this game would drop below 15% sampled
+        date = stage_dir.parent.parent.name
+        counts = ledger.db.execute(
+            "SELECT COUNT(*) n, COALESCE(SUM(rrd_sampled),0) s FROM "
+            "sessions WHERE state='DELIVERED' AND game=? AND "
+            "delivered_at LIKE ?", (game,
+                                    f"{datetime.now(timezone.utc):%Y-%m-%d}%")
+        ).fetchone()
+        need = -(-15 * (counts["n"] + 1) // 100)        # ceil(15%)
+        if counts["s"] < need:
+            sampled = True
+            rrdmod.write_script(stage_dir)
+            rrdmod.generate(stage_dir)
     date = stage_dir.parent.parent.name
     ledger.update(session_id, rrd_sampled=int(sampled))
     ok, fails = final_gate(stage_dir, sampled)
@@ -178,8 +195,12 @@ def deliver_session(cfg: C.Config, ledger: Ledger, session_id: str, *,
     now = datetime.now(timezone.utc).isoformat(timespec="seconds")
     ledger.update(session_id, duration_delivered_s=hours, delivered_at=now)
     ledger.set_state(session_id, "DELIVERED", f"{hours:.1f}s delivered")
-    # deletion only AFTER checksum-verified upload (locked rule)
+    # deletion only AFTER checksum-verified upload (locked rule); the
+    # engine's sibling -analysis dir goes too (its reports/artifacts were
+    # archived into the dossier at validation) — leaking them would walk
+    # the disk into the F7 low-water pause
     shutil.rmtree(cfg.work / session_id, ignore_errors=True)
+    shutil.rmtree(cfg.work / f"{session_id}-analysis", ignore_errors=True)
     shutil.rmtree(stage_dir, ignore_errors=True)
     return DeliveryOutcome(session_id, "delivered", hours=hours / 3600.0,
                            rrd_sampled=sampled)
@@ -231,6 +252,7 @@ def finalize_rejected(cfg: C.Config, ledger: Ledger,
     (dossier / "coaching.md").write_text("\n".join(lines) + "\n")
     ledger.update(session_id, dossier_path=str(dossier))
     shutil.rmtree(cfg.work / session_id, ignore_errors=True)
+    shutil.rmtree(cfg.work / f"{session_id}-analysis", ignore_errors=True)
 
 
 def cleanup_test_folder(cfg: C.Config, prefix: str = "_pipeline_test"

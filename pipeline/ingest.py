@@ -212,6 +212,20 @@ def scan(cfg: C.Config, ledger: Ledger,
                 continue
             if vmd5 and existing["md5_video"] and vmd5 != existing["md5_video"]:
                 if existing["state"] == "REJECTED":
+                    # the replacement video must pass the SAME dedupe bar as
+                    # a fresh upload — else a rejected slot becomes a side
+                    # door for someone else's already-delivered bytes
+                    # (review-2 finding #1)
+                    other = [r for r in ledger.by_md5(vmd5)
+                             if r["session_id"] != ds.session_id
+                             and r["state"] not in ("QUARANTINED",)]
+                    if other:
+                        res.integrity_flags.append(
+                            f"{ds.session_id}: rejected-slot re-upload "
+                            f"carries the same video md5 as "
+                            f"{other[0]['session_id']} — not superseding "
+                            f"(INT_DUP_CROSS)")
+                        continue
                     ledger.supersede(ds.session_id, new_md5=vmd5,
                                      new_bytes=total_bytes,
                                      new_ctime=ds.ctime,
@@ -442,6 +456,33 @@ def download(cfg: C.Config, ledger: Ledger, session_id: str) -> str:
         stub = dst / "session.rrd"
         if not stub.exists():
             stub.touch()          # placeholder only — never staged (§12)
+
+    # zip payloads arrive with no Drive-side video md5 — backfill it now so
+    # they sit inside the dedupe rules like everyone else (review-2 #2)
+    if not row["md5_video"] and (dst / "video.mp4").exists():
+        local_md5 = _md5_file(dst / "video.mp4")
+        ledger.update(session_id, md5_video=local_md5)
+        dupes = [r for r in ledger.by_md5(local_md5)
+                 if r["session_id"] != session_id
+                 and r["state"] not in ("QUARANTINED",)]
+        if dupes:
+            same_player = any(r["player_email"] == row["player_email"]
+                              for r in dupes)
+            if same_player:
+                ledger.set_state(session_id, "DUPLICATE",
+                                 f"same-player duplicate of "
+                                 f"{dupes[0]['session_id']} (zip payload)")
+            else:
+                ledger.set_reasons(session_id, [
+                    {"code": "INT_DUP_CROSS", "blocking": True,
+                     "fixable": False, "params": {},
+                     "evidence": f"video md5 identical to "
+                                 f"{dupes[0]['session_id']} (zip payload)"}],
+                    3)
+                ledger.set_state(session_id, "REJECTED",
+                                 "cross-identity duplicate (zip payload)")
+            shutil.rmtree(dst, ignore_errors=True)
+            return "duplicate"
 
     dur = _probe_duration(dst / "video.mp4")
     if dur:
