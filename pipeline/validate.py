@@ -599,6 +599,10 @@ def validate_session(work_dir: Path, dossier_dir: Path, *,
 
     analysis = eng.analyze(work_dir, raw_by_sid, gem, vlm_interval,
                            refine_step)
+    if analysis.error:
+        # engine could not analyze at all — surface as a hard failure so
+        # the orchestrator quarantines with an alert instead of holding
+        raise RuntimeError(f"engine error: {analysis.error}")
     from dataclasses import asdict
     rep = asdict(analysis)
     rep["findings"] = [asdict(f) if not isinstance(f, dict) else f
