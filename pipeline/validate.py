@@ -292,6 +292,10 @@ def _map_windows(rep: dict, aux: dict, reasons: list[dict],
             continue
         w0, w1 = refined if refined else (w["t0"], w["t1"])
         span = w1 - w0
+        # the frozen SPAN (refined) drives the keep-vs-cut decision, but a
+        # cut must remove the whole flagged window (VLM bounds included) —
+        # fade-in/out residue left at a segment head re-triggers detection
+        cut0, cut1 = min(w0, w["t0"]), max(w1, w["t1"])
         if span <= C.KEEP_GATE_MAX_S and span <= C.KEEP_GATE_MAX_FRAC * dur:
             if action_frames:
                 reasons.append(_reason(
@@ -306,7 +310,7 @@ def _map_windows(rep: dict, aux: dict, reasons: list[dict],
         else:
             reasons.append(_reason(
                 "CNT_MID_NONGAMEPLAY", True, True,
-                {"cut": [w0, w1]},
+                {"cut": [cut0, cut1]},
                 f"{desc}: frozen {span:.1f}s "
                 f"({span / dur:.2%} of clip) — over the keep+gate bar "
                 f"({C.KEEP_GATE_MAX_S:.0f}s / "
