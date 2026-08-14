@@ -243,15 +243,19 @@ class Ledger:
         return self.db.execute(q, args).fetchone()["s"] / 3600.0
 
     def player_rollup(self, since_iso: str | None = None) -> list[sqlite3.Row]:
-        """Per player/game: sessions uploaded, delivered, rejected, hours."""
+        """Per player/game: sessions uploaded, delivered, rejected, hours.
+
+        Uploads count PARENT rows only (one per Drive upload); delivered /
+        rejected / hours include split children too — a segment's delivered
+        seconds are the player's paid seconds (F9)."""
         q = """
         SELECT game, operator_email, player_email,
-               COUNT(*) uploaded,
+               SUM(CASE WHEN parent_id IS NULL THEN 1 ELSE 0 END) uploaded,
                SUM(CASE WHEN state='DELIVERED' THEN 1 ELSE 0 END) delivered,
                SUM(CASE WHEN state='REJECTED' THEN 1 ELSE 0 END) rejected,
                COALESCE(SUM(CASE WHEN state='DELIVERED'
                         THEN duration_delivered_s END),0)/3600.0 hours
-        FROM sessions WHERE parent_id IS NULL AND state NOT IN ('DUPLICATE')
+        FROM sessions WHERE state NOT IN ('DUPLICATE')
         """
         args: list = []
         if since_iso:

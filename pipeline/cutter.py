@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import csv
 import json
+import shutil
 import subprocess
 from bisect import bisect_left
 from datetime import datetime, timedelta, timezone
@@ -149,6 +150,11 @@ def cut_segments(session_dir: Path, keep: list[tuple[float, float]],
         (out_dir / "session.json").write_text(json.dumps(seg_s, indent=2))
         rrdmod.write_script(out_dir)
         (out_dir / "session.rrd").touch()        # stub — packaging regenerates
+        # children inherit the raw sidecars (R3): a segment can still take
+        # the RETRANSLATE path — its created_at encodes the source offset
+        if (session_dir / "raw").is_dir():
+            shutil.copytree(session_dir / "raw", out_dir / "raw",
+                            dirs_exist_ok=True)
 
         segments.append({"id": seg_id, "dir": str(out_dir),
                          "t0": round(start, 3), "t1": round(t1, 3),

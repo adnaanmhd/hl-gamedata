@@ -152,19 +152,24 @@ def _fix_phase(cfg, ledger, sids, alerts, *, workers: int) -> list[str]:
     session ids created by splits."""
     children_created: list[str] = []
     for _pass in range(C.FIX_RETRIES):
+        # FIXING = a crash mid-fix; restart that pass without burning
+        # another attempt (fixes are idempotent / self-guarded)
         todo = [s for s in sids
-                if (row := ledger.get(s)) and row["state"] == "FIX_QUEUED"]
+                if (row := ledger.get(s))
+                and row["state"] in ("FIX_QUEUED", "FIXING")]
         if not todo:
             break
         for sid in todo:
             row = ledger.get(sid)
-            if row["fix_attempts"] >= C.FIX_RETRIES:
+            resuming = row["state"] == "FIXING"
+            if not resuming and row["fix_attempts"] >= C.FIX_RETRIES:
                 ledger.set_state(sid, "REJECTED",
                                  "fix retries exhausted (R2)")
                 continue
-            ledger.update(sid, fix_attempts=row["fix_attempts"] + 1)
-            ledger.set_state(sid, "FIXING",
-                             f"attempt {row['fix_attempts'] + 1}")
+            if not resuming:
+                ledger.update(sid, fix_attempts=row["fix_attempts"] + 1)
+                ledger.set_state(sid, "FIXING",
+                                 f"attempt {row['fix_attempts'] + 1}")
             reasons = json.loads(row["reasons_json"] or "[]")
             work = cfg.work / sid
             has_raw = (work / "raw" / "inputs.jsonl").exists()
@@ -335,8 +340,7 @@ def send_daily_report_if_due(cfg: C.Config, ledger: Ledger,
         "delivered_at<?", (lo, hi)).fetchone()
     rej_rows = ledger.db.execute(
         "SELECT reasons_json FROM sessions WHERE state='REJECTED' AND "
-        "updated_at>=? AND updated_at<? AND parent_id IS NULL",
-        (lo, hi)).fetchall()
+        "updated_at>=? AND updated_at<?", (lo, hi)).fetchall()
     counts: dict[str, int] = {}
     for r in rej_rows:
         try:
