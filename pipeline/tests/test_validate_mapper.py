@@ -1,0 +1,338 @@
+"""Reason-mapper unit tests — every §5/§10 gate, driven by synthetic engine
+reports (the mapper is pure; the engine itself is exercised in the
+integration run over the six local sessions)."""
+from pipeline.validate import map_reasons
+
+GOOD_INV = {"rows": 3000, "key_frames": 900, "btn_frames": 200,
+            "motion_frames": 1500, "keys_no_action": 0,
+            "distinct_actions": 5, "os_keys": {}, "bleed_frames": 0,
+            "irregular_pct": 0.0}
+
+
+def rep(**kw):
+    base = {
+        "game_title": "Kamla", "duration_s": 120.0, "frames": 3600,
+        "fps": 30.0, "qa_status": "PASS", "qa_issues": [],
+        "inventory": dict(GOOD_INV),
+        "lag": {"summary": "video 10.0ms behind inputs (within 150ms; "
+                           "target 50ms); correlation -0.42",
+                "frame_sync": "OK (<=100ms vs real PTS)"},
+        "audio": {"has_audio": True},
+        "vlm": {"samples": [{"t": 1.0, "label": "gameplay"}] * 30,
+                "windows": [], "notif_ts": [], "chat_ts": [],
+                "combat_ts": [], "game_votes": {"kamla": 25}},
+        "verdict": "deliverable",
+    }
+    base.update(kw)
+    return base
+
+
+def aux(**kw):
+    base = {"has_raw": True, "vlm_required": True, "video_active": True,
+            "refined": {}, "extra_windows": [], "afk_windows": [],
+            "notifs": [], "chats": []}
+    base.update(kw)
+    return base
+
+
+def codes(res):
+    return [r["code"] for r in res.reasons]
+
+
+def test_clean_session_bin1():
+    res = map_reasons(rep(), aux(), "kamla")
+    assert res.bin == 1 and not res.hold_vlm and res.reasons == []
+
+
+def test_out_of_scope_label_rejects_even_when_engine_deliverable():
+    r = rep(game_title="xonotic")
+    r["vlm"]["game_votes"] = {"xonotic": 25}
+    res = map_reasons(r, aux(), None)
+    assert res.bin == 3
+    assert codes(res) == ["CNT_WRONG_GAME"]
+    assert res.engine_verdict == "deliverable"
+
+
+def test_tripwire_wrong_game_out_of_scope():
+    r = rep(game_title="Kamla")
+    r["vlm"]["game_votes"] = {"Xonotic": 28}
+    res = map_reasons(r, aux(), "kamla")
+    assert res.bin == 3 and "CNT_WRONG_GAME" in codes(res)
+
+
+def test_tripwire_in_scope_mislabeled_is_fixable():
+    r = rep(game_title="Kamla")
+    r["vlm"]["game_votes"] = {"Outer Wilds": 28}
+    res = map_reasons(r, aux(), "kamla")
+    assert res.bin == 2
+    assert codes(res) == ["STR_GAME_MISMATCH"]
+
+
+def test_below_unanimity_mismatch_is_advisory():
+    r = rep(game_title="Kamla")
+    r["vlm"]["game_votes"] = {"Xonotic": 5, "kamla": 3}
+    res = map_reasons(r, aux(), "kamla")
+    assert res.bin == 1
+    assert any("below the unanimity tripwire" in a for a in res.advisories)
+
+
+def test_misfiled_folder_reroutes():
+    res = map_reasons(rep(game_title="Outer Wilds",
+                          vlm={"samples": [{"t": 1, "label": "gameplay"}],
+                               "windows": [], "notif_ts": [], "chat_ts": [],
+                               "combat_ts": [], "game_votes": {}}),
+                      aux(), "kamla")
+    assert "STR_GAME_MISMATCH" in codes(res)
+
+
+def test_short_clip_rejects():
+    res = map_reasons(rep(duration_s=50.0), aux(), "kamla")
+    assert res.bin == 3 and "CNT_SHORT" in codes(res)
+
+
+def test_short_clip_rejects_even_without_vlm():
+    r = rep(duration_s=50.0)
+    r["vlm"] = {"windows": []}          # no samples -> would hold
+    res = map_reasons(r, aux(), "kamla")
+    assert res.bin == 3 and not res.hold_vlm     # video-independent reject
+
+
+def test_no_vlm_holds_instead_of_passing():
+    r = rep()
+    r["vlm"] = {"windows": []}
+    res = map_reasons(r, aux(), "kamla")
+    assert res.hold_vlm and res.bin is None
+
+
+def test_vlm_extra_failure_holds():
+    res = map_reasons(rep(), aux(vlm_extra_failed=True), "kamla")
+    assert res.hold_vlm
+
+
+def test_fanout_maps_to_inp_fanout():
+    r = rep(qa_status="FAIL",
+            qa_issues=["FAIL: same-literal action fan-out in 44 frames — "
+                       "key(s) emit multiple conditional actions"])
+    res = map_reasons(r, aux(), "kamla")
+    assert res.bin == 2 and "INP_FANOUT" in codes(res)
+
+
+def test_frame_sync_exact_phrases_not_confused():
+    # trap 1: drift FAIL must map to a blocking code
+    r = rep()
+    r["lag"] = {"summary": "", "frame_sync":
+                "frame-sync drift: worst row timestamp 3210ms off real PTS"}
+    res = map_reasons(r, aux(), "kamla")
+    assert "SYN_TS_NOT_PTS" in codes(res)
+    # trap 2: 'cannot verify' is a WARN, never a blocking code
+    r2 = rep()
+    r2["lag"] = {"summary": "", "frame_sync":
+                 "cannot verify frame sync (PTS unreadable)"}
+    res2 = map_reasons(r2, aux(), "kamla")
+    assert "SYN_TS_NOT_PTS" not in codes(res2)
+    assert any("unverifiable" in a for a in res2.advisories)
+    assert res2.bin == 1
+
+
+def test_lag_hard_fail_maps_to_syn_lag_const():
+    r = rep(qa_issues=["FAIL: controls-to-video sync: video 200.0ms behind "
+                       "inputs (|lag| > 150ms); correlation -0.40"])
+    res = map_reasons(r, aux(), "kamla")
+    assert "SYN_LAG_CONST" in codes(res)
+    lag = next(x for x in res.reasons if x["code"] == "SYN_LAG_CONST")
+    assert lag["params"]["lag_ms"] == 200.0 and lag["fixable"]
+
+
+def test_lag_over_target_within_hard_still_fix():
+    r = rep()
+    r["lag"]["summary"] = ("video 100.0ms behind inputs (within 150ms; "
+                           "target 50ms); correlation -0.42")
+    res = map_reasons(r, aux(), "kamla")
+    assert "SYN_LAG_CONST" in codes(res) and res.bin == 2
+
+
+def test_weak_corr_benign_is_advisory():
+    r = rep()
+    r["lag"]["summary"] = ("correlation too weak to verify alignment "
+                           "(|corr|=0.120 < 0.15)")
+    res = map_reasons(r, aux(), "kamla")
+    assert "SYN_UNMEASURABLE_SUSPECT" not in codes(res)
+    assert res.bin == 1
+
+
+def test_weak_corr_with_visible_action_is_suspect():
+    r = rep()
+    r["lag"]["summary"] = ("correlation too weak to verify alignment "
+                           "(|corr|=0.020 < 0.15)")
+    r["inventory"]["motion_frames"] = 1500      # 50% of rows active
+    res = map_reasons(r, aux(video_active=True), "kamla")
+    assert "SYN_UNMEASURABLE_SUSPECT" in codes(res) and res.bin == 3
+
+
+def _window(t0, t1, action_frames=0, ratio=0.05, tier="high"):
+    return {"t0": t0, "t1": t1, "labels": ["pause"], "tier": tier,
+            "gating": True, "n_samples": 3,
+            "inputs": {"action_frames": action_frames},
+            "stillness_ratio": ratio}
+
+
+def test_small_frozen_window_with_actions_gates():
+    r = rep(duration_s=1200.0)
+    r["vlm"]["windows"] = [_window(600.0, 601.5, action_frames=12)]
+    res = map_reasons(r, aux(), "kamla")
+    assert codes(res) == ["INP_FROZEN_ACTIONS"] and res.bin == 2
+
+
+def test_frozen_window_over_frac_bar_splits():
+    # 2.0s pause in a 348s clip = 0.57% > 0.2% -> split (the real OW case)
+    r = rep(duration_s=348.2)
+    r["vlm"]["windows"] = [_window(109.5, 111.5, action_frames=8)]
+    res = map_reasons(r, aux(), "kamla")
+    assert codes(res) == ["CNT_MID_NONGAMEPLAY"]
+    cut = res.reasons[0]["params"]["cut"]
+    assert cut == [109.5, 111.5] and res.reasons[0]["fixable"]
+
+
+def test_overlay_over_live_play_is_advisory():
+    r = rep(duration_s=300.0)
+    r["vlm"]["windows"] = [_window(100, 110, action_frames=50, ratio=0.55)]
+    res = map_reasons(r, aux(), "kamla")
+    assert res.bin == 1
+    assert any("overlay over live play" in a for a in res.advisories)
+
+
+def test_head_window_trims_or_rejects():
+    r = rep(duration_s=300.0)
+    r["vlm"]["windows"] = [_window(0.0, 20.0)]
+    res = map_reasons(r, aux(), "kamla")
+    edge = next(x for x in res.reasons
+                if x["code"] == "CNT_EDGE_NONGAMEPLAY")
+    assert edge["params"]["edge"] == "head"
+    assert edge["params"]["cut_at_s"] == 20.5
+
+    r2 = rep(duration_s=80.0)
+    r2["vlm"]["windows"] = [_window(0.0, 20.0)]
+    res2 = map_reasons(r2, aux(), "kamla")
+    assert "CNT_SHORT" in codes(res2) and res2.bin == 3
+
+
+def test_full_span_window_rejects():
+    r = rep(duration_s=100.0)
+    r["vlm"]["windows"] = [_window(0.5, 99.9)]
+    res = map_reasons(r, aux(), "kamla")
+    assert res.bin == 3
+    assert any(x["code"] == "CNT_MID_NONGAMEPLAY" and not x["fixable"]
+               for x in res.reasons)
+
+
+def test_zero_buttons_with_combat_rejects_without_combat_advisory():
+    r = rep()
+    r["inventory"]["btn_frames"] = 0
+    r["vlm"]["combat_ts"] = [10.0, 40.0, 70.0]
+    res = map_reasons(r, aux(), "kamla")
+    assert "INP_BUTTONS_MISSING" in codes(res) and res.bin == 3
+
+    r2 = rep()
+    r2["inventory"]["btn_frames"] = 0
+    r2["vlm"]["combat_ts"] = []
+    res2 = map_reasons(r2, aux(), "kamla")
+    assert "INP_BUTTONS_MISSING" not in codes(res2) and res2.bin == 1
+    assert any("benign zero-buttons" in a for a in res2.advisories)
+
+
+def test_motion_missing_rejects():
+    r = rep()
+    r["inventory"]["motion_frames"] = 0
+    res = map_reasons(r, aux(), "kamla")
+    assert "INP_MOTION_MISSING" in codes(res) and res.bin == 3
+
+
+def test_drops_bands():
+    r = rep()
+    r["inventory"]["irregular_pct"] = 3.0
+    res = map_reasons(r, aux(), "kamla")
+    assert "CNT_DROPS" not in codes(res)
+    assert any("1-5% band" in a for a in res.advisories)
+    r["inventory"]["irregular_pct"] = 7.5
+    res = map_reasons(r, aux(), "kamla")
+    assert "CNT_DROPS" in codes(res) and res.bin == 3
+
+
+def test_audio_never_blocks():
+    r = rep(audio={"has_audio": False})
+    res = map_reasons(r, aux(), "kamla")
+    assert res.bin == 1
+    assert any("never blocks" in a for a in res.advisories)
+
+
+def test_actions_few_rejects():
+    r = rep()
+    r["inventory"]["distinct_actions"] = 2
+    res = map_reasons(r, aux(), "kamla")
+    assert "CNT_ACTIONS_FEW" in codes(res) and res.bin == 3
+
+
+def test_notifications_mid_vs_edge_vs_unconfirmed():
+    res = map_reasons(rep(), aux(notifs=[
+        {"t": 60.0, "confirmed": True, "what": "steam toast"},
+        {"t": 1.0, "confirmed": True, "what": "toast"},
+        {"t": 90.0, "confirmed": False, "what": "kill feed"}]), "kamla")
+    assert "CNT_NOTIF_MID" in codes(res)
+    assert "CNT_NOTIF_EDGE" in codes(res)
+    assert res.bin == 3
+    assert any("unconfirmed" in a for a in res.advisories)
+
+
+def test_chat_pii_rejects_mid():
+    res = map_reasons(rep(), aux(chats=[{"t": 55.0, "confirmed": True,
+                                         "what": "player names"}]), "kamla")
+    assert "CNT_CHAT_PII" in codes(res) and res.bin == 3
+
+
+def test_afk_window_cuts():
+    res = map_reasons(rep(duration_s=600.0),
+                      aux(afk_windows=[(100.0, 145.0)]), "kamla")
+    assert "CNT_AFK" in codes(res) and res.bin == 2
+
+
+def test_scanner_extra_window_gates_between_vlm_samples():
+    res = map_reasons(rep(duration_s=1500.0),
+                      aux(extra_windows=[{"t0": 500.0, "t1": 501.5,
+                                          "label": "pause",
+                                          "action_frames": 5}]), "kamla")
+    assert codes(res) == ["INP_FROZEN_ACTIONS"]
+
+
+def test_qa_structural_codes():
+    r = rep(qa_status="FAIL", qa_issues=[
+        "FAIL: camera columns non-null in 5 rows (input-only session)",
+        "FAIL: input_mouse_dx/dy not float-formatted ('0.0' sentinel) in 9 cells",
+        "FAIL: 3 frames have input_keys but null input_actions",
+        "WARN: only 2 distinct actions"])
+    res = map_reasons(r, aux(), "kamla")
+    assert set(codes(res)) == {"STR_CAMERA_NONNULL", "STR_SENTINELS",
+                               "INP_KEYS_NO_ACTION"}
+    assert res.bin == 2
+
+
+def test_unmapped_qa_fail_never_silently_passes():
+    r = rep(qa_status="FAIL", qa_issues=["FAIL: something entirely new"])
+    res = map_reasons(r, aux(has_raw=False), "kamla")
+    assert res.bin == 3          # blocking, unfixable without raws
+    res2 = map_reasons(r, aux(has_raw=True), "kamla")
+    assert res2.bin == 2         # retranslate is the universal strong fix
+
+
+def test_v1_payload_code(tmp_path):
+    from pipeline.validate import validate_session
+    (tmp_path / "s").mkdir()
+    res = validate_session(tmp_path / "s", tmp_path / "d", payload="v1")
+    assert [r["code"] for r in res.reasons] == ["ARR_V1_FORMAT"]
+    assert res.bin == 2
+    assert (tmp_path / "d" / "verdict.json").exists()
+
+
+def test_tamper_flag():
+    res = map_reasons(rep(), aux(tamper="99 rows carry impossible mouse "
+                                        "deltas"), "kamla")
+    assert "INT_TAMPER" in codes(res) and res.bin == 3

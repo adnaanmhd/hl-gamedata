@@ -181,6 +181,10 @@ def test_download_verifies_md5_and_stubs_rrd(cfg, ledger, monkeypatch):
     work = cfg.work / SID1
     assert (work / "session.rrd").exists()          # stub for qa-v2 presence
     assert (work / "rrd_creation.py").exists()
+    # sidecars tucked into raw/ so the engine sees a clean v2 root
+    assert (work / "raw" / "inputs.jsonl").exists()
+    assert (work / "raw" / "metadata.json").exists()
+    assert not (work / "inputs.jsonl").exists()
 
 
 def test_download_md5_mismatch_quarantine_path(cfg, ledger, monkeypatch):

@@ -396,6 +396,15 @@ def download(cfg: C.Config, ledger: Ledger, session_id: str) -> str:
         ledger.incomplete_seen(row["drive_path"], missing)
 
     if kind == "v2":
+        # Sidecars move to raw/ so the analysis engine sees a clean v2
+        # delivery at the session root (its format sniffer reads a root
+        # inputs.jsonl as "raw bundle"). raw/ is what FIX_RETRANSLATE and
+        # the qa-v2 off-by-one recheck consume.
+        raw = dst / "raw"
+        raw.mkdir(exist_ok=True)
+        for name in ("inputs.jsonl", "metadata.json", "keybind.json"):
+            if (dst / name).exists():
+                shutil.move(str(dst / name), raw / name)
         from translator import rrd as rrdmod
         if not (dst / "rrd_creation.py").exists():
             rrdmod.write_script(dst)
