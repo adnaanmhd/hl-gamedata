@@ -40,7 +40,13 @@ DROPS_REJECT_PCT = 5.0            # >5% reject; 1-5% deliver+warn
 LAG_TARGET_MS = 50.0              # controls<->video: <=50 pass
 LAG_HARD_MS = 150.0               # >150 constant -> fix+re-verify
 FRAME_SYNC_MS = 100.0             # per-row timestamp vs real PTS
-# VLM game-identity tripwire (unanimity only — sibling insight #7)
+# VLM game-identity tripwire (unanimity only — sibling insight #7).
+# GATING IS OFF for Phase 1: Adnaan ruled 2026-08-14 ~21:50 IST (recorded in
+# project memory local-vlm-fallback-benchmark, postdating the plan's 19:47
+# freeze) that VLM game identification is NOT required — votes are logged
+# report-only. The R1 label-scope reject (non-Kamla/OW session labels) is a
+# separate rule and stays. Flip to True to restore the plan-§5 behavior.
+VLM_GAME_TRIPWIRE_GATES = False
 TRIPWIRE_MIN_VOTES = 8
 TRIPWIRE_MIN_VOTE_FRAC = 0.90     # of named guesses
 TRIPWIRE_MIN_FRAME_FRAC = 0.50    # of sampled frames

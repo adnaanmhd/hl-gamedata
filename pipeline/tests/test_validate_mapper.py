@@ -53,19 +53,29 @@ def test_out_of_scope_label_rejects_even_when_engine_deliverable():
     assert res.engine_verdict == "deliverable"
 
 
-def test_tripwire_wrong_game_out_of_scope():
+def test_tripwire_report_only_per_aug14_ruling(monkeypatch):
+    """Adnaan 08-14 (post-plan): VLM game identity gates NOTHING in
+    Phase 1 — a unanimous mismatch is a loud advisory, the session
+    proceeds. The R1 label-scope reject is separate and still live."""
+    r = rep(game_title="Kamla")
+    r["vlm"]["game_votes"] = {"Xonotic": 28}
+    res = map_reasons(r, aux(), "kamla")
+    assert res.bin == 1 and "CNT_WRONG_GAME" not in codes(res)
+    assert any("VLM GAME MISMATCH (report-only" in a
+               for a in res.advisories)
+
+
+def test_tripwire_gates_when_flag_restored(monkeypatch):
+    from pipeline import config as C_
+    monkeypatch.setattr(C_, "VLM_GAME_TRIPWIRE_GATES", True)
     r = rep(game_title="Kamla")
     r["vlm"]["game_votes"] = {"Xonotic": 28}
     res = map_reasons(r, aux(), "kamla")
     assert res.bin == 3 and "CNT_WRONG_GAME" in codes(res)
-
-
-def test_tripwire_in_scope_mislabeled_is_fixable():
-    r = rep(game_title="Kamla")
-    r["vlm"]["game_votes"] = {"Outer Wilds": 28}
-    res = map_reasons(r, aux(), "kamla")
-    assert res.bin == 2
-    assert codes(res) == ["STR_GAME_MISMATCH"]
+    r2 = rep(game_title="Kamla")
+    r2["vlm"]["game_votes"] = {"Outer Wilds": 28}
+    res2 = map_reasons(r2, aux(), "kamla")
+    assert res2.bin == 2 and codes(res2) == ["STR_GAME_MISMATCH"]
 
 
 def test_below_unanimity_mismatch_is_advisory():

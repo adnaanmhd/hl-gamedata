@@ -203,6 +203,14 @@ def _map_game_identity(rep: dict, expected_game: str | None,
                 and v / n_frames >= C.TRIPWIRE_MIN_FRAME_FRAC)
 
     if tripwire:
+        if not C.VLM_GAME_TRIPWIRE_GATES:
+            # Adnaan 08-14 (post-plan): VLM game identity is report-only in
+            # Phase 1 — log the unanimous mismatch loudly, gate nothing
+            advisories.append(
+                f"VLM GAME MISMATCH (report-only per Adnaan 08-14 ruling): "
+                f"video looks like '{top}' ({v}/{total} votes, "
+                f"unanimous-level) but session claims '{claimed}'")
+            return
         if top in C.GAMES:
             reasons.append(_reason(
                 "STR_GAME_MISMATCH", True, True, {"actual": top},
