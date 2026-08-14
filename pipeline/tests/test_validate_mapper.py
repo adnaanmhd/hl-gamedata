@@ -118,20 +118,30 @@ def test_fanout_maps_to_inp_fanout():
 
 
 def test_frame_sync_exact_phrases_not_confused():
-    # trap 1: drift FAIL must map to a blocking code
-    r = rep()
-    r["lag"] = {"summary": "", "frame_sync":
-                "frame-sync drift: worst row timestamp 3210ms off real PTS"}
-    res = map_reasons(r, aux(), "kamla")
-    assert "SYN_TS_NOT_PTS" in codes(res)
+    # trap 1: drift FAIL must map to a blocking code — the engine stores
+    # the string WITH its qa-v2 severity prefix (review finding #1), and
+    # both forms must map
+    for fs in ("FAIL: frame-sync drift: worst row timestamp 3210ms off "
+               "real PTS",
+               "frame-sync drift: worst row timestamp 3210ms off real PTS"):
+        r = rep()
+        r["lag"] = {"summary": "", "frame_sync": fs}
+        res = map_reasons(r, aux(), "kamla")
+        assert "SYN_TS_NOT_PTS" in codes(res), fs
+        assert res.bin == 2
     # trap 2: 'cannot verify' is a WARN, never a blocking code
-    r2 = rep()
-    r2["lag"] = {"summary": "", "frame_sync":
-                 "cannot verify frame sync (PTS unreadable)"}
-    res2 = map_reasons(r2, aux(), "kamla")
-    assert "SYN_TS_NOT_PTS" not in codes(res2)
-    assert any("unverifiable" in a for a in res2.advisories)
-    assert res2.bin == 1
+    for fs in ("WARN: cannot verify frame sync (PTS unreadable)",
+               "cannot verify frame sync (PTS unreadable)"):
+        r2 = rep()
+        r2["lag"] = {"summary": "", "frame_sync": fs}
+        res2 = map_reasons(r2, aux(), "kamla")
+        assert "SYN_TS_NOT_PTS" not in codes(res2), fs
+        assert any("unverifiable" in a for a in res2.advisories)
+        assert res2.bin == 1
+    # the OK form maps to nothing
+    r3 = rep()
+    r3["lag"] = {"summary": "", "frame_sync": "OK (<=100ms vs real PTS)"}
+    assert map_reasons(r3, aux(), "kamla").bin == 1
 
 
 def test_lag_hard_fail_maps_to_syn_lag_const():
@@ -336,3 +346,84 @@ def test_tamper_flag():
     res = map_reasons(rep(), aux(tamper="99 rows carry impossible mouse "
                                         "deltas"), "kamla")
     assert "INT_TAMPER" in codes(res) and res.bin == 3
+
+
+def test_scanner_failure_holds_when_vlm_expected(tmp_path, monkeypatch):
+    """Review finding: a scanner failure must never silently drop the
+    AFK/black-frozen/notification battery (F5)."""
+    from pipeline import scanner, validate
+    monkeypatch.setattr(scanner, "available", lambda: False)
+    (tmp_path / "frames.csv").write_text(
+        "frame_id,timestamp_ms,input_keys,input_actions,"
+        "input_mouse_buttons,input_mouse_dx,input_mouse_dy\n"
+        "0,0,W,move_up,,0.0,0.0\n")
+    a = validate._build_aux(tmp_path, rep(), None, gemini_key="k",
+                            gemini_model="m", vlm_expected=True)
+    assert a["vlm_extra_failed"]
+    a2 = validate._build_aux(tmp_path, rep(), None, gemini_key="",
+                             gemini_model="m", vlm_expected=False)
+    assert not a2["vlm_extra_failed"]
+
+
+def test_notif_confirm_runs_without_scanner(tmp_path, monkeypatch):
+    from pipeline import scanner, validate, vlm as vlmmod
+    monkeypatch.setattr(scanner, "available", lambda: False)
+    (tmp_path / "frames.csv").write_text(
+        "frame_id,timestamp_ms,input_keys,input_actions,"
+        "input_mouse_buttons,input_mouse_dx,input_mouse_dy\n"
+        "0,0,W,move_up,,0.0,0.0\n")
+
+    class Grabber:
+        def __init__(self, video):
+            pass
+
+        def at(self, t):
+            import types
+            return "frame"
+
+        def jpeg(self, t, width=640):
+            return b"jpg"
+
+        def close(self):
+            pass
+
+    class Eng:
+        FrameGrabber = Grabber
+
+    monkeypatch.setattr(validate, "load_engine", lambda: Eng)
+    monkeypatch.setattr(validate, "_corner_jpeg", lambda fr: b"jpg")
+    monkeypatch.setattr(vlmmod, "confirm_flag",
+                        lambda *a, **k: (True, "steam toast"))
+    r = rep()
+    r["vlm"]["notif_ts"] = [60.0]
+    a = validate._build_aux(tmp_path, r, object(), gemini_key="k",
+                            gemini_model="m", vlm_expected=True)
+    assert a["notifs"] == [{"t": 60.0, "confirmed": True,
+                            "what": "steam toast"}]
+
+
+def test_keys_missing_conditional_on_video_evidence():
+    r = rep()
+    r["inventory"]["key_frames"] = 0
+    res = map_reasons(r, aux(video_active=True), "kamla")
+    assert "INP_KEYS_MISSING" in codes(res) and res.bin == 3
+    res2 = map_reasons(r, aux(video_active=False), "kamla")
+    assert "INP_KEYS_MISSING" not in codes(res2)
+    assert any("near-static" in a for a in res2.advisories)
+
+
+def test_map_gate_failures_produces_fix_plan_material():
+    from pipeline.validate import map_gate_failures
+    fails = ["FAIL: camera columns non-null in 3 rows (input-only session)",
+             "FAIL: frame-sync drift: worst row timestamp 210ms off real "
+             "PTS",
+             "FAIL: controls-to-video sync: video 180.0ms behind inputs "
+             "(|lag| > 150ms); correlation -0.4"]
+    reasons = map_gate_failures(fails, has_raw=False)
+    got = {r["code"] for r in reasons}
+    assert {"STR_CAMERA_NONNULL", "SYN_TS_NOT_PTS",
+            "SYN_LAG_CONST"} <= got
+    assert all(r["blocking"] for r in reasons)
+    from pipeline import fix
+    plan = fix.plan_fixes(reasons, game="kamla", has_raw=False)
+    assert plan["steps"], "gate failures must yield a real fix plan"

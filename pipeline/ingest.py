@@ -31,9 +31,17 @@ _ZIP_PART_RE = re.compile(r"\.zip([.-]?\d{3})?$|\.z\d{2}$", re.IGNORECASE)
 
 def run_rclone(args: list[str], *, timeout_s: int = 3600
                ) -> subprocess.CompletedProcess:
-    """Single choke point for rclone — tests monkeypatch this."""
-    return subprocess.run(["rclone", *args], capture_output=True, text=True,
-                          timeout=timeout_s)
+    """Single choke point for rclone — tests monkeypatch this.
+
+    A timeout comes back as a failed CompletedProcess (rc 124) so callers'
+    normal retry/quarantine paths handle it — an uncaught TimeoutExpired
+    would wedge the whole run every 30 minutes (review finding #5)."""
+    try:
+        return subprocess.run(["rclone", *args], capture_output=True,
+                              text=True, timeout=timeout_s)
+    except subprocess.TimeoutExpired:
+        return subprocess.CompletedProcess(
+            ["rclone", *args], 124, "", f"timed out after {timeout_s}s")
 
 
 def _md5_file(path: Path) -> str:
@@ -189,6 +197,19 @@ def scan(cfg: C.Config, ledger: Ledger,
         existing = ledger.get(ds.session_id)
 
         if existing is not None:
+            # the supersede rule (§9.1) is for the SAME upload slot — a
+            # different Drive path claiming a known session id is an
+            # identity collision, never a supersede (cross-identity
+            # copies must go through INT_DUP_CROSS, not slip past it)
+            if existing["drive_path"] and \
+                    existing["drive_path"] != ds.drive_path:
+                res.integrity_flags.append(
+                    f"session-id collision: {ds.drive_path} reuses "
+                    f"{ds.session_id} already registered at "
+                    f"{existing['drive_path']} — ignored + flagged"
+                    + (" (identical video md5 — cross-identity copy)"
+                       if vmd5 and vmd5 == existing["md5_video"] else ""))
+                continue
             if vmd5 and existing["md5_video"] and vmd5 != existing["md5_video"]:
                 if existing["state"] == "REJECTED":
                     ledger.supersede(ds.session_id, new_md5=vmd5,
@@ -224,11 +245,22 @@ def scan(cfg: C.Config, ledger: Ledger,
                                f"{dupes[0]['session_id']}")
                     res.duplicates.append(ds.session_id)
                     continue
-                # cross-identity: earliest Drive createdTime wins (F3)
+                # cross-identity: earliest Drive createdTime wins (F3) —
+                # unless the other copy already shipped (can't undeliver);
+                # the ledger detail must state which case actually happened
+                # (payment-dispute evidence, review finding #13)
                 earliest = min(dupes, key=lambda r: r["drive_ctime"] or "9")
-                if (earliest["drive_ctime"] or "9") <= (ds.ctime or "9") or \
-                        earliest["state"] in ("DELIVERED", "UPLOADED",
-                                              "PACKAGED"):
+                is_earlier = (earliest["drive_ctime"] or "9") <= \
+                    (ds.ctime or "9")
+                shipped = earliest["state"] in ("DELIVERED", "UPLOADED",
+                                                "PACKAGED")
+                if is_earlier or shipped:
+                    why = (f"kept earlier upload {earliest['session_id']}"
+                           if is_earlier else
+                           f"kept already-{earliest['state'].lower()} later "
+                           f"upload {earliest['session_id']} — this copy "
+                           f"has the earlier createdTime but the other "
+                           f"already shipped")
                     ledger.insert_session(
                         session_id=ds.session_id, game=ds.game,
                         operator_email=ds.operator_email,
@@ -236,19 +268,17 @@ def scan(cfg: C.Config, ledger: Ledger,
                         drive_path=ds.drive_path, drive_ctime=ds.ctime,
                         md5_video=vmd5, bytes_=total_bytes,
                         state="REJECTED",
-                        detail=f"cross-identity duplicate of "
-                               f"{earliest['session_id']} (earlier upload "
-                               f"kept)")
+                        detail=f"cross-identity duplicate ({why})")
                     ledger.set_reasons(
                         ds.session_id,
                         [{"code": "INT_DUP_CROSS", "blocking": True,
                           "fixable": False, "params": {},
                           "evidence": f"video md5 identical to "
-                                      f"{earliest['session_id']}"}], 3)
+                                      f"{earliest['session_id']}; {why}"}], 3)
                     res.dup_cross.append(ds.session_id)
                     res.integrity_flags.append(
                         f"cross-player duplicate: {ds.session_id} rejected "
-                        f"(kept earlier upload {earliest['session_id']})")
+                        f"({why})")
                     continue
                 # the NEW copy is the earlier one: reject the later existing
                 ledger.set_state(earliest["session_id"], "REJECTED",
@@ -368,7 +398,8 @@ def download(cfg: C.Config, ledger: Ledger, session_id: str) -> str:
     for attempt in range(3):
         p = run_rclone(["copy", "--checksum", "--transfers", "4",
                         "--exclude", "*.rrd",
-                        f"{cfg.remote_collect}{row['drive_path']}", str(dst)])
+                        f"{cfg.remote_collect}{row['drive_path']}",
+                        str(dst)], timeout_s=21600)   # big sessions, slow lines
         if p.returncode != 0:
             if attempt == 2:
                 raise DownloadError(

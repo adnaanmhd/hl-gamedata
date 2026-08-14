@@ -205,3 +205,22 @@ def test_download_md5_mismatch_quarantine_path(cfg, ledger, monkeypatch):
         assert False, "must raise after 3 md5 mismatches"
     except ingest.DownloadError as e:
         assert "md5 mismatch" in str(e)
+
+
+def test_session_id_collision_across_paths_never_supersedes(cfg, ledger):
+    """Review finding: a different Drive path reusing a known session id
+    must be flagged and ignored — never merged, deduped-away silently, or
+    allowed to supersede a reject."""
+    ingest.scan(cfg, ledger, entries=make_session_entries(md5="orig"))
+    ledger.set_state(SID1, "REJECTED")
+    # same sid, same video, DIFFERENT player path
+    collide = make_session_entries(player="p2@x.com", md5="orig")
+    res = ingest.scan(cfg, ledger, entries=collide)
+    assert res.superseded == [] and res.discovered == []
+    assert any("session-id collision" in f for f in res.integrity_flags)
+    assert ledger.get(SID1)["state"] == "REJECTED"          # untouched
+    # different md5 from the foreign path must not supersede either
+    res2 = ingest.scan(cfg, ledger, entries=make_session_entries(
+        player="p2@x.com", md5="evil"))
+    assert res2.superseded == []
+    assert ledger.get(SID1)["md5_video"] == "orig"

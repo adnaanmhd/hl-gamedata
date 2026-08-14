@@ -150,10 +150,13 @@ def _day_bounds_utc(day_ist: datetime) -> tuple[str, str]:
             (start + timedelta(days=1)).isoformat(timespec="seconds"))
 
 
-def build_sheet_rows(ledger: Ledger, day_ist: datetime) -> list[dict]:
+def build_sheet_rows(ledger: Ledger, day_ist: datetime,
+                     bounds: tuple[str, str] | None = None) -> list[dict]:
     """Per-player rows for the day's payment sheet. Hours only, no money
-    (R11). Split children roll up under the parent's player."""
-    lo, hi = _day_bounds_utc(day_ist)
+    (R11). Split children roll up under the parent's player. `bounds` is
+    the (lo, hi) UTC ISO window — the caller passes the trailing-24h
+    window so nothing delivered after send time ever vanishes."""
+    lo, hi = bounds or _day_bounds_utc(day_ist)
     day = day_ist.strftime("%Y-%m-%d")
     q = """
     SELECT game, operator_email, player_email,
@@ -204,13 +207,14 @@ def build_sheet_rows(ledger: Ledger, day_ist: datetime) -> list[dict]:
     return rows
 
 
-def write_payment_sheet(cfg: C.Config, ledger: Ledger,
-                        day_ist: datetime) -> tuple[Path, Path]:
+def write_payment_sheet(cfg: C.Config, ledger: Ledger, day_ist: datetime,
+                        bounds: tuple[str, str] | None = None
+                        ) -> tuple[Path, Path]:
     """CSV + MD twin under ~/hl-pipeline/reports/YYYY-MM-DD/ (F8)."""
     day = day_ist.strftime("%Y-%m-%d")
     out = cfg.reports_dir / day
     out.mkdir(parents=True, exist_ok=True)
-    rows = build_sheet_rows(ledger, day_ist)
+    rows = build_sheet_rows(ledger, day_ist, bounds)
     csv_path = out / f"payment-{day}.csv"
     with csv_path.open("w", newline="") as f:
         w = csv.DictWriter(f, fieldnames=SHEET_COLS)
@@ -240,7 +244,7 @@ def write_payment_sheet(cfg: C.Config, ledger: Ledger,
         md.append(f"| {g} | {op} | {o['delivered']} | {o['rejected']} | "
                   f"{o['h']:.2f} | {o['cum']:.2f} |")
 
-    lo, hi = _day_bounds_utc(day_ist)
+    lo, hi = bounds or _day_bounds_utc(day_ist)
     rejects = ledger.db.execute(
         "SELECT session_id, reasons_json, dossier_path FROM sessions "
         "WHERE state='REJECTED' AND updated_at>=? AND updated_at<? "

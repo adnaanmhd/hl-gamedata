@@ -219,3 +219,87 @@ def test_download_pauses_below_low_water(cfg, ledger, monkeypatch):
     runmod._download_phase(cfg, ledger, [SID1], alerts)
     assert ledger.get(SID1)["state"] == "DISCOVERED"   # untouched
     assert any("downloads paused" in a for a in alerts)
+
+
+def test_fixing_state_resumes_via_revalidation(cfg, ledger, monkeypatch):
+    """Review finding #6: a mid-fix crash must NOT re-run the stale plan
+    (RETRIM would trim twice) — it re-validates and re-derives."""
+    _seed(cfg, ledger)
+    _stub_phases(monkeypatch, {SID1: [{"bin": 1}]})
+    ledger.set_state(SID1, "FIX_QUEUED")
+    ledger.update(SID1, fix_attempts=1)
+    ledger.set_state(SID1, "FIXING", "attempt 1")
+    applied = []
+    monkeypatch.setattr(runmod.fix, "apply_fixes",
+                        lambda *a, **k: applied.append(1))
+    b = runmod.process_batch(cfg, ledger, [SID1], alerts=[])
+    assert applied == []                     # stale plan never re-ran
+    assert ledger.get(SID1)["state"] == "DELIVERED"
+    assert ledger.get(SID1)["fix_attempts"] == 1   # no extra attempt burned
+
+
+def test_fix_error_goes_to_revalidation_not_stale_requeue(cfg, ledger,
+                                                          monkeypatch):
+    _seed(cfg, ledger)
+    _stub_phases(monkeypatch, {SID1: [
+        {"bin": 2, "reasons": [{"code": "INP_OSKEYS", "blocking": True,
+                                "fixable": True, "params": {},
+                                "evidence": ""}]},
+        {"bin": 1}]})
+    monkeypatch.setattr(runmod.fix, "apply_fixes",
+                        lambda *a, **k: {"applied": [], "children": None,
+                                         "error": "FIX_KEY_HYGIENE: boom"})
+    b = runmod.process_batch(cfg, ledger, [SID1], alerts=[])
+    # the error routed through REVALIDATING; second verdict bin 1 delivers
+    assert ledger.get(SID1)["state"] == "DELIVERED"
+
+
+def test_split_with_no_survivors_rejects(cfg, ledger, monkeypatch):
+    _seed(cfg, ledger)
+    _stub_phases(monkeypatch, {SID1: [{"bin": 2, "reasons": [
+        {"code": "CNT_MID_NONGAMEPLAY", "blocking": True, "fixable": True,
+         "params": {"cut": [10.0, 100.0]}, "evidence": ""}]}]})
+    monkeypatch.setattr(
+        runmod.fix, "apply_fixes",
+        lambda *a, **k: {"applied": [], "error": None,
+                         "children": {"segments": [], "dropped": [
+                             {"t0": 0, "t1": 10, "why": "under minimum"}]}})
+    b = runmod.process_batch(cfg, ledger, [SID1], alerts=[])
+    assert ledger.get(SID1)["state"] == "REJECTED"
+    assert b.rejected == 1
+
+
+def test_delivery_crash_quarantines_with_alert(cfg, ledger, monkeypatch):
+    _seed(cfg, ledger)
+    _stub_phases(monkeypatch, {SID1: [{"bin": 1}]})
+
+    def boom(cfg_, ledger_, sid, dest_prefix=C.VENDOR):
+        raise RuntimeError("rrd generation exploded")
+
+    monkeypatch.setattr(runmod.deliver, "deliver_session", boom)
+    alerts = []
+    monkeypatch.setattr(runmod, "_alert",
+                        lambda cfg_, text, sent: alerts.append(text))
+    runmod.process_batch(cfg, ledger, [SID1], alerts=alerts)
+    assert ledger.get(SID1)["state"] == "QUARANTINED"
+    assert any("delivery crashed" in a for a in alerts)
+
+
+def test_failed_gate_requeues_with_real_reasons(cfg, ledger, monkeypatch):
+    """Review finding #2: gate failures must become reasons, or the fix
+    pass plans nothing and wrongfully rejects."""
+    _seed(cfg, ledger)
+    _stub_phases(monkeypatch, {SID1: [{"bin": 1}]})
+
+    def gate_fail(cfg_, ledger_, sid, dest_prefix=C.VENDOR):
+        from pipeline.deliver import DeliveryOutcome
+        return DeliveryOutcome(sid, "failed_gate", detail="camera",
+                               gate_fails=["FAIL: camera columns non-null "
+                                           "in 2 rows (input-only "
+                                           "session)"])
+
+    monkeypatch.setattr(runmod.deliver, "deliver_session", gate_fail)
+    runmod.process_batch(cfg, ledger, [SID1], alerts=[])
+    row = ledger.get(SID1)
+    assert row["state"] == "FIX_QUEUED"
+    assert "STR_CAMERA_NONNULL" in row["reasons_json"]

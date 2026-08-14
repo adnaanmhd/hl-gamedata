@@ -77,11 +77,13 @@ def scan_video(video: Path, *, pts_us: list[int] | None = None,
                timeout_s: int = 3600) -> MotionTimeline:
     """One full-video decode -> motion timeline."""
     import numpy as np
+    # stderr must not be a PIPE nobody drains: a corrupt video fills the
+    # buffer and deadlocks the decode loop (review finding #4)
     p = subprocess.Popen(
         ["ffmpeg", "-v", "error", "-i", str(video),
          "-vf", f"scale={_W}:{_H}", "-pix_fmt", "gray",
          "-f", "rawvideo", "-"],
-        stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
     diffs: list[float] = []
     luma: list[float] = []
     prev = None

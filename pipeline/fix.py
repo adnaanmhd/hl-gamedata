@@ -167,17 +167,31 @@ def plan_fixes(reasons: list[dict], *, game: str, has_raw: bool) -> dict:
     if retranslate and has_raw:
         steps.append(("FIX_RETRANSLATE", {}))
         csv_fixes = []                    # superseded by the re-translate
+    def _pre_cut_csv_fixes():
+        """Row/timestamp surgery must precede a cut — the cutter maps CSV
+        rows onto video frames and needs them aligned first."""
+        for fid, p in csv_fixes:
+            if fid in ("FIX_ROWS_SURGERY", "FIX_TSREPAIR_PTS"):
+                steps.append((fid, p))
+
     if cut_windows or (head_cut and tail_cut):
         cuts = list(cut_windows)
         if head_cut:
             cuts.append((0.0, head_cut))
         if tail_cut:
             cuts.append((tail_cut, 1e9))
+        _pre_cut_csv_fixes()
         steps.append(("FIX_CUT_SEGMENTS", {"cut": sorted(cuts)}))
         return {"steps": steps, "unfixable": sorted(set(unfixable))}
     if head_cut:
         steps.append(("FIX_RETRIM_HEAD", {"head_s": head_cut}))
+        # gate windows carry PRE-trim timestamps; retrim rebases every
+        # row — gating here would blank the wrong frames. The re-validation
+        # after the trim re-derives the frozen window on the new timeline
+        # (review finding #7).
+        gate_windows = []
     if tail_cut:
+        _pre_cut_csv_fixes()
         steps.append(("FIX_CUT_SEGMENTS", {"cut": [(tail_cut, 1e9)]}))
         return {"steps": steps, "unfixable": sorted(set(unfixable))}
     if gate_windows:
@@ -262,11 +276,15 @@ def _dispatch(fix_id: str, params: dict, work: Path, game: str,
     if fix_id == "FIX_RETRANSLATE":
         return retranslate_from_sidecars(work)
     if fix_id == "FIX_CUT_SEGMENTS":
-        s = json.loads((work / "session.json").read_text())
-        dur = float(s["duration_seconds"])
+        # the PROBED duration, not session.json's (which may be the very
+        # thing that's wrong) — a stale short duration would silently
+        # truncate everything past it
+        dur = V.probe(work / "video.mp4").duration_s
         keep = cutter.complement_windows(
             [(a, min(b, dur)) for a, b in params["cut"]], dur)
         res = cutter.cut_segments(work, keep, split_root)
+        _propagate_shift_record(work, [Path(s["dir"])
+                                       for s in res["segments"]])
         return res
     if fix_id == "FIX_RETRIM_HEAD":
         tool = _retrim_tool()
@@ -295,6 +313,24 @@ def _dispatch(fix_id: str, params: dict, work: Path, game: str,
 
 
 # ------------------------------------------------------- implementations
+
+def _propagate_shift_record(parent: Path, children: list[Path]) -> None:
+    """qa's raw recomputation reads the applied sync shift from
+    translation_report.json keyed by SESSION DIR NAME — split children
+    must inherit the parent's entry or every shift-corrected child fails
+    the recheck spuriously (review finding #10)."""
+    report_path = parent.parent / "translation_report.json"
+    try:
+        report = json.loads(report_path.read_text())
+    except (FileNotFoundError, json.JSONDecodeError):
+        return
+    entry = report.get(parent.name)
+    if not entry:
+        return
+    for child in children:
+        report.setdefault(child.name, dict(entry))
+    report_path.write_text(json.dumps(report, indent=2))
+
 
 def _read_csv(work: Path) -> tuple[list[str], list[list[str]]]:
     with (work / "frames.csv").open(newline="") as f:
@@ -346,6 +382,22 @@ def fix_translate_raw(work: Path) -> str:
     for name in ("inputs.jsonl", "metadata.json", "keybind.json"):
         if (work / name).exists():
             shutil.move(str(work / name), raw / name)
+    # the applied sync shift must survive the temp-out cleanup — qa's raw
+    # recomputation reads it from the work root (review finding #10)
+    try:
+        rep = json.loads((out / "translation_report.json").read_text())
+    except (FileNotFoundError, json.JSONDecodeError):
+        rep = {}
+    entry = rep.get(json.loads((work / "session.json").read_text())
+                    .get("session_id")) or rep.get(src.name)
+    if entry:
+        report_path = work.parent / "translation_report.json"
+        try:
+            merged = json.loads(report_path.read_text())
+        except (FileNotFoundError, json.JSONDecodeError):
+            merged = {}
+        merged[work.name] = entry
+        report_path.write_text(json.dumps(merged, indent=2))
     shutil.rmtree(out, ignore_errors=True)
     return f"translated raw bundle: {res['data_quality']}"
 
@@ -688,6 +740,12 @@ def fix_sessionjson_recompute(work: Path, game: str) -> str:
     created_raw = s.get("created_at_utc")
     try:
         created = datetime.fromisoformat(created_raw.replace("Z", "+00:00"))
+        if created.tzinfo is None:
+            # a naive stamp is UTC by contract — repair it in place so
+            # .astimezone below can't shift it by the host's offset
+            created = created.replace(tzinfo=timezone.utc)
+            s["created_at_utc"] = created.strftime(
+                "%Y-%m-%dT%H:%M:%S.%f") + "Z"
     except (AttributeError, ValueError):
         created = datetime.now(timezone.utc)
         s["created_at_utc"] = created.strftime(
@@ -771,6 +829,14 @@ def fix_v1_to_v2(work: Path, game: str) -> str:
     (work / "session.json").write_text(json.dumps(new_s, indent=2))
     fix_sessionjson_recompute(work, slug)
     (work / "key_binding.json").unlink(missing_ok=True)
+    # sidecars move to raw/ like every other v2 working copy — left at the
+    # root they make the engine's sniffer read the session as a raw bundle
+    # and dead-end the whole v1 recovery path (review finding #11)
+    raw = work / "raw"
+    raw.mkdir(exist_ok=True)
+    for name in ("inputs.jsonl", "metadata.json", "keybind.json"):
+        if (work / name).exists():
+            shutil.move(str(work / name), raw / name)
     if not (work / "rrd_creation.py").exists():
         rrdmod.write_script(work)
     (work / "session.rrd").touch()

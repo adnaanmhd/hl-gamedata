@@ -296,3 +296,23 @@ def test_remux_repairs_readable_file(tmp_path):
     assert "remux" in fix.fix_remux(d)
     from translator import video as V
     assert V.probe(d / "video.mp4").frame_count > 0
+
+
+def test_plan_drops_gate_when_retrim_planned():
+    plan = fix.plan_fixes(
+        [_r("CNT_EDGE_NONGAMEPLAY", params={"edge": "head",
+                                            "cut_at_s": 12.5}),
+         _r("INP_FROZEN_ACTIONS", params={"t0": 60.0, "t1": 61.5})],
+        game="outer_wilds", has_raw=False)
+    ids = [s[0] for s in plan["steps"]]
+    assert "FIX_RETRIM_HEAD" in ids
+    assert "FIX_GATE_WINDOW" not in ids     # pre-trim coords are stale
+
+
+def test_plan_rows_surgery_precedes_cut():
+    plan = fix.plan_fixes(
+        [_r("CNT_MID_NONGAMEPLAY", params={"cut": [100.0, 110.0]}),
+         _r("STR_ROWS_MISMATCH")],
+        game="kamla", has_raw=False)
+    ids = [s[0] for s in plan["steps"]]
+    assert ids.index("FIX_ROWS_SURGERY") < ids.index("FIX_CUT_SEGMENTS")

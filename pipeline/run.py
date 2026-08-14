@@ -16,7 +16,8 @@ import os
 import shutil
 import subprocess
 import sys
-from datetime import datetime, timezone
+import time
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from . import config as C
@@ -40,8 +41,18 @@ def acquire_lock(cfg: C.Config) -> bool:
                 pid = int((cfg.lock_dir / "pid").read_text())
                 os.kill(pid, 0)
                 return False                      # live run holds it
-            except (ValueError, FileNotFoundError, ProcessLookupError,
-                    PermissionError):
+            except (ValueError, FileNotFoundError):
+                # the winner may be between mkdir and pid-write — give it
+                # a beat before declaring the lock stale
+                time.sleep(1.0)
+                try:
+                    pid = int((cfg.lock_dir / "pid").read_text())
+                    os.kill(pid, 0)
+                    return False
+                except (ValueError, FileNotFoundError, ProcessLookupError,
+                        PermissionError):
+                    shutil.rmtree(cfg.lock_dir, ignore_errors=True)
+            except (ProcessLookupError, PermissionError):
                 shutil.rmtree(cfg.lock_dir, ignore_errors=True)   # stale
     return False
 
@@ -152,8 +163,6 @@ def _fix_phase(cfg, ledger, sids, alerts, *, workers: int) -> list[str]:
     session ids created by splits."""
     children_created: list[str] = []
     for _pass in range(C.FIX_RETRIES):
-        # FIXING = a crash mid-fix; restart that pass without burning
-        # another attempt (fixes are idempotent / self-guarded)
         todo = [s for s in sids
                 if (row := ledger.get(s))
                 and row["state"] in ("FIX_QUEUED", "FIXING")]
@@ -161,15 +170,22 @@ def _fix_phase(cfg, ledger, sids, alerts, *, workers: int) -> list[str]:
             break
         for sid in todo:
             row = ledger.get(sid)
-            resuming = row["state"] == "FIXING"
-            if not resuming and row["fix_attempts"] >= C.FIX_RETRIES:
+            if row["state"] == "FIXING":
+                # crash mid-fix: the copy may be half-fixed and the stored
+                # plan stale — re-running RETRIM/CUT on it would trim real
+                # gameplay twice (review finding #6). Re-validate instead:
+                # the fresh verdict re-derives exactly what still needs
+                # fixing on the CURRENT copy.
+                ledger.set_state(sid, "REVALIDATING",
+                                 "mid-fix crash — re-deriving fix plan")
+                continue
+            if row["fix_attempts"] >= C.FIX_RETRIES:
                 ledger.set_state(sid, "REJECTED",
                                  "fix retries exhausted (R2)")
                 continue
-            if not resuming:
-                ledger.update(sid, fix_attempts=row["fix_attempts"] + 1)
-                ledger.set_state(sid, "FIXING",
-                                 f"attempt {row['fix_attempts'] + 1}")
+            ledger.update(sid, fix_attempts=row["fix_attempts"] + 1)
+            ledger.set_state(sid, "FIXING",
+                             f"attempt {row['fix_attempts'] + 1}")
             reasons = json.loads(row["reasons_json"] or "[]")
             work = cfg.work / sid
             has_raw = (work / "raw" / "inputs.jsonl").exists()
@@ -183,17 +199,30 @@ def _fix_phase(cfg, ledger, sids, alerts, *, workers: int) -> list[str]:
                 ledger.set_state(sid, "REJECTED",
                                  "no applicable fix for blocking reasons")
                 continue
-            out = fix.apply_fixes(work, plan, game=row["game"],
+            # a reroute changes which keybind/title every later fix and
+            # re-validation must use — apply it to the ledger FIRST
+            reroute = next((p for f, p in plan["steps"]
+                            if f == "FIX_REROUTE_GAME"), None)
+            game = row["game"]
+            if reroute and reroute.get("actual") in C.GAMES:
+                game = reroute["actual"]
+                ledger.update(sid, game=game)
+            out = fix.apply_fixes(work, plan, game=game,
                                   dossier_dir=cfg.dossiers / sid,
                                   split_root=cfg.work)
             if out["error"]:
-                ledger.set_state(sid, "FIX_QUEUED",
-                                 f"fix failed: {out['error']}")
+                # partially-applied plan: never re-run it blind — go back
+                # through validation to re-derive from the current copy
+                ledger.set_state(sid, "REVALIDATING",
+                                 f"fix failed: {out['error']}"[:300])
                 continue
-            reroute = next((p for f, p in plan["steps"]
-                            if f == "FIX_REROUTE_GAME"), None)
-            if reroute and reroute.get("actual") in C.GAMES:
-                ledger.update(sid, game=reroute["actual"])
+            if out["children"] is not None and \
+                    not out["children"]["segments"]:
+                # no ≥70 s segment survived the cut — §5: reject
+                ledger.set_state(sid, "REJECTED",
+                                 "split produced no >=70s segment "
+                                 f"(dropped {len(out['children']['dropped'])})")
+                continue
             if out["children"] is not None:
                 for seg in out["children"]["segments"]:
                     if ledger.get(seg["id"]) is None:
@@ -234,18 +263,40 @@ def _fix_phase(cfg, ledger, sids, alerts, *, workers: int) -> list[str]:
 
 def _deliver_phase(cfg, ledger, sids, alerts,
                    dest_prefix: str = C.VENDOR) -> dict:
+    from .validate import map_gate_failures
     stats = {"delivered": 0, "hours": 0.0, "upload_failures": 0}
     for sid in sids:
         row = ledger.get(sid)
         if not row or row["state"] not in ("READY", "PACKAGED", "UPLOADED"):
             continue
-        out = deliver.deliver_session(cfg, ledger, sid,
-                                      dest_prefix=dest_prefix)
+        try:
+            out = deliver.deliver_session(cfg, ledger, sid,
+                                          dest_prefix=dest_prefix)
+        except Exception as e:
+            # staging/rrd/qa crash: quarantining preserves the session for
+            # a human instead of re-crashing every launchd tick (review
+            # finding #3); Drive I original is untouched either way
+            ledger.set_state(sid, "QUARANTINED",
+                             f"delivery crashed: {type(e).__name__}: "
+                             f"{e}"[:300])
+            _alert(cfg, f"delivery crashed for {sid}: "
+                        f"{type(e).__name__}: {e}", alerts)
+            continue
         if out.status == "delivered":
             stats["delivered"] += 1
             stats["hours"] += out.hours
         elif out.status == "failed_gate":
             r = ledger.get(sid)
+            # the gate failures BECOME the reasons, so the fix pass has a
+            # real plan to work from (review finding #2)
+            has_raw = (cfg.work / sid / "raw" / "inputs.jsonl").exists()
+            reasons = map_gate_failures(out.gate_fails or [],
+                                        has_raw=has_raw)
+            if reasons:
+                ledger.set_reasons(sid, reasons,
+                                   3 if any(not x["fixable"]
+                                            for x in reasons
+                                            if x["blocking"]) else 2)
             ledger.update(sid, fix_attempts=r["fix_attempts"] + 1)
             if r["fix_attempts"] + 1 >= C.FIX_RETRIES + 1:
                 ledger.set_state(sid, "REJECTED",
@@ -300,7 +351,7 @@ def process_batch(cfg: C.Config, ledger: Ledger, sids: list[str], *,
         duration_min=max(round((datetime.now(timezone.utc) - t0)
                                .total_seconds() / 60), 1),
         delivered=dstats["delivered"],
-        total=len([s for s in sids if ledger.get(s)]),
+        total=len([s for s in all_sids if ledger.get(s)]),
         auto_fixed=fixed, rejected=rejected, reject_labels=labels,
         hours_delta=dstats["hours"],
         hours_kamla=hours["kamla"], hours_ow=hours["outer_wilds"],
@@ -333,7 +384,12 @@ def send_daily_report_if_due(cfg: C.Config, ledger: Ledger,
     marker = cfg.reports_dir / day / ".sent"
     if marker.exists():
         return False
-    lo, hi = reports._day_bounds_utc(now_ist)
+    # the reporting window is the TRAILING 24h ending at send time — a
+    # calendar-day window sent at 14:00 would permanently drop everything
+    # delivered 14:00-24:00 from every report (review finding #15)
+    hi_dt = now_ist.astimezone(timezone.utc)
+    lo = (hi_dt - timedelta(hours=24)).isoformat(timespec="seconds")
+    hi = hi_dt.isoformat(timespec="seconds")
     row = ledger.db.execute(
         "SELECT COUNT(*) n, COALESCE(SUM(duration_delivered_s),0) s "
         "FROM sessions WHERE state='DELIVERED' AND delivered_at>=? AND "
@@ -372,7 +428,8 @@ def send_daily_report_if_due(cfg: C.Config, ledger: Ledger,
         integrity_lines=([f"{dups} cross-player duplicate"
                           f"{'s' if dups > 1 else ''} (kept earlier upload)"]
                          if dups else []))
-    csv_path, _md = reports.write_payment_sheet(cfg, ledger, now_ist)
+    csv_path, _md = reports.write_payment_sheet(cfg, ledger, now_ist,
+                                                bounds=(lo, hi))
     msg = reports.build_daily_message(d, p)
     try:
         telegram.send_message(cfg, msg)
@@ -406,10 +463,17 @@ def run(cfg: C.Config, *, max_batches: int = 50,
         except RuntimeError as e:
             _alert(cfg, f"Drive scan failed: {e}", alerts)
 
+        hold_retried = False
         for _ in range(max_batches):
             resume = [r["session_id"] for r in ledger.by_state(*RESUMABLE)]
-            batch = resume or ingest.next_batch(ledger) or \
-                [r["session_id"] for r in ledger.by_state("HOLD_VLM")]
+            batch = resume or ingest.next_batch(ledger)
+            if not batch and not hold_retried:
+                # HOLD_VLM sessions get ONE retry per run (§13: retried
+                # next cycle) — an unbounded loop would spin full
+                # re-validations against a down Gemini
+                batch = [r["session_id"]
+                         for r in ledger.by_state("HOLD_VLM")]
+                hold_retried = bool(batch)
             if not batch:
                 break
             batch = batch[:C.BATCH_SIZE]
@@ -431,6 +495,10 @@ def run(cfg: C.Config, *, max_batches: int = 50,
                             b, _pace_now(ledger)))
                 except telegram.TelegramError as e:
                     print(f"[batch-msg-undelivered] {e}", file=sys.stderr)
+        held = ledger.counts_by_state().get("HOLD_VLM", 0)
+        if held:
+            _alert(cfg, f"{held} session(s) still HOLD_VLM at end of run — "
+                        f"VLM sweep repeatedly failing (§13)", alerts)
         if send_telegram:
             send_daily_report_if_due(cfg, ledger)
         ledger.close()

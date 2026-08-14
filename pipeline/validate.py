@@ -133,10 +133,14 @@ def _map_sync(rep: dict, aux: dict, reasons: list[dict],
               advisories: list[str]) -> None:
     lag = rep.get("lag", {})
     fs = lag.get("frame_sync") or ""
-    # the two exact phrases (plan §10.5) — FAIL vs WARN must not be confused
-    if fs.startswith("frame-sync drift"):
+    # the engine carries the qa-v2 severity prefix ("FAIL: ..."/"WARN: ...")
+    # — strip it before the two exact-phrase matches (plan §10.5); a missed
+    # match here would let real drift ship (review finding #1)
+    fs_body = fs.split(": ", 1)[1] if fs.split(": ", 1)[0] in (
+        "FAIL", "WARN", "OK") else fs
+    if fs_body.startswith("frame-sync drift"):
         reasons.append(_reason("SYN_TS_NOT_PTS", True, True, {}, fs))
-    elif fs.startswith("cannot verify frame sync"):
+    elif fs_body.startswith("cannot verify frame sync"):
         advisories.append(f"frame sync unverifiable: {fs}")
 
     summary = lag.get("summary") or ""
@@ -371,6 +375,27 @@ def _map_flags(rep: dict, aux: dict, reasons: list[dict],
             f"player-chat text burned in at {c['t']}s: {c.get('what', '')}"))
 
 
+def map_gate_failures(fails: list[str], *, has_raw: bool) -> list[dict]:
+    """Final-gate (§12.3) qa-v2 FAIL strings -> reason codes, so a
+    failed-gate session re-enters Phase III with a real fix plan instead
+    of empty reasons (review finding #2)."""
+    reasons: list[dict] = []
+    _map_qa_issues(fails, reasons, has_raw)
+    # the skip-list entries are legitimate codes when the FINAL gate is the
+    # thing that failed — map the two sync families explicitly
+    for f in fails:
+        if "frame-sync drift" in f:
+            reasons.append(_reason("SYN_TS_NOT_PTS", True, True, {}, f))
+        elif "controls-to-video sync" in f:
+            m = _LAG_RE.search(f)
+            reasons.append(_reason(
+                "SYN_LAG_CONST", True, True,
+                {"lag_ms": float(m.group(1)) if m else None}, f))
+        elif "mouse motion missing" in f:
+            reasons.append(_reason("INP_MOTION_MISSING", True, False, {}, f))
+    return reasons
+
+
 # video-independent codes: a HOLD_VLM must not delay these rejects
 _VIDEO_INDEPENDENT = {"CNT_SHORT", "INP_MOTION_MISSING", "CNT_DROPS",
                       "INT_DUP_CROSS", "INT_TAMPER", "CNT_ACTIONS_FEW"}
@@ -425,10 +450,16 @@ def map_reasons(rep: dict, aux: dict,
     # modalities (§10.4: blocking when video evidence confirms use)
     if inv:
         if inv.get("key_frames") == 0:
-            reasons.append(_reason(
-                "INP_KEYS_MISSING", True, False, {},
-                f"zero key frames in {inv.get('rows')} rows — implausible "
-                f"for real gameplay; re-record (never fabricate)"))
+            if aux.get("video_active", True):
+                reasons.append(_reason(
+                    "INP_KEYS_MISSING", True, False, {},
+                    f"zero key frames in {inv.get('rows')} rows while the "
+                    f"video shows live motion (movement needs WASD in both "
+                    f"games) — re-record (never fabricate)"))
+            else:
+                advisories.append(
+                    "zero key frames but the video is near-static — "
+                    "keyboard-missing not provable; see black/frozen check")
         qa_motion = any("mouse motion missing" in i
                         for i in rep.get("qa_issues", []))
         if qa_motion or inv.get("motion_frames") == 0:
@@ -600,8 +631,15 @@ def validate_session(work_dir: Path, dossier_dir: Path, *,
     analysis = eng.analyze(work_dir, raw_by_sid, gem, vlm_interval,
                            refine_step)
     if analysis.error:
-        # engine could not analyze at all — surface as a hard failure so
-        # the orchestrator quarantines with an alert instead of holding
+        # a malformed frames.csv is a FIXABLE arrival defect, not a crash
+        if "missing input columns" in analysis.error:
+            res = MapResult(bin=2, hold_vlm=False, engine_verdict="error",
+                            reasons=[_reason("STR_HEADER_BAD", True, True,
+                                             {}, analysis.error)])
+            _write_verdict(dossier_dir, work_dir.name, res)
+            return res
+        # anything else: hard failure — the orchestrator quarantines with
+        # an alert instead of holding forever
         raise RuntimeError(f"engine error: {analysis.error}")
     from dataclasses import asdict
     rep = asdict(analysis)
@@ -652,74 +690,87 @@ def _build_aux(work_dir: Path, rep: dict, gem, *, gemini_key: str,
     try:
         ts_ms, active, _has_action, tamper = _read_rows(
             work_dir / "frames.csv")
-    except Exception:
+    except Exception as e:
         ts_ms, active, tamper = [], [], None
+        aux.setdefault("notes", []).append(f"frames.csv unreadable for "
+                                           f"aux checks: {e}")
     if tamper:
         aux["tamper"] = tamper
 
-    if not scanner.available():
-        return aux
-    from translator import video as V
-    try:
-        pts = V.frame_pts(video)
-        tl = scanner.scan_video(video, pts_us=pts)
-    except Exception:
-        return aux
-
     vlm_rep = rep.get("vlm", {}) or {}
-    gameplay_ts = [s["t"] for s in vlm_rep.get("samples", [])
-                   if s.get("label") == "gameplay"]
-    baseline = tl.baseline(gameplay_ts)
-    aux["video_active"] = baseline >= 1.0
-    aux["scanner_stats"] = {"frames": tl.n_frames,
-                            "baseline": round(baseline, 3)}
+    tl = None
+    if scanner.available():
+        from translator import video as V
+        try:
+            pts = V.frame_pts(video)
+            tl = scanner.scan_video(video, pts_us=pts)
+        except Exception as e:
+            tl = None
+            aux.setdefault("notes", []).append(f"scanner failed: {e}")
+    if tl is None:
+        # losing the scanner loses the 2s-rule precision, AFK and
+        # black-frozen checks — never a silent pass (F5): hold when the
+        # session was supposed to get the full battery
+        aux.setdefault("notes", []).append(
+            "scanner unavailable — AFK/black-frozen/2s-precision not run")
+        if vlm_expected:
+            aux["vlm_extra_failed"] = True
 
-    # black/frozen whole-clip detection
-    if tl.luma:
-        black_frac = sum(1 for v in tl.luma if v < 16) / len(tl.luma)
-        if black_frac > 0.5:
-            aux["black_frozen"] = True
-            aux["black_frozen_evidence"] = (
-                f"{black_frac:.0%} of frames are near-black")
-        elif baseline < 0.3 and tl.duration_s > 30:
-            aux["black_frozen"] = True
-            aux["black_frozen_evidence"] = (
-                f"whole-clip motion baseline {baseline:.2f} — screen "
-                f"essentially frozen")
+    statics: list[tuple[float, float]] = []
+    afk_cands: list[tuple[float, float]] = []
+    if tl is not None:
+        gameplay_ts = [s["t"] for s in vlm_rep.get("samples", [])
+                       if s.get("label") == "gameplay"]
+        baseline = tl.baseline(gameplay_ts)
+        aux["video_active"] = baseline >= 1.0
+        aux["scanner_stats"] = {"frames": tl.n_frames,
+                                "baseline": round(baseline, 3)}
 
-    # 1-frame-accurate bounds for the engine's gating windows
-    refined: dict = {}
-    engine_windows = [w for w in vlm_rep.get("windows", [])
-                      if w.get("gating")]
-    for w in engine_windows:
-        r = scanner.refine_window(tl, w["t0"], w["t1"],
-                                  ratio=C.STILLNESS_FROZEN_BELOW,
-                                  baseline=baseline)
-        if r:
-            refined[(w["t0"], w["t1"])] = r
-    aux["refined"] = refined
+        # black/frozen whole-clip detection
+        if tl.luma:
+            black_frac = sum(1 for v in tl.luma if v < 16) / len(tl.luma)
+            if black_frac > 0.5:
+                aux["black_frozen"] = True
+                aux["black_frozen_evidence"] = (
+                    f"{black_frac:.0%} of frames are near-black")
+            elif baseline < 0.3 and tl.duration_s > 30:
+                aux["black_frozen"] = True
+                aux["black_frozen_evidence"] = (
+                    f"whole-clip motion baseline {baseline:.2f} — screen "
+                    f"essentially frozen")
 
-    def _overlaps_engine(t0: float, t1: float) -> bool:
-        return any(t0 < w["t1"] + 1.0 and t1 > w["t0"] - 1.0
-                   for w in engine_windows)
+        # 1-frame-accurate bounds for the engine's gating windows
+        refined: dict = {}
+        engine_windows = [w for w in vlm_rep.get("windows", [])
+                          if w.get("gating")]
+        for w in engine_windows:
+            r = scanner.refine_window(tl, w["t0"], w["t1"],
+                                      ratio=C.STILLNESS_FROZEN_BELOW,
+                                      baseline=baseline)
+            if r:
+                refined[(w["t0"], w["t1"])] = r
+        aux["refined"] = refined
 
-    # static candidates the 4s VLM sweep can miss entirely (a 2s pause
-    # between samples) — the whole reason the scanner exists (§10.3)
-    statics = scanner.static_windows(tl, ratio=C.STILLNESS_FROZEN_BELOW,
-                                     baseline=baseline, min_s=0.8)
-    statics = [(a, b) for a, b in statics
-               if not _overlaps_engine(a, b)
-               and a > 1.0 and b < tl.duration_s - 1.0]
+        def _overlaps_engine(t0: float, t1: float) -> bool:
+            return any(t0 < w["t1"] + 1.0 and t1 > w["t0"] - 1.0
+                       for w in engine_windows)
 
-    # AFK: >30s zero input + near-static (OW dialogue/map/reading are
-    # gameplay — VLM label check below removes those)
-    afk_cands = []
-    if ts_ms and active:
-        for a, b in scanner.zero_input_runs(ts_ms, active, C.AFK_MIN_S):
-            m = tl.window_motion(a, b)
-            if m is not None and baseline > 0 and \
-                    m < C.STILLNESS_FROZEN_BELOW * baseline:
-                afk_cands.append((a, b))
+        # static candidates the 4s VLM sweep can miss entirely (a 2s pause
+        # between samples) — the whole reason the scanner exists (§10.3)
+        statics = scanner.static_windows(tl, ratio=C.STILLNESS_FROZEN_BELOW,
+                                         baseline=baseline, min_s=0.8)
+        statics = [(a, b) for a, b in statics
+                   if not _overlaps_engine(a, b)
+                   and a > 1.0 and b < tl.duration_s - 1.0]
+
+        # AFK: >30s zero input + near-static (OW dialogue/map/reading are
+        # gameplay — VLM label check below removes those)
+        if ts_ms and active:
+            for a, b in scanner.zero_input_runs(ts_ms, active, C.AFK_MIN_S):
+                m = tl.window_motion(a, b)
+                if m is not None and baseline > 0 and \
+                        m < C.STILLNESS_FROZEN_BELOW * baseline:
+                    afk_cands.append((a, b))
 
     capped = len(statics) > 40
     if capped:
@@ -766,7 +817,10 @@ def _build_aux(work_dir: Path, rep: dict, gem, *, gemini_key: str,
                 by_t = {s["t"]: s for s in labels}
                 for (a, b), mid in zip(afk_cands, mids):
                     lab = by_t.get(round(mid, 2), {})
-                    if lab.get("label") not in ("dialogue", "map"):
+                    # a MISSING VLM reply must never confirm a cut of real
+                    # content — require an actual non-dialogue/map label
+                    if lab.get("label") and \
+                            lab["label"] not in ("dialogue", "map"):
                         afk_windows.append((a, b))
             for t in vlm_rep.get("notif_ts", []):
                 fr = grabber.at(t)

@@ -40,6 +40,7 @@ class DeliveryOutcome:
     detail: str = ""
     hours: float = 0.0
     rrd_sampled: bool = False
+    gate_fails: list[str] = None
 
 
 def rrd_sampled(session_id: str, game: str, date: str,
@@ -53,14 +54,32 @@ def upload_date_utc() -> str:
     return datetime.now(timezone.utc).strftime("%m-%d-%Y")
 
 
+def staged_date(cfg: C.Config, session_id: str, game: str,
+                dest_prefix: str = C.VENDOR) -> str | None:
+    """Date of an existing staged copy, if any — a resume must finish the
+    upload under the SAME date, or a cross-midnight crash double-delivers
+    the session under two paths (review cut-list finding)."""
+    root = cfg.stage / dest_prefix
+    if not root.exists():
+        return None
+    for day in sorted(root.iterdir()):
+        if (day / game / session_id).exists():
+            return day.name
+    return None
+
+
 def stage_session(cfg: C.Config, session_id: str, game: str, *,
                   date: str | None = None,
                   dest_prefix: str = C.VENDOR) -> tuple[Path, bool]:
     """Copy the spec files to the staging tree; regenerate the rrd pair for
-    sampled sessions. Returns (stage_dir, sampled)."""
-    date = date or upload_date_utc()
+    sampled sessions. Returns (stage_dir, sampled). Always stages FRESH —
+    a leftover half-staged dir (kill inside the final gate) may hold stub
+    rrd files that must never ship (review finding #8)."""
+    date = date or staged_date(cfg, session_id, game, dest_prefix) \
+        or upload_date_utc()
     work = cfg.work / session_id
     stage_dir = cfg.stage / dest_prefix / date / game / session_id
+    shutil.rmtree(stage_dir, ignore_errors=True)
     stage_dir.mkdir(parents=True, exist_ok=True)
     for name in SPEC_FILES:
         src = work / name
@@ -135,15 +154,16 @@ def deliver_session(cfg: C.Config, ledger: Ledger, session_id: str, *,
     row = ledger.get(session_id)
     assert row is not None
     game = row["game"]
-    date = upload_date_utc()
-    stage_dir, sampled = stage_session(cfg, session_id, game, date=date,
+    stage_dir, sampled = stage_session(cfg, session_id, game,
                                        dest_prefix=dest_prefix)
+    date = stage_dir.parent.parent.name
     ledger.update(session_id, rrd_sampled=int(sampled))
     ok, fails = final_gate(stage_dir, sampled)
     if not ok:
         shutil.rmtree(stage_dir, ignore_errors=True)
         return DeliveryOutcome(session_id, "failed_gate",
-                               detail="; ".join(fails)[:400])
+                               detail="; ".join(fails)[:400],
+                               gate_fails=fails)
     ledger.set_state(session_id, "PACKAGED",
                      f"staged {date} rrd_sampled={sampled}")
     remote_dir = f"{dest_prefix}/{date}/{game}/{session_id}"
