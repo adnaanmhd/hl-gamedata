@@ -1,0 +1,147 @@
+"""Configuration: paths, secrets, and every numeric gate from plan §5.
+
+Secrets live OUTSIDE the repo in ~/.config/hl-gamedata/secrets.env and are
+never logged or committed. Working data lives OUTSIDE the repo in
+~/hl-pipeline/ (override with HL_PIPELINE_HOME for tests).
+Threshold changes are human-intervention-only (plan §13): edit here, logged
+via git.
+"""
+from __future__ import annotations
+
+import os
+from dataclasses import dataclass, field
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+
+SECRETS_PATH = Path.home() / ".config" / "hl-gamedata" / "secrets.env"
+
+# Phase-1 scope (R1): these two games, nothing else.
+GAMES = ("kamla", "outer_wilds")
+GAME_LABELS = {"kamla": "Kamla", "outer_wilds": "OW"}   # §14 message labels
+VENDOR = "humynlabs"
+
+# Required files per session folder in Drive I (R3+R4). rrd files are ignored
+# entirely (R17) — never downloaded, regenerated at packaging.
+REQUIRED_FILES = ("video.mp4", "frames.csv", "session.json",
+                  "inputs.jsonl", "metadata.json")
+
+# --- §5 numeric thresholds (one table, one place) ---------------------------
+MIN_CLIP_S = 70.0                 # hard, also per split segment
+SESSION_SOFT_MAX_S = 30 * 60.0    # >30 min accepted with note (R16)
+MIN_DISTINCT_ACTIONS = 3          # per session AND per split segment (R14)
+KEEP_GATE_MAX_S = 2.0             # mid-clip non-gameplay: keep+gate if <= this
+KEEP_GATE_MAX_FRAC = 0.002        # ... AND <= 0.2% of clip; else split
+AFK_MIN_S = 30.0                  # >30s zero input + near-static = AFK
+STILLNESS_FROZEN_BELOW = 0.40     # window motion / live-gameplay baseline
+DROPS_WARN_PCT = 1.0              # irregular intervals: <=1% pass
+DROPS_REJECT_PCT = 5.0            # >5% reject; 1-5% deliver+warn
+LAG_TARGET_MS = 50.0              # controls<->video: <=50 pass
+LAG_HARD_MS = 150.0               # >150 constant -> fix+re-verify
+FRAME_SYNC_MS = 100.0             # per-row timestamp vs real PTS
+# VLM game-identity tripwire (unanimity only — sibling insight #7)
+TRIPWIRE_MIN_VOTES = 8
+TRIPWIRE_MIN_VOTE_FRAC = 0.90     # of named guesses
+TRIPWIRE_MIN_FRAME_FRAC = 0.50    # of sampled frames
+BATCH_SIZE = 10                   # R5
+FIX_RETRIES = 2                   # R2: 2 fix passes then reject
+RRD_SAMPLE_FRAC = 0.20            # R17: random 20% per game per day
+DISK_LOW_WATER_GB = 100           # F7
+INCOMPLETE_ESCALATE_H = 48        # F8
+PACE_ALARM_FACTOR = 1.15          # §11.3
+LAGGING_GAME_PRIORITY_GAP = 0.10  # F4: >10% pace gap -> priority
+TARGET_HOURS_PER_GAME = 500.0     # R10 — delivered post-trim clip hours
+COLLECT_TARGET_HOURS = 600.0      # R16 — collection buffer target
+LEDGER_BACKUP_KEEP = 14           # §8
+
+# Deadline: 2026-08-24 23:59 IST (§14 pace math). IST = UTC+5:30, no DST.
+IST = timezone(timedelta(hours=5, minutes=30))
+DEADLINE_IST = datetime(2026, 8, 24, 23, 59, tzinfo=IST)
+DAILY_REPORT_HOUR_IST = 14        # R12
+
+# Gemini 429 policy (§13): per-call backoff then session-level HOLD_VLM.
+VLM_BACKOFF_BASE_S = 2.0
+VLM_BACKOFF_MAX_S = 60.0
+VLM_MAX_TRIES = 5
+
+# Ledger states (§6 state machine)
+STATES = (
+    "DISCOVERED", "INCOMPLETE", "DOWNLOADING", "INGESTED", "VALIDATING",
+    "READY", "FIX_QUEUED", "FIXING", "REVALIDATING", "REJECTED",
+    "QUARANTINED", "DUPLICATE", "HOLD_VLM", "PACKAGED", "UPLOADED",
+    "DELIVERED", "SPLIT",
+)
+
+
+def load_secrets(path: Path = SECRETS_PATH) -> dict[str, str]:
+    """Parse KEY=VALUE lines. Values are secrets: never print or log them."""
+    out: dict[str, str] = {}
+    if not path.exists():
+        return out
+    for line in path.read_text().splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        k, _, v = line.partition("=")
+        out[k.strip()] = v.strip().strip('"').strip("'")
+    return out
+
+
+@dataclass
+class Config:
+    home: Path
+    repo_root: Path = REPO_ROOT
+    remote_collect: str = "drive-collect:"
+    remote_deliver: str = "drive-deliver:"
+    workers: int = 4                       # §7.5 benchmark sets this
+    test_mode: bool = False                # TEST-prefixed Telegram, few msgs
+    secrets: dict[str, str] = field(default_factory=dict)
+
+    # -- derived paths (all outside the repo) --
+    @property
+    def work(self) -> Path: return self.home / "work"
+    @property
+    def dossiers(self) -> Path: return self.home / "dossiers"
+    @property
+    def reports_dir(self) -> Path: return self.home / "reports"
+    @property
+    def logs(self) -> Path: return self.home / "logs"
+    @property
+    def stage(self) -> Path: return self.home / "delivery-stage"
+    @property
+    def ledger_path(self) -> Path: return self.home / "ledger.db"
+    @property
+    def backups(self) -> Path: return self.home / "backups"
+    @property
+    def lock_dir(self) -> Path: return self.home / "run.lock"
+
+    @property
+    def gemini_key(self) -> str: return self.secrets.get("GEMINI_API_KEY", "")
+    @property
+    def gemini_model(self) -> str:
+        return self.secrets.get("GEMINI_MODEL", "gemini-3.7-flash")
+    @property
+    def tg_token(self) -> str: return self.secrets.get("TELEGRAM_BOT_TOKEN", "")
+    @property
+    def tg_chat(self) -> str: return self.secrets.get("TELEGRAM_CHAT_ID", "")
+
+    def ensure_dirs(self) -> None:
+        for p in (self.home, self.work, self.dossiers, self.reports_dir,
+                  self.logs, self.stage, self.backups):
+            p.mkdir(parents=True, exist_ok=True)
+
+
+def load(home: Path | None = None, *, secrets_path: Path = SECRETS_PATH,
+         test_mode: bool | None = None) -> Config:
+    home = Path(home or os.environ.get("HL_PIPELINE_HOME",
+                                       Path.home() / "hl-pipeline"))
+    cfg = Config(home=home, secrets=load_secrets(secrets_path))
+    w = os.environ.get("HL_PIPELINE_WORKERS")
+    if w and w.isdigit():
+        cfg.workers = int(w)
+    if test_mode is not None:
+        cfg.test_mode = test_mode
+    elif os.environ.get("HL_PIPELINE_TEST_MODE"):
+        cfg.test_mode = True
+    return cfg
