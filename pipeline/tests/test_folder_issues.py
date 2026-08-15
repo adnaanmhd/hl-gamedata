@@ -123,6 +123,55 @@ def test_before_hour_and_empty_day(cfg, ledger, monkeypatch):
     assert (cfg.reports_dir / "2026-08-15" / ".issues-sent").exists()
 
 
+def test_ghost_incomplete_rows_pruned_only_from_healthy_listing(
+        cfg, ledger, capsys):
+    # Adnaan via d3 (08-15): ghosts inflated the "N incomplete" counters;
+    # prune — but ONLY off a successful, non-empty listing for that tree
+    ghost = "kamla/Op Name/p@x.com/2026-08-15T08-00-00Z_kamla_c_00000000000000bb"
+    ledger.incomplete_seen(ghost, ["video.mp4"])
+    ow_row = ("outer_wilds/Op Name/p@x.com/"
+              "2026-08-15T08-05-00Z_outer_wilds_c_00000000000000bc")
+    ledger.incomplete_seen(ow_row, ["video.mp4"])
+
+    # (a) empty listing prunes NOTHING (the guard)
+    ingest.scan(cfg, ledger, entries=[])
+    assert len(ledger.incomplete_list()) == 2
+
+    # (b) kamla tree present but the ghost absent -> exactly the ghost is
+    # pruned and logged; the outer_wilds row survives (its tree is absent
+    # from this listing — same guard)
+    entries = make_session_entries()          # a live, complete kamla session
+    ingest.scan(cfg, ledger, entries=entries)
+    left = [r["drive_path"] for r in ledger.incomplete_list()]
+    assert left == [ow_row]
+    err = capsys.readouterr().err
+    assert "[incomplete-pruned]" in err and ghost in err
+
+    # (c) a still-listed incomplete folder is NOT pruned
+    inc_entries = make_session_entries(
+        sid="2026-08-15T08-10-00Z_kamla_c_00000000000000bd",
+        files=["frames.csv"])                 # listed, still incomplete
+    ingest.scan(cfg, ledger, entries=inc_entries)
+    paths = [r["drive_path"] for r in ledger.incomplete_list()]
+    assert any("bd" in p for p in paths)      # tracked, not pruned
+
+
+def test_daily_message_heartbeat_counts_folder_issues(cfg, ledger,
+                                                      monkeypatch):
+    # Adnaan via d3 (08-15): the payment message carries a COUNT heartbeat
+    # so a crashed issues job never looks like a clean day
+    _seed_issue_rows(ledger)
+    sent = []
+    monkeypatch.setattr(runmod.telegram, "send_message",
+                        lambda cfg, text: sent.append(text))
+    monkeypatch.setattr(runmod.telegram, "send_document",
+                        lambda cfg, path, caption="": None)
+    now = datetime(2026, 8, 15, C.DAILY_REPORT_HOUR_IST, 5, tzinfo=C.IST)
+    assert runmod.send_daily_report_if_due(cfg, ledger, now) is True
+    daily = sent[0]
+    assert "folder issues: 3 — see next message" in daily
+
+
 def test_message_send_failure_leaves_marker_unwritten(cfg, ledger,
                                                       monkeypatch):
     _seed_issue_rows(ledger)

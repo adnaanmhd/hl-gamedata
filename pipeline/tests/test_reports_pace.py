@@ -23,6 +23,7 @@ collected: Kamla 156/600 · OW 131/600 · 7 days left
 ⚠️ pace: need 111 h/day (trailing 55) — projected finish Aug 31
 rejects: no-mouse · <70s · notifications · wrong-game · dup
 integrity: 1 cross-player duplicate (kept earlier upload)
+folder issues: 3 — see next message
 📎 payment sheet attached"""
 
 
@@ -67,7 +68,8 @@ def test_daily_message_byte_matches_template():
         collected_kamla=156.0, collected_ow=131.0, days_left=7,
         reject_counts=[("no-mouse", 4), ("<70s", 3), ("notifications", 2),
                        ("wrong-game", 1), ("dup", 1)],
-        integrity_lines=["1 cross-player duplicate (kept earlier upload)"])
+        integrity_lines=["1 cross-player duplicate (kept earlier upload)"],
+        folder_issues=3)
     assert reports.build_daily_message(d, _alarm_pace()) == DAILY_TEMPLATE
 
 
@@ -82,6 +84,9 @@ def test_daily_message_quiet_day_omits_conditionals():
     msg = reports.build_daily_message(d, quiet)
     assert "rejects:" not in msg and "integrity:" not in msg \
         and "pace:" not in msg
+    # the folder-issues heartbeat is NOT conditional — a clean day still
+    # prints the 0 so a crashed issues job never looks like a clean day
+    assert "folder issues: 0" in msg and "see next message" not in msg
     assert msg.endswith("📎 payment sheet attached")
 
 

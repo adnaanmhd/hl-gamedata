@@ -19,8 +19,10 @@ import json
 import re
 import shutil
 import subprocess
+import sys
 import zipfile
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
 
 from . import config as C
@@ -495,6 +497,31 @@ def scan(cfg: C.Config, ledger: Ledger,
             md5_video=vmd5, bytes_=total_bytes, state="DISCOVERED",
             detail=f"payload={ds.payload}")
         res.discovered.append(ds.session_id)
+
+    # ghost incomplete rows (Adnaan via d3, 08-15): the ONLY deletion path
+    # was incomplete_resolved on the SAME path rescanning complete, so a
+    # renamed/deleted folder lingered forever — and inflated the
+    # "N incomplete" counters already shown on the batch/daily/status
+    # surfaces. Guard (do not weaken): prune only off a listing that
+    # succeeded, and only inside a game tree that is itself non-empty in
+    # THIS listing — an erroring/empty/partial listing must never
+    # mass-delete live rows and silently erase real outstanding problems.
+    # Every prune logs the path + age: a mass prune must be VISIBLE after
+    # the fact, never silent.
+    games_present = {d.split("/", 1)[0] for d in listed_dirs}
+    now = datetime.now(timezone.utc)
+    for r in ledger.incomplete_list():
+        path = r["drive_path"]
+        game = path.split("/", 1)[0]
+        if game in games_present and path not in listed_dirs:
+            try:
+                age_h = (now - datetime.fromisoformat(r["first_seen"])
+                         ).total_seconds() / 3600.0
+            except ValueError:
+                age_h = 0.0
+            ledger.incomplete_resolved(path)
+            print(f"[incomplete-pruned] {path} — absent from listing "
+                  f"after {age_h:.0f} h tracked", file=sys.stderr)
     return res
 
 

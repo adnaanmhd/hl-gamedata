@@ -160,6 +160,7 @@ class DailyStats:
     days_left: int
     reject_counts: list[tuple[str, int]] = field(default_factory=list)
     integrity_lines: list[str] = field(default_factory=list)
+    folder_issues: int = 0     # count only — the list rides its own message
 
 
 def build_daily_message(d: DailyStats, pace: PaceStatus | None) -> str:
@@ -188,6 +189,12 @@ def build_daily_message(d: DailyStats, pace: PaceStatus | None) -> str:
             label for label, _n in d.reject_counts))
     for line in d.integrity_lines:
         lines.append(f"integrity: {line}")
+    # ALWAYS present (Adnaan via d3, 08-15): the daily heartbeat for the
+    # folder-issues report — pure silence made a crashed issues job look
+    # exactly like a clean day. Count only, never the list: the payment
+    # message stays forwardable without chase-work riding along.
+    lines.append("folder issues: 0" if not d.folder_issues else
+                 f"folder issues: {d.folder_issues} — see next message")
     lines.append("📎 payment sheet attached")
     return "\n".join(lines)
 

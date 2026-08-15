@@ -730,7 +730,11 @@ def send_daily_report_if_due(cfg: C.Config, ledger: Ledger,
                              key=lambda kv: (-kv[1], kv[0])),
         integrity_lines=([f"{dups} cross-player duplicate"
                           f"{'s' if dups > 1 else ''} (kept earlier upload)"]
-                         if dups else []))
+                         if dups else []),
+        # the folder-issues heartbeat (Adnaan via d3, 08-15) — a snapshot
+        # count at payment-send time; the list itself follows in the
+        # folder-issues message minutes later
+        folder_issues=len(reports.build_folder_issues(ledger)))
     csv_path, _md = reports.write_payment_sheet(cfg, ledger, now_ist,
                                                 bounds=(lo, hi))
     msg = reports.build_daily_message(d, p)
