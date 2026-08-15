@@ -21,4 +21,4 @@ TimeoutStartSec=infinity
 # the versions the suite passed with on this VM 2026-08-15 — an unpinned
 # "latest" would silently drift the production runtime on any cache
 # refresh (review-r2 #38).
-ExecStart=/bin/bash -o pipefail -c 'exec __HOME__/.local/bin/uv run --with numpy==2.4.6 --with opencv-python-headless==5.0.0 --with rerun-sdk==0.36.0 python -m pipeline run 2>&1 | tee -a __HOME__/hl-pipeline/logs/pipeline-$(date +%%F).log'
+ExecStart=/bin/bash -o pipefail -c 'exec __HOME__/.local/bin/uv run --with numpy==2.4.6 --with opencv-python-headless==5.0.0.93 --with rerun-sdk==0.36.0 python -m pipeline run 2>&1 | tee -a __HOME__/hl-pipeline/logs/pipeline-$(date +%%F).log'
