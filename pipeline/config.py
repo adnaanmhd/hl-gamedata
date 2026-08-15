@@ -71,17 +71,22 @@ VLM_BACKOFF_BASE_S = 2.0
 VLM_BACKOFF_MAX_S = 60.0
 VLM_MAX_TRIES = 5
 
-# Endpoint failover (R21): genlang <-> Vertex express. Merged DARK; flipped
-# to the §7.6 smoke-matrix result from the VM before go-live (config commit).
-# False = single-endpoint behavior (status quo).
+# Endpoint failover (R21): genlang <-> Vertex express. §7.6 smoke matrix
+# from the VM (2026-08-15): vertex answered 403 API_KEY_SERVICE_BLOCKED for
+# BOTH keys — vertex is dead for the active keys, so the flag STAYS False
+# (the one matrix outcome where §7.6 keeps it off). Re-run the matrix and
+# flip here if Adnaan unblocks aiplatform.googleapis.com on the keys.
 VLM_FAILOVER_ENABLED = False
 
 # R23 quota ladder: complete rung-model list on GEMINI_API_KEY, top rung
 # first (the model of record). Below the last entry comes the prev-key rung
 # (GEMINI_API_KEY_PREV at the rung-0 model), then HOLD_VLM. Rungs are sticky
-# for the rest of the run; every run restarts at rung 0. Ids below rung 0
-# are [assumed] until the §7.6 probes verify them (plan §2).
-VLM_MODEL_LADDER = ("gemini-3.7-flash", "gemini-3.5-flash", "gemini-3.1-pro")
+# for the rest of the run; every run restarts at rung 0. All three ids
+# VERIFIED by §7.6 generateContent probes on both keys (2026-08-15): the
+# plan's assumed "gemini-3.1-pro" does not exist (404) — the live pro id is
+# gemini-3.1-pro-preview.
+VLM_MODEL_LADDER = ("gemini-3.7-flash", "gemini-3.5-flash",
+                    "gemini-3.1-pro-preview")
 
 # Overlap driver (R20): False = byte-identical lockstep fallback.
 PIPELINE_OVERLAP = True

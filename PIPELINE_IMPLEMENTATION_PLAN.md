@@ -63,7 +63,7 @@ of this revision is REUSE — the delta is one driver, one VLM client change, an
 | GCP project | `hl-gamedata-pipeline` (billing enabled — Adnaan, 2026-08-15) |
 | **VM** (created at §7.2) | `hl-pipeline-vm`: `e2-standard-16`, on-demand, `asia-south1`, Debian 12, 250 GB pd-balanced, no public inbound except SSH via `gcloud compute ssh` |
 | **GCS backup bucket** (created at §7.2) | `gs://hl-gamedata-pipeline-backups` (or suffixed if name taken), `asia-south1`, Standard class, uniform bucket-level access, private; `pipeline-runner` SA granted `roles/storage.objectAdmin` **on this bucket only** |
-| VLM | `gemini-3.7-flash` (model of record, R13 as amended by R23), endpoints `generativelanguage.googleapis.com/v1beta` + Vertex AI express `aiplatform.googleapis.com/v1/publishers/google` (R21). **Key swapped 2026-08-15**: new `GEMINI_API_KEY` is `AQ.`-format (the Vertex-express issue format — classic AI Studio keys are `AIza…`), so which endpoint is the working primary is **settled empirically by the §7.6 smoke, not assumed**; old key kept as `GEMINI_API_KEY_PREV` (R23 last resort). Quota ladder models `gemini-3.5-flash` / `gemini-3.1-pro` **[assumed ids — the §7.6 probes verify]** |
+| VLM | `gemini-3.7-flash` (model of record, R13 as amended by R23), endpoints `generativelanguage.googleapis.com/v1beta` + Vertex AI express `aiplatform.googleapis.com/v1/publishers/google` (R21). **§7.6 smoke matrix run on the VM 2026-08-15 ~14:00 IST**: genlang answers BOTH keys (new 1.5 s, prev 8.8 s first-call from Mumbai); vertex is **403 `API_KEY_SERVICE_BLOCKED` for BOTH keys** (the keys are restricted from aiplatform.googleapis.com) → `VLM_FAILOVER_ENABLED` stays **False** per §7.6's vertex-dead outcome; prev-key rung ARMED. Ladder ids **verified by generateContent probes on both keys**: `gemini-3.5-flash` OK; assumed `gemini-3.1-pro` does NOT exist (404) — corrected to **`gemini-3.1-pro-preview`** (probed OK both keys; config commit) |
 | Secrets | `~/.config/hl-gamedata/secrets.env` (chmod 600, outside repo) on Mac AND VM: `GEMINI_API_KEY` (new, 08-15), `GEMINI_API_KEY_PREV` (old, R23 last resort), `GEMINI_MODEL`, `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`, `DRIVE_COLLECTION_ID`, `DRIVE_DELIVERY_ID`. All credentials rotate after Phase 1 (they lived on a cloud box, and both Gemini keys have been pasted into chats) |
 | Installed (Mac) | ffmpeg/ffprobe, uv, rclone — all present 08-14. **gcloud SDK installed + authed (`adnaan@humynlabs.ai`), project set — done 08-15**; the §7.1 quota check is still pending |
 | Installed (VM, at §7.3) | ffmpeg (apt), rclone (rclone.org install script — apt's is stale), uv, repo copy, Python deps via `uv run --with numpy --with opencv-python-headless --with rerun-sdk` |
@@ -509,6 +509,17 @@ retained in `reports.py` tests). Pace math unchanged
 Replaces v1's pre-benchmark estimates. Arithmetic script-computed
 (`BOTTLENECK_FINDINGS.md` + session calc scripts).
 
+- **VM measured (Day 0, 2026-08-15 ~14:10 IST)**: (a) Drive↔VM throughput with a real 1.2 GB
+  object via rclone: **VM→Drive II upload 183 Mbit/s (52.5 s), Drive II→VM download
+  474 Mbit/s (20.3 s)** — download comfortably clears the ≥300 Mbps assumption; upload
+  headroom ≈ 3× the ~7.4 MB/s a 240 fh/day delivery pace needs. (c) Gemini latency from
+  Mumbai: **1.5 s** text-only 3.7-flash call (genlang). (b) validation benchmark (same six
+  sessions as the Mac baseline, single worker, real VLM sweep, 0 errors): **779 s footage in
+  728 s = 56.1 min/fh** → VM vCPU ≈ **2.0×** slower than an M5 core (optimistic end of the
+  2–3× band). Extrapolated: 8 workers ≈ 7.0 min/fh ≈ **205 fh/day**; 10 workers ≈ 5.6 min/fh
+  ≈ 257 → clipped by the **240 fh/day external upload cap**. R22 start-at-8 confirmed; the
+  landing zone ~172–240 stands with measured, not assumed, inputs.
+
 - **Validation cost**: **27.9 min per footage-hour single-worker incl. VLM sweep** (§7.5
   benchmark on the Mac, 779 s of footage in 362 s). One full decode pass measured at ~7.3×
   realtime per M5 core; a cloud vCPU is assumed 2–3× slower **[assumption — §7.5 Day-0 re-run on
@@ -583,9 +594,12 @@ Replaces v1's pre-benchmark estimates. Arithmetic script-computed
 7. **Gemini billing tier unknown** (Adnaan checking in AI Studio). At 10⁴–10⁵ calls/day the
    per-minute quota is the real VLM capacity bound; §13's retry ladder + HOLD, with manual R22
    step-down, is the safety net either way. R21 helps availability, not quota.
-8. **Vertex express unverified with our key** until the §7.6 smoke: 403 → Adnaan enables Vertex
-   AI API on `hl-gamedata-pipeline`; 404 → model naming question; either way go-live is not
-   blocked (F13).
+8. **Vertex express — resolved 08-15 (smoke run): 403 `API_KEY_SERVICE_BLOCKED` on both keys.**
+   Not "API not enabled" on the project — the API KEYS themselves are blocked from
+   `aiplatform.googleapis.com` (key-restriction). Adnaan's console fix, when he wants the
+   failover armed: API key settings → API restrictions → allow Vertex AI API (or issue an
+   unrestricted key), then re-run `~/hl-pipeline/smoke_matrix.py` on the VM and flip
+   `VLM_FAILOVER_ENABLED=True` (one-line commit). Go-live not blocked (F13).
 9. **Both secret keys live on a cloud VM** for 10 days (mitigations: no public inbound, gcloud
    SSH only, bucket-scoped grant; **rotate both keys after Phase 1** — §2).
 10. **Drive-side throttling from one SA doing ~1.2 TB/day combined**: upload cap is verified

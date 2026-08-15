@@ -320,7 +320,7 @@ def test_injected_rung_start_skips_upper_rungs(monkeypatch):
     monkeypatch.setattr(vlm, "_post", r)
     vlm.begin_session()
     assert vlm.generate("k", MODEL, [{"text": "x"}]) == "cheap"
-    assert r.calls == [("genlang", "gemini-3.1-pro", "k")]
+    assert r.calls == [("genlang", C.VLM_MODEL_LADDER[2], "k")]
     assert vlm._rung == 2
 
 
