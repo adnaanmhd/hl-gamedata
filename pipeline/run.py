@@ -15,7 +15,9 @@ import json
 import multiprocessing
 import os
 import queue
+import re
 import shutil
+import sqlite3
 import subprocess
 import sys
 import threading
@@ -198,10 +200,12 @@ def _download_phase(cfg, ledger, sids, alerts) -> None:
                                  f"{msg}"[:300])
                 _alert(cfg, f"download failed for {sid} (will retry): {e}",
                        alerts)
-        except OSError as e:
-            # host-level trouble (disk full, I/O hiccup) anywhere in the
-            # download path is TRANSIENT — quarantining here made a full
-            # disk permanently kill good sessions (review-r4 #3/#17)
+        except (OSError, sqlite3.OperationalError) as e:
+            # host-level trouble (disk full, I/O hiccup, a ledger write
+            # waiting out a WAL checkpoint past busy_timeout) anywhere in
+            # the download path is TRANSIENT — quarantining here made a
+            # full disk permanently kill good sessions (review-r4 #3/#17;
+            # sqlite busy added by review-r5 #25)
             ledger.set_state(sid, "DISCOVERED",
                              f"download failed (host-level) — retrying "
                              f"next run: {type(e).__name__}: {e}"[:300])
@@ -306,6 +310,17 @@ def _validate_phase(cfg, ledger, sids, alerts, *, workers: int) -> None:
                                       if x["blocking"]))
 
 
+def _partial_dirs(cfg, sid: str) -> list[Path]:
+    """Segment dirs that belong DIRECTLY to `sid` — {sid}-p<digits> only.
+    The bare {sid}-p[0-9]* glob also matched grandchildren ({sid}-p1-p1),
+    whose rows the parent_id=sid query does not see: a live grandchild's
+    work dir was classified as a rowless partial and wiped
+    (review-r5 #26)."""
+    pat = re.compile(re.escape(sid) + r"-p\d+$")
+    return [d for d in cfg.work.glob(f"{sid}-p[0-9]*")
+            if d.is_dir() and pat.fullmatch(d.name)]
+
+
 def _discard_split_artifacts(cfg, ledger, sid: str) -> None:
     """Remove a rescinded cut's leftovers — rowless segment dirs and the
     manifest. Without this, a fix path that errored or rejected AFTER a
@@ -315,9 +330,8 @@ def _discard_split_artifacts(cfg, ledger, sid: str) -> None:
     have_rows = {k["session_id"] for k in ledger.db.execute(
         "SELECT session_id FROM sessions WHERE parent_id=?",
         (sid,)).fetchall()}
-    for d in cfg.work.glob(f"{sid}-p[0-9]*"):
-        if d.is_dir() and not d.name.endswith("-analysis") \
-                and d.name not in have_rows:
+    for d in _partial_dirs(cfg, sid):
+        if d.name not in have_rows:
             shutil.rmtree(d, ignore_errors=True)
     (cfg.work / f"{sid}.split-manifest.json").unlink(missing_ok=True)
 
@@ -339,8 +353,15 @@ def _recover_split(cfg, ledger, sid: str, row) -> tuple[bool, list[str]]:
         try:
             manifest_ids = list(json.loads(
                 manifest_path.read_text()).get("segments") or [])
-        except (OSError, json.JSONDecodeError):
-            manifest_ids = []
+        except json.JSONDecodeError:
+            manifest_ids = []          # torn content: treat as absent
+        except OSError:
+            # the manifest EXISTS but could not be read — a transient
+            # I/O fault is indistinguishable from killed-mid-cut only if
+            # we conflate them: wiping here destroyed a COMPLETE cut's
+            # segment dirs and let the re-cut clobber a live rowed child
+            # (review-r5 #38). Touch nothing; retry next run.
+            return False, sorted(have_rows)
     complete = bool(manifest_ids) and all(
         (cfg.work / seg_id).is_dir() or seg_id in have_rows
         for seg_id in manifest_ids)
@@ -351,17 +372,15 @@ def _recover_split(cfg, ledger, sid: str, row) -> tuple[bool, list[str]]:
         # adopt the rowed children as the split; re-cutting here would
         # clobber live children (review-r4 #0). Guard: no rowless partial
         # dirs may exist (those would mean a NEWER interrupted cut).
-        rowless = [d for d in cfg.work.glob(f"{sid}-p[0-9]*")
-                   if d.is_dir() and not d.name.endswith("-analysis")
-                   and d.name not in have_rows]
+        rowless = [d for d in _partial_dirs(cfg, sid)
+                   if d.name not in have_rows]
         if not rowless:
             return True, sorted(have_rows)
     if not complete:
         # wipe rowless partials so a LATER crash can't adopt them; rowed
         # children are real work and stay
-        for seg_dir in cfg.work.glob(f"{sid}-p[0-9]*"):
-            if seg_dir.is_dir() and not seg_dir.name.endswith("-analysis") \
-                    and seg_dir.name not in have_rows:
+        for seg_dir in _partial_dirs(cfg, sid):
+            if seg_dir.name not in have_rows:
                 shutil.rmtree(seg_dir, ignore_errors=True)
         manifest_path.unlink(missing_ok=True)
         # if some children already have rows, the earlier attempt got far
@@ -429,6 +448,20 @@ def _fix_phase(cfg, ledger, sids, alerts, *, workers: int,
                             children_created.append(kid)
                         if children_sink is not None:
                             children_sink.add(kid)
+                    # the normal cut path propagates the parent's shift
+                    # record to children via fix.py; the adopted path
+                    # skipped it, so adopted children of a shift-corrected
+                    # parent spuriously failed qa's raw recomputation and
+                    # burned their fix budget (review-r5 #27). Best-effort:
+                    # the record may legitimately not exist.
+                    try:
+                        fix._propagate_shift_record(
+                            cfg.work / sid,
+                            [cfg.work / k for k in kid_ids
+                             if (cfg.work / k).is_dir()])
+                    except Exception as e:
+                        print(f"[shift-propagate-failed] {sid}: {e}",
+                              file=sys.stderr)
                     ledger.set_state(sid, "SPLIT",
                                      f"{len(kid_ids)} segments (completed "
                                      f"after mid-split crash)")
@@ -735,23 +768,28 @@ def send_daily_report_if_due(cfg: C.Config, ledger: Ledger,
         # count at payment-send time; the list itself follows in the
         # folder-issues message minutes later
         folder_issues=len(reports.build_folder_issues(ledger)))
+    counted: list[str] = []
     csv_path, _md = reports.write_payment_sheet(cfg, ledger, now_ist,
-                                                bounds=(lo, hi))
+                                                bounds=(lo, hi),
+                                                counted_out=counted)
     msg = reports.build_daily_message(d, p)
     try:
         telegram.send_message(cfg, msg)
     except telegram.TelegramError as e:
         print(f"[daily-report-undelivered] {e}", file=sys.stderr)
         return False
-    # ordering is load-bearing (review-r4 #24/#41 + the late-arrival
-    # guard): anchor first, then the reported-stamps, then the marker.
-    # A kill inside this sequence errs toward a duplicate small message
-    # or a slightly smaller resent sheet — NEVER toward double-counted
-    # payment hours.
-    anchor.write_text(hi)          # next report's window starts here
-    stamped = reports.mark_uploads_reported(ledger, lo, hi)
+    # ordering is load-bearing: STAMPS first, then the anchor, then the
+    # marker. Anchor-before-stamps left a kill window where the next tick
+    # regenerated the NEXT window and every unstamped root of the
+    # just-reported one re-entered as a late arrival — a full window of
+    # payment hours counted twice (review-r5 #39, BLOCKER). With stamps
+    # first, a kill anywhere in this sequence errs toward an identical or
+    # smaller resent sheet — never toward double-counted hours. The
+    # stamps are exactly what THIS sheet counted (review-r5 #3).
+    stamped = reports.mark_uploads_reported(ledger, lo, hi, sids=counted)
     if stamped:
         print(f"[daily] stamped {stamped} root upload(s) as reported")
+    anchor.write_text(hi)          # next report's window starts here
     marker.parent.mkdir(parents=True, exist_ok=True)
     marker.touch()
     try:
@@ -784,6 +822,12 @@ def send_folder_issues_if_due(cfg: C.Config, ledger: Ledger,
     day = now_ist.strftime("%Y-%m-%d")
     marker = cfg.reports_dir / day / ".issues-sent"
     if marker.exists():
+        return False
+    # the payment message must have gone out first — its heartbeat says
+    # "see NEXT message", and a failed payment send with a successful
+    # issues send would leave next tick's payment message pointing at a
+    # message that already arrived (folder-issues review #5)
+    if not (cfg.reports_dir / day / ".sent").exists():
         return False
     csv_path, rows = reports.write_folder_issues_csv(cfg, ledger, now_ist)
     if not rows:
@@ -879,6 +923,19 @@ def _partition_resume(ledger: Ledger) -> tuple[list[_Batch], list[_Batch],
     parent = {r["session_id"]: r["parent_id"] for r in rows}
     assigned: dict[str, int] = {}
     groups: dict[int, list[str]] = {}
+    # members some FINISHED batch already reported: carrying them back
+    # into a still-open batch counted their delivery/hours in TWO batch
+    # messages — e.g. a HOLD_VLM member that delivered via the guaranteed
+    # hold batch while its original batch stayed open (review-r5 #22)
+    already_reported: set[str] = set()
+    for fb in ledger.db.execute(
+            "SELECT summary_json FROM batches WHERE finished IS NOT NULL"
+    ).fetchall():
+        try:
+            already_reported.update(
+                json.loads(fb["summary_json"] or "{}").get("sessions") or [])
+        except json.JSONDecodeError:
+            pass
     for b in ledger.open_batches():
         try:
             sids = (json.loads(b["summary_json"] or "{}")
@@ -893,7 +950,8 @@ def _partition_resume(ledger: Ledger) -> tuple[list[_Batch], list[_Batch],
                 groups.setdefault(b["batch_no"], []).append(s)
             else:
                 r = ledger.get(s)
-                if r is not None and r["state"] in (
+                if r is not None and s not in already_reported \
+                        and r["state"] in (
                         "DELIVERED", "REJECTED", "SPLIT", "DUPLICATE",
                         "QUARANTINED"):
                     # TERMINAL members (e.g. DELIVERED before the kill)
@@ -1362,7 +1420,15 @@ def run(cfg: C.Config, *, max_batches: int = 50,
     try:
         cfg.ensure_dirs()
         ledger = Ledger(cfg.ledger_path)
-        ledger.backup_daily(cfg.backups, keep=C.LEDGER_BACKUP_KEEP)
+        try:
+            ledger.backup_daily(cfg.backups, keep=C.LEDGER_BACKUP_KEEP)
+        except Exception as e:
+            # an unguarded backup crash here aborted the ENTIRE tick —
+            # no scan, no uploads, no sweeps, no alert — and repeated
+            # every 30 min while the cause (ENOSPC, torn tmp) persisted
+            # (review-r5 #4); the drain-loop call was already guarded
+            _alert(cfg, f"start-of-run ledger backup failed (run "
+                        f"continues): {type(e).__name__}: {e}", alerts)
         try:
             res = ingest.scan(cfg, ledger)
             for path, why in res.quarantined:
@@ -1404,6 +1470,13 @@ def run(cfg: C.Config, *, max_batches: int = 50,
                        alerts)
             if send_telegram:
                 send_daily_report_if_due(cfg, ledger)
+                # the overlap path is PRODUCTION: an idle tick never enters
+                # the drain-loop duties (poison pill breaks first), so this
+                # end-of-run site is the only guaranteed daily fire — the
+                # issues message was wired only into lockstep and the
+                # heartbeat's "see next message" pointed at nothing on
+                # quiet days (folder-issues review #1)
+                send_folder_issues_if_due(cfg, ledger)
             ledger.close()
             return 0
 
@@ -1478,7 +1551,8 @@ def main(argv: list[str] | None = None) -> int:
     if cmd == "daily-report":
         ledger = Ledger(cfg.ledger_path)
         sent = send_daily_report_if_due(cfg, ledger)
-        print(f"daily report sent: {sent}")
+        issues = send_folder_issues_if_due(cfg, ledger)
+        print(f"daily report sent: {sent}; folder issues sent: {issues}")
         return 0
     print(f"unknown command {cmd!r} (run | status | daily-report)")
     return 2

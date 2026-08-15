@@ -164,10 +164,15 @@ def test_sheet_cohort_attributes_late_outcome_to_upload_window(tmp_path):
     led.db.execute("UPDATE sessions SET updated_at='2099-01-01T00:00:00' "
                    "WHERE session_id=?", (sid,))
     led.db.commit()
+    counted: list = []
     upload_window = reports.build_sheet_rows(
         led, datetime.now(C.IST),
-        bounds=("2026-08-15T00:00:00+00:00", "2026-08-16T00:00:00+00:00"))
+        bounds=("2026-08-15T00:00:00+00:00", "2026-08-16T00:00:00+00:00"),
+        counted_out=counted)
     assert upload_window[0]["kamla_rejection_reasons"] == "no-mouse"
+    # the STAMP is the once-only mechanism (r5): stamp what was counted,
+    # then no later window may re-count it
+    reports.mark_uploads_reported(led, "", "", sids=counted)
     later_window = reports.build_sheet_rows(
         led, datetime.now(C.IST),
         bounds=("2026-08-16T00:00:00+00:00", "2026-08-17T00:00:00+00:00"))
@@ -324,9 +329,9 @@ def test_first_window_seed_is_deterministic(cfg, ledger, monkeypatch):
     bounds_seen = []
     real_sheet = reports.write_payment_sheet
 
-    def spy(cfg_, ledger_, day, bounds=None):
+    def spy(cfg_, ledger_, day, bounds=None, **kw):
         bounds_seen.append(bounds)
-        return real_sheet(cfg_, ledger_, day, bounds)
+        return real_sheet(cfg_, ledger_, day, bounds, **kw)
     import pipeline.run as runmod
     monkeypatch.setattr(reports, "write_payment_sheet", spy)
     monkeypatch.setattr(runmod.telegram, "send_message",
@@ -440,48 +445,66 @@ def _mk_root(led, sid, ctime, raw=None, player="late@x.com"):
 
 
 def _sheet_and_mark(led, bounds):
+    """Generation + stamping exactly as production wires them (r5 #3:
+    stamp what the sheet counted, never a re-derive)."""
+    counted: list = []
     rows = reports.build_sheet_rows(
-        led, datetime.now(C.IST), bounds=bounds)
-    reports.mark_uploads_reported(led, *bounds)
+        led, datetime.now(C.IST), bounds=bounds, counted_out=counted)
+    reports.mark_uploads_reported(led, *bounds, sids=counted)
     return rows
 
 
 def test_late_arrival_incomplete_folder_counted_once(tmp_path, capsys):
     """d3/r4 route 2 (LIVE): a folder stamped with its earliest file's
-    ctime completes AFTER that window was reported. The hours must appear
-    on exactly ONE sheet — the current one — with a late-arrival log."""
+    ctime completes AFTER that window was reported. r5 #29 refinement:
+    while its tree is IN FLIGHT the late root is DEFERRED (loudly) —
+    counting it instantly froze accepted_hrs at 0 under the stamp; once
+    settled it appears on exactly ONE sheet with full hours."""
     from pipeline.ledger import Ledger
     led = Ledger(tmp_path / "l.db")
+    sid = "2026-08-15T06-00-00Z_kamla_c_0000000000000fb0"
     w1 = ("2026-08-14T06:45:22+00:00", "2026-08-15T06:45:22+00:00")
     w2 = ("2026-08-15T06:45:22+00:00", "2026-08-16T06:45:22+00:00")
+    w3 = ("2026-08-16T06:45:22+00:00", "2026-08-17T06:45:22+00:00")
     # window 1 generates BEFORE the folder completes: no session row yet
     assert _sheet_and_mark(led, w1) == []
-    # folder completes: session created late, ctime STILL inside window 1
-    _mk_root(led, "2026-08-15T06-00-00Z_kamla_c_0000000000000fb0",
-             "2026-08-15T06:00:00.000Z", raw=3600.0)
-    s2 = _sheet_and_mark(led, w2)
-    assert len(s2) == 1 and s2[0]["kamla_hrs_uploaded"] == 1.0
+    # folder completes: session created late, ctime STILL inside window 1,
+    # still mid-pipeline (DISCOVERED) at window 2's generation
+    _mk_root(led, sid, "2026-08-15T06:00:00.000Z", raw=3600.0)
+    assert _sheet_and_mark(led, w2) == []          # deferred, not dropped
+    assert "LATE ARRIVAL DEFERRED" in capsys.readouterr().err
+    # tree settles before window 3: counted ONCE with full hours
+    led.update(sid, duration_delivered_s=3400.0,
+               delivered_at="2026-08-16T08:00:00+00:00")
+    led.set_state(sid, "DELIVERED")
+    s3 = _sheet_and_mark(led, w3)
+    assert len(s3) == 1 and s3[0]["kamla_hrs_uploaded"] == 1.0
+    assert s3[0]["kamla_accepted_hrs"] == 0.94     # NOT frozen at 0
     assert "LATE ARRIVAL" in capsys.readouterr().err
-    # window 3: counted once, never again
-    s3 = _sheet_and_mark(
-        led, ("2026-08-16T06:45:22+00:00", "2026-08-17T06:45:22+00:00"))
-    assert s3 == []
+    # window 4: never again
+    s4 = _sheet_and_mark(
+        led, ("2026-08-17T06:45:22+00:00", "2026-08-18T06:45:22+00:00"))
+    assert s4 == []
     led.close()
 
 
 def test_late_arrival_undownloaded_at_generation_counted_once(tmp_path):
     """d3/r4 route 1: uploaded in window 1 but not yet downloaded (raw
-    NULL) at generation — hours surface on window 2's sheet, once."""
+    NULL) at generation — hours surface once the tree SETTLES (r5 #29),
+    on exactly one sheet."""
     from pipeline.ledger import Ledger
     led = Ledger(tmp_path / "l.db")
+    sid = "2026-08-15T05-00-00Z_kamla_c_0000000000000fb1"
     w1 = ("2026-08-14T06:45:22+00:00", "2026-08-15T06:45:22+00:00")
     w2 = ("2026-08-15T06:45:22+00:00", "2026-08-16T06:45:22+00:00")
-    _mk_root(led, "2026-08-15T05-00-00Z_kamla_c_0000000000000fb1",
-             "2026-08-15T05:00:00.000Z", raw=None)     # undownloaded
+    _mk_root(led, sid, "2026-08-15T05:00:00.000Z", raw=None)  # undownloaded
     s1 = _sheet_and_mark(led, w1)
     assert s1 == [] or s1[0]["kamla_hrs_uploaded"] == 0.0
-    led.update("2026-08-15T05-00-00Z_kamla_c_0000000000000fb1",
-               duration_raw_s=1800.0)                  # download finishes
+    # download finishes AND the session settles before window 2
+    led.update(sid, duration_raw_s=1800.0,
+               duration_delivered_s=1700.0,
+               delivered_at="2026-08-15T09:00:00+00:00")
+    led.set_state(sid, "DELIVERED")
     s2 = _sheet_and_mark(led, w2)
     assert len(s2) == 1 and s2[0]["kamla_hrs_uploaded"] == 0.5
     s3 = _sheet_and_mark(
@@ -509,9 +532,13 @@ def test_uploaded_hours_conservation_invariant(tmp_path):
              "2026-08-15T09:00:00.000Z", raw=900.0)    # w2 on time
     total = 0.0
     for i, w in enumerate(windows):
-        if i == 1:   # the slow download completes between sends
+        if i == 1:   # the slow download completes AND settles between sends
             led.update("2026-08-15T04-00-00Z_kamla_c_0000000000000fb3",
-                       duration_raw_s=1800.0)
+                       duration_raw_s=1800.0,
+                       duration_delivered_s=1700.0,
+                       delivered_at="2026-08-15T10:00:00+00:00")
+            led.set_state("2026-08-15T04-00-00Z_kamla_c_0000000000000fb3",
+                          "DELIVERED")
         for row in _sheet_and_mark(led, w):
             total += row["total_uploaded_hours"]
     led.close()

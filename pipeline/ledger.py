@@ -185,8 +185,13 @@ class Ledger:
             "UPDATE sessions SET md5_video=?, bytes=?, drive_ctime=?,"
             " fix_attempts=0, bin=NULL, reasons_json='[]',"
             " duration_delivered_s=NULL, duration_raw_s=NULL, rrd_sampled=0,"
-            " delivered_at=NULL, updated_at=? WHERE session_id=?",
+            " delivered_at=NULL, uploaded_reported_at=NULL, updated_at=?"
+            " WHERE session_id=?",
             (new_md5, new_bytes, new_ctime, now, session_id))
+        # uploaded_reported_at cleared above: the stamp belonged to the
+        # OLD upload's sheet — inherited, it blocked the corrected
+        # re-upload's hours from the late-arrival guard on every future
+        # sheet (review-r5 #7)
         self.db.execute(
             "INSERT INTO events(session_id, ts, from_state, to_state, detail)"
             " VALUES(?,?,?,?,?)",
@@ -298,13 +303,22 @@ class Ledger:
         today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
         dst = backups_dir / f"ledger-{today}.db"
         # sqlite3 backup API — safe against a live WAL db; write to a tmp
-        # then replace so a kill mid-backup can't leave a torn DR copy
+        # then replace so a kill mid-backup can't leave a torn DR copy.
+        # Stale tmps from crashed backups poisoned the SAME day's later
+        # attempts (Connection.backup onto a torn file raises) and were
+        # mirrored into the DR bucket forever (review-r5 #4/#28)
+        for old_tmp in backups_dir.glob(".ledger-*.db.tmp"):
+            old_tmp.unlink(missing_ok=True)
         tmp = backups_dir / f".ledger-{today}.db.tmp"
-        bck = sqlite3.connect(tmp)
-        with bck:
-            self.db.backup(bck)
-        bck.close()
-        tmp.replace(dst)
+        try:
+            bck = sqlite3.connect(tmp)
+            with bck:
+                self.db.backup(bck)
+            bck.close()
+            tmp.replace(dst)
+        except BaseException:
+            tmp.unlink(missing_ok=True)
+            raise
         old = sorted(backups_dir.glob("ledger-*.db"))
         for f in old[:-keep]:
             f.unlink()

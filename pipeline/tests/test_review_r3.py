@@ -128,9 +128,9 @@ def test_daily_window_contiguous_via_persisted_anchor(cfg, ledger,
     sent_bounds = []
     real_sheet = reports.write_payment_sheet
 
-    def spy_sheet(cfg_, ledger_, day, bounds=None):
+    def spy_sheet(cfg_, ledger_, day, bounds=None, **kw):
         sent_bounds.append(bounds)
-        return real_sheet(cfg_, ledger_, day, bounds)
+        return real_sheet(cfg_, ledger_, day, bounds, **kw)
     monkeypatch.setattr(runmod.reports, "write_payment_sheet", spy_sheet)
     monkeypatch.setattr(runmod.telegram, "send_message",
                         lambda cfg_, text: None)

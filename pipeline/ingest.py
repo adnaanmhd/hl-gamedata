@@ -188,8 +188,17 @@ def scan(cfg: C.Config, ledger: Ledger,
             d = d.parent
 
     for path, why in quarantined:
-        sid = Path(path).name
-        if ledger.get(sid) is None:
+        base = Path(path).name
+        # bare-basename ids collide: two players' junk subfolders both
+        # named "out" collapsed onto one PK row and the second misupload
+        # vanished from the chase list (review-r5 #37b). Non-session-
+        # shaped names get a path-derived suffix; real session ids stay
+        # bare so the quarantine HEAL (same sid at a clean path) works.
+        sid = base if _SESSION_RE.match(base) else \
+            f"{base[:40]}~{hashlib.md5(path.encode()).hexdigest()[:8]}"
+        legacy = ledger.get(base)
+        if ledger.get(sid) is None and not (
+                legacy is not None and legacy["drive_path"] == path):
             ledger.insert_session(
                 session_id=sid, game="", operator_email="", player_email="",
                 drive_path=path, drive_ctime="", md5_video="", bytes_=0,
@@ -232,13 +241,31 @@ def scan(cfg: C.Config, ledger: Ledger,
                     _locked_report_remove(
                         cfg.work / "translation_report.json",
                         ds.session_id)
+                    # a heal is a FRESH-upload event: reset the slot like
+                    # supersede does. The old row's burned fix_attempts
+                    # auto-rejected the corrected upload with zero new
+                    # attempts (review-r5 #23), stale durations counted
+                    # the OLD bytes on payment sheets, and an inherited
+                    # uploaded_reported_at blocked the new hours from the
+                    # late-arrival guard forever (review-r5 #7)
                     ledger.update(ds.session_id,
                                   drive_path=ds.drive_path,
                                   drive_ctime=ds.ctime, md5_video=vmd5,
                                   bytes=total_bytes,
                                   operator_email=ds.operator_email,
                                   player_email=ds.player_email,
-                                  game=ds.game)
+                                  game=ds.game, fix_attempts=0,
+                                  duration_raw_s=None,
+                                  duration_delivered_s=None,
+                                  rrd_sampled=0, delivered_at=None,
+                                  uploaded_reported_at=None)
+                    # the INT_PATH reasons died with the bad path — left
+                    # in place, a LATER re-quarantine (download/validation
+                    # crash) put this session on the folder-issues bad_path
+                    # list with evidence about a name that is already
+                    # fixed; supersede resets reasons the same way
+                    # (folder-issues review #3)
+                    ledger.set_reasons(ds.session_id, [], None)
                     ledger.set_state(
                         ds.session_id, "DISCOVERED",
                         f"re-registered: quarantined path healed to "
@@ -260,8 +287,10 @@ def scan(cfg: C.Config, ledger: Ledger,
                     continue
                 if existing["state"] in ("DISCOVERED", "INCOMPLETE") \
                         and existing["drive_path"] not in listed_dirs \
-                        and (not vmd5 or not existing["md5_video"]
-                             or vmd5 == existing["md5_video"]):
+                        and ((vmd5 == existing["md5_video"])
+                             if (vmd5 and existing["md5_video"])
+                             else existing["player_email"]
+                             == ds.player_email):
                     # pre-download MOVE heal (review-r4 #6): the old path
                     # is gone from this listing — an operator folder
                     # rename (free-text names, so typo fixes are routine)
@@ -271,10 +300,14 @@ def scan(cfg: C.Config, ledger: Ledger,
                     # further along works from its local copy and keeps
                     # its row), old path ABSENT (a copy leaves both paths
                     # listed — that stays a collision below), and md5
-                    # match when both sides know it (different bytes are
-                    # never a move). A zip payload has no Drive-side md5 —
-                    # keep the row's old one so the download-time checksum
-                    # still verifies the bytes actually followed the move.
+                    # match when both sides know it. When EITHER side
+                    # lacks an md5 (zip payloads), the PLAYER segment must
+                    # be unchanged — with no byte identity anywhere, a
+                    # same-id folder in another player's tree would
+                    # otherwise flip payment attribution and deliver
+                    # unverifiable bytes (review-r5 #41); an operator
+                    # typo-rename keeps the player, so the motivating
+                    # case still heals.
                     ledger.update(ds.session_id,
                                   drive_path=ds.drive_path,
                                   drive_ctime=ds.ctime,
@@ -507,8 +540,16 @@ def scan(cfg: C.Config, ledger: Ledger,
     # THIS listing — an erroring/empty/partial listing must never
     # mass-delete live rows and silently erase real outstanding problems.
     # Every prune logs the path + age: a mass prune must be VISIBLE after
-    # the fact, never silent.
-    games_present = {d.split("/", 1)[0] for d in listed_dirs}
+    # the fact, never silent. "Tree non-empty" means the tree yielded
+    # PARSED CONTENT (a session dir — complete, incomplete, or a
+    # quarantined path) — the bare game-dir entry or a stray junk file
+    # satisfied a listed_dirs test and made the guard near-vacuous
+    # (folder-issues review #4)
+    games_present = {ds.game for ds in sessions}
+    # depth >= 2 only: a stray file AT the game root quarantines the root
+    # itself ("kamla", depth 1) — that is not evidence the tree listed
+    games_present |= {Path(p).parts[0] for p, _ in quarantined
+                      if len(Path(p).parts) >= 2}
     now = datetime.now(timezone.utc)
     for r in ledger.incomplete_list():
         path = r["drive_path"]
@@ -522,6 +563,32 @@ def scan(cfg: C.Config, ledger: Ledger,
             ledger.incomplete_resolved(path)
             print(f"[incomplete-pruned] {path} — absent from listing "
                   f"after {age_h:.0f} h tracked", file=sys.stderr)
+
+    # bad-path chase rows whose folder VANISHED (renamed/deleted): the
+    # normal operator fix produces a NEW session id, so the old
+    # QUARANTINED row never heals and the folder-issues report re-listed
+    # the already-fixed folder forever (review-r5 #1). The ledger row and
+    # its events stay (audit); only the INT_PATH reasons are cleared,
+    # which is what the report keys on. Same healthy-tree guard as the
+    # incomplete prune; every clear is logged.
+    for r in ledger.by_state("QUARANTINED"):
+        rp = r["drive_path"] or ""
+        parts = Path(rp).parts if rp else ()
+        if len(parts) < 2 or parts[0] not in games_present \
+                or rp in listed_dirs:
+            continue
+        try:
+            reasons = json.loads(r["reasons_json"] or "[]")
+        except json.JSONDecodeError:
+            continue
+        if not any(x.get("code") == "INT_PATH" for x in reasons):
+            continue
+        ledger.set_reasons(r["session_id"], [], None)
+        ledger.set_state(r["session_id"], "QUARANTINED",
+                         "bad-path folder no longer on Drive — dropped "
+                         "from the chase list")
+        print(f"[bad-path-resolved] {rp} — folder gone from listing",
+              file=sys.stderr)
     return res
 
 

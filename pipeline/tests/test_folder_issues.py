@@ -84,6 +84,13 @@ def test_rrd_only_missing_absent_from_both_lists(cfg, ledger):
     assert reports.build_folder_issues(ledger) == []
 
 
+def _payment_sent(cfg, day="2026-08-15"):
+    """The issues message only follows a SENT payment message (review #5)."""
+    d = cfg.reports_dir / day
+    d.mkdir(parents=True, exist_ok=True)
+    (d / ".sent").touch()
+
+
 def test_send_marker_guard_and_csv(cfg, ledger, monkeypatch):
     _seed_issue_rows(ledger)
     sent_msgs, sent_docs = [], []
@@ -92,6 +99,11 @@ def test_send_marker_guard_and_csv(cfg, ledger, monkeypatch):
     monkeypatch.setattr(runmod.telegram, "send_document",
                         lambda cfg, path, caption="": sent_docs.append(path))
     now = datetime(2026, 8, 15, C.DAILY_REPORT_HOUR_IST, 5, tzinfo=C.IST)
+    # before the payment message went out: never send (the heartbeat says
+    # "see NEXT message" — the issues message must follow it)
+    assert runmod.send_folder_issues_if_due(cfg, ledger, now_ist=now) is False
+    assert not sent_msgs
+    _payment_sent(cfg)
     assert runmod.send_folder_issues_if_due(cfg, ledger, now_ist=now) is True
     assert len(sent_msgs) == 1 and len(sent_docs) == 1
     assert "incomplete uploads (2):" in sent_msgs[0]
@@ -117,6 +129,7 @@ def test_before_hour_and_empty_day(cfg, ledger, monkeypatch):
                                             now_ist=early) is False
     # empty snapshot at the due hour: nothing sent, marker written so the
     # empty check doesn't re-run every tick
+    _payment_sent(cfg)
     now = datetime(2026, 8, 15, C.DAILY_REPORT_HOUR_IST, 5, tzinfo=C.IST)
     assert runmod.send_folder_issues_if_due(cfg, ledger, now_ist=now) is False
     assert not sent
@@ -180,7 +193,97 @@ def test_message_send_failure_leaves_marker_unwritten(cfg, ledger,
         raise runmod.telegram.TelegramError("down")
 
     monkeypatch.setattr(runmod.telegram, "send_message", _boom)
+    _payment_sent(cfg)
     now = datetime(2026, 8, 15, C.DAILY_REPORT_HOUR_IST, 5, tzinfo=C.IST)
     assert runmod.send_folder_issues_if_due(cfg, ledger, now_ist=now) is False
     # retried next tick: marker must NOT exist
     assert not (cfg.reports_dir / "2026-08-15" / ".issues-sent").exists()
+
+
+def test_prune_guard_needs_parsed_content_not_bare_dirs(cfg, ledger):
+    # review #4: the bare game-dir entry or a stray junk file must NOT
+    # satisfy the tree-non-empty guard — only parsed session content does
+    ghost = "kamla/Op/p@x.com/2026-08-15T08-20-00Z_kamla_c_00000000000000be"
+    ledger.incomplete_seen(ghost, ["video.mp4"])
+    ingest.scan(cfg, ledger, entries=[
+        {"Path": "kamla", "Name": "kamla", "IsDir": True}])
+    assert len(ledger.incomplete_list()) == 1     # bare dir: no prune
+    ingest.scan(cfg, ledger, entries=[
+        {"Path": "kamla/random_junk.txt", "Name": "random_junk.txt",
+         "IsDir": False, "Size": 5, "ModTime": "2026-08-15T10:00:00.000Z"}])
+    assert len(ledger.incomplete_list()) == 1     # junk file: no prune
+    # real parsed content under the tree -> the ghost prunes
+    ingest.scan(cfg, ledger, entries=make_session_entries())
+    assert ledger.incomplete_list() == []
+
+
+def test_heal_clears_stale_int_path_reasons(cfg, ledger):
+    # review #3: healed-then-requarantined sessions must not resurface on
+    # list 2 with evidence about a name that is already fixed
+    sid = "2026-08-15T08-30-00Z_kamla_c_00000000000000bf"
+    ledger.insert_session(
+        session_id=sid, game="", operator_email="", player_email="",
+        drive_path=f"kamla/Op/badplayer/{sid}", drive_ctime="",
+        md5_video="", bytes_=0, state="QUARANTINED",
+        detail="player folder 'badplayer' is not an email")
+    ledger.set_reasons(sid, [
+        {"code": "INT_PATH", "blocking": True, "fixable": False,
+         "params": {},
+         "evidence": "player folder 'badplayer' is not an email"}], 3)
+    ingest.scan(cfg, ledger,
+                entries=make_session_entries(sid=sid, player="ok@x.com"))
+    assert ledger.get(sid)["state"] == "DISCOVERED"
+    # later trouble re-quarantines for an unrelated reason
+    ledger.set_state(sid, "QUARANTINED", "download crashed: KeyError: x")
+    assert reports.build_folder_issues(ledger) == []
+
+
+def test_overlong_message_degrades_to_counts(cfg, ledger):
+    # review #2: an over-4096 message fails EVERY send with the marker
+    # unwritten — degrade to counts + csv pointer instead
+    op = "Very Long Operator Name With Many Words"
+    for i in range(12):
+        ledger.incomplete_seen(
+            f"kamla/{op}/some.player.email{i:02d}@gmail.com/"
+            f"2026-08-15T0{i % 10}-00-00Z_kamla_c_00000000000000{i:02x}",
+            ["video.mp4", "inputs.jsonl", "metadata.json"])
+    for i in range(12):
+        path = (f"kamla/{op}/some.player.email{i:02d}@gmail.com/extra/"
+                f"way/too/deep/2026-08-15T0{i % 10}-10-00Z_kamla_c_"
+                f"00000000000001{i:02x}")
+        sid = f"stray-{i}"
+        ledger.insert_session(
+            session_id=sid, game="", operator_email="", player_email="",
+            drive_path=path, drive_ctime="", md5_video="", bytes_=0,
+            state="QUARANTINED", detail="path depth 9 != 4")
+        ledger.set_reasons(sid, [
+            {"code": "INT_PATH", "blocking": True, "fixable": False,
+             "params": {}, "evidence": "path depth 9 != 4 (want "
+                                       "game/operator/player/session)"}], 3)
+    rows = reports.build_folder_issues(ledger)
+    msg = reports.build_folder_issues_message(
+        rows, datetime(2026, 8, 15, 14, 0, tzinfo=C.IST))
+    assert len(msg) <= 3500
+    assert "incomplete uploads: 12" in msg
+    assert "misplaced folders: 12" in msg
+    assert "csv" in msg
+
+
+def test_end_of_run_wiring_calls_issues_after_payment(cfg, monkeypatch):
+    # review #1: the OVERLAP end-of-run (production's only guaranteed
+    # daily fire on idle ticks) must call both sends, payment first —
+    # the issues call was wired only into lockstep
+    calls = []
+    monkeypatch.setattr(runmod, "send_daily_report_if_due",
+                        lambda cfg_, led, now_ist=None:
+                        calls.append("payment") or True)
+    monkeypatch.setattr(runmod, "send_folder_issues_if_due",
+                        lambda cfg_, led, now_ist=None:
+                        calls.append("issues") or True)
+    monkeypatch.setattr(runmod.ingest, "scan",
+                        lambda cfg_, led: ingest.ScanResult())
+    for overlap in (False, True):
+        calls.clear()
+        monkeypatch.setattr(C, "PIPELINE_OVERLAP", overlap)
+        assert runmod.run(cfg, send_telegram=True) == 0
+        assert calls == ["payment", "issues"], (overlap, calls)

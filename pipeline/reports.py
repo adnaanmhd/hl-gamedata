@@ -236,16 +236,27 @@ def r_countable(root) -> bool:
     return root["duration_raw_s"] is not None
 
 
-def mark_uploads_reported(ledger: Ledger, lo: str, hi: str) -> int:
+def mark_uploads_reported(ledger: Ledger, lo: str, hi: str,
+                          sids: list[str] | None = None) -> int:
     """Stamp uploaded_reported_at on every root the just-generated sheet
-    counted (in-window, or late-arrival) whose hours were countable. The
-    stamp is what stops a late arrival being counted twice. Returns the
-    number stamped."""
+    counted. The stamp is what stops a late arrival being counted twice.
+    Returns the number stamped.
+
+    `sids` is the EXACT counted set the sheet built (build_sheet_rows'
+    counted_out) — always pass it in production: re-deriving here raced
+    the D thread, and a root probed between generation and stamping got
+    stamped without ever being counted — its hours vanished from every
+    sheet (review-r5 #3). The re-derive below survives only as a fallback
+    for callers without a counted list."""
+    now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    if sids is not None:
+        for sid in sids:
+            ledger.update(sid, uploaded_reported_at=now)
+        return len(sids)
     lo_dt, hi_dt = _parse_ts(lo), _parse_ts(hi)
     if lo_dt is None or hi_dt is None:
         return 0
     n = 0
-    now = datetime.now(timezone.utc).isoformat(timespec="seconds")
     for r in ledger.db.execute(
             "SELECT session_id, drive_ctime, created_at, duration_raw_s,"
             " uploaded_reported_at FROM sessions WHERE parent_id IS NULL"
@@ -274,7 +285,8 @@ def _parse_ts(v: str | None) -> datetime | None:
 
 
 def build_sheet_rows(ledger: Ledger, day_ist: datetime,
-                     bounds: tuple[str, str] | None = None) -> list[dict]:
+                     bounds: tuple[str, str] | None = None,
+                     counted_out: list[str] | None = None) -> list[dict]:
     """One row per (operator, player), COHORT accounting (v4, 08-15):
     every ROOT upload (parent_id IS NULL, not DUPLICATE/QUARANTINED)
     whose drive_ctime falls in the window contributes — to that window —
@@ -333,22 +345,56 @@ def build_sheet_rows(ledger: Ledger, day_ist: datetime,
                       file=sys.stderr)
         if up is None or lo_dt is None or hi_dt is None:
             continue
-        in_window = lo_dt <= up < hi_dt
+        # a STAMPED root was already counted by some sheet — never again,
+        # even if it lands in-window: a lost/rewound anchor file used to
+        # re-open an already-reported interval and double-count every
+        # cohort in it (review-r5 #33/#43); an identical-window resend
+        # after a mid-sequence kill now yields a smaller sheet instead
+        in_window = lo_dt <= up < hi_dt and not root["uploaded_reported_at"]
         # LATE-ARRIVAL GUARD (d3/review-r4): a root whose cohort window
         # has already been reported (up < lo) but which no sheet has
         # counted yet — folder completed after its MIN-file-ctime stamp,
         # or download finished after generation — joins the CURRENT
-        # window instead of vanishing. Requires countable hours (raw
-        # probed); the send site marks what it counted.
+        # window instead of vanishing. Countable = raw probed, or a
+        # terminal reject that never downloads (scan-time cross-dup):
+        # its labels must still reach the player's row exactly once
+        # (review-r5 #12). The send site stamps what THIS sheet counted.
         late = (not in_window and up < lo_dt
-                and r_countable(root) and not root["uploaded_reported_at"])
+                and (r_countable(root) or root["state"] == "REJECTED")
+                and not root["uploaded_reported_at"])
         if not in_window and not late:
             continue
         if late:
+            # settling (review-r5 #29): the in-window path gets
+            # REPORT_OFFSET_H before its sheet; a late root counted the
+            # moment it was probed would freeze accepted_hrs at 0 and the
+            # stamp would lock that in forever. Defer until the tree is
+            # settled — the next sheet retries, loudly.
+            stack_s = [root]
+            unsettled = False
+            while stack_s:
+                n_ = stack_s.pop()
+                stack_s.extend(children.get(n_["session_id"], []))
+                if n_["state"] not in ("DELIVERED", "REJECTED", "SPLIT",
+                                       "DUPLICATE", "QUARANTINED"):
+                    unsettled = True
+                    break
+            if unsettled:
+                print(f"[sheet] LATE ARRIVAL DEFERRED: "
+                      f"{root['session_id']} is countable but its tree is "
+                      f"still in flight — retried on the next sheet",
+                      file=sys.stderr)
+                continue
             print(f"[sheet] LATE ARRIVAL: {root['session_id']} uploaded "
                   f"{root['drive_ctime'] or root['created_at']} — its "
                   f"window was already reported; counted in the current "
                   f"sheet (conservation)", file=sys.stderr)
+        if counted_out is not None and \
+                (r_countable(root) or root["state"] == "REJECTED"):
+            # exactly what mark_uploads_reported must stamp: counted
+            # roots only — an in-window root still awaiting its download
+            # stays unstamped so the late guard can pick its hours up
+            counted_out.append(root["session_id"])
         g_root = game_col.get(root["game"] or "")
         if g_root is not None:
             bucket(root)[f"{g_root}_hrs_uploaded"] += \
@@ -417,13 +463,14 @@ def build_sheet_rows(ledger: Ledger, day_ist: datetime,
 
 
 def write_payment_sheet(cfg: C.Config, ledger: Ledger, day_ist: datetime,
-                        bounds: tuple[str, str] | None = None
+                        bounds: tuple[str, str] | None = None,
+                        counted_out: list[str] | None = None
                         ) -> tuple[Path, Path]:
     """CSV + MD twin under ~/hl-pipeline/reports/YYYY-MM-DD/ (F8)."""
     day = day_ist.strftime("%Y-%m-%d")
     out = cfg.reports_dir / day
     out.mkdir(parents=True, exist_ok=True)
-    rows = build_sheet_rows(ledger, day_ist, bounds)
+    rows = build_sheet_rows(ledger, day_ist, bounds, counted_out=counted_out)
     csv_path = out / f"payment-{day}.csv"
     with csv_path.open("w", newline="") as f:
         w = csv.DictWriter(f, fieldnames=SHEET_COLS)
@@ -532,7 +579,13 @@ def build_folder_issues(ledger: Ledger,
     for r in ledger.incomplete_list():          # already first_seen-ordered
         op, player, folder = _issue_identity(r["drive_path"])
         first = r["first_seen"]
-        age = (now - datetime.fromisoformat(first)).total_seconds() / 3600.0
+        try:
+            age = (now - datetime.fromisoformat(first)
+                   ).total_seconds() / 3600.0
+        except ValueError:
+            # a malformed timestamp must never kill the PAYMENT report,
+            # which calls this for its heartbeat (folder-issues review #8)
+            age = 0.0
         try:
             missing = ", ".join(json.loads(r["missing_json"] or "[]"))
         except json.JSONDecodeError:
@@ -590,17 +643,26 @@ def write_folder_issues_csv(cfg: C.Config, ledger: Ledger,
 
 def build_folder_issues_message(rows: list[dict],
                                 day_ist: datetime) -> str:
-    """Two sections, ≤10 lines each + an overflow count (no silent caps)."""
+    """Two sections, ≤10 lines each + an overflow count (no silent caps —
+    the csv always carries everything). Degrades to counts-only when the
+    text would break Telegram's 4096-char message cap: free-text operator
+    names + full paths made a realistic 10+10 message overflow, and an
+    over-limit send fails EVERY tick with the marker unwritten — the
+    report would never arrive at all (folder-issues review #2)."""
     inc = [r for r in rows if r["problem"] == "incomplete_upload"]
     bad = [r for r in rows if r["problem"] == "bad_path"]
-    lines = [f"🗂 folder issues — {day_ist.strftime('%b')} {day_ist.day}"]
+    header = f"🗂 folder issues — {day_ist.strftime('%b')} {day_ist.day}"
 
     def _fmt(r):
         who = " / ".join(x for x in (r["operator"], r["player_email"])
-                         if x) or r["drive_path"]
-        return (f"- {who} / {r['folder']} — {r['detail']} · first seen "
+                         if x)
+        # a stray's folder already IS the full path — don't print it twice
+        # (folder-issues review #6)
+        head = f"{who} / {r['folder']}" if who else r["folder"]
+        return (f"- {head} — {r['detail']} · first seen "
                 f"{r['age_hours']:.0f} h ago")
 
+    lines = [header]
     lines.append(f"incomplete uploads ({len(inc)}):")
     lines.extend(_fmt(r) for r in inc[:10])
     if len(inc) > 10:
@@ -614,4 +676,12 @@ def build_folder_issues_message(rows: list[dict],
     if not bad:
         lines.append("- none")
     lines.append("📎 folder-issues csv attached")
-    return "\n".join(lines)
+    msg = "\n".join(lines)
+    if len(msg) > 3500:            # headroom under 4096 for the TEST prefix
+        msg = "\n".join([
+            header,
+            f"incomplete uploads: {len(inc)} · badly-named / misplaced "
+            f"folders: {len(bad)}",
+            "list too long for a message — full detail in the attached csv",
+            "📎 folder-issues csv attached"])
+    return msg
