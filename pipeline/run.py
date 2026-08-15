@@ -551,12 +551,14 @@ def process_batch(cfg: C.Config, ledger: Ledger, sids: list[str], *,
             rejected += 1
             deliver.finalize_rejected(cfg, ledger, sid)
             try:
-                reasons = json.loads(row["reasons_json"] or "[]")
+                # unfixable-only per the stored fixable field; fix-failed
+                # marker for all-fixable rejects (Adnaan 08-15);
+                # unparseable reasons are an UNKNOWN, never fix-failed
+                labels = reports.session_reject_labels(
+                    json.loads(row["reasons_json"] or "[]"))
             except json.JSONDecodeError:
-                reasons = []
-            # unfixable-only per the stored fixable field; fix-failed
-            # marker for all-fixable rejects (Adnaan 08-15)
-            reject_label_lists.append(reports.session_reject_labels(reasons))
+                labels = [reports.UNREADABLE_MARKER]
+            reject_label_lists.append(labels)
         elif row["state"] == "DELIVERED" and row["fix_attempts"] > 0:
             fixed += 1
     labels = reports.ordered_reject_labels(reject_label_lists)
@@ -638,10 +640,11 @@ def send_daily_report_if_due(cfg: C.Config, ledger: Ledger,
     counts: dict[str, int] = {}
     for r in rej_rows:
         try:
-            reasons = json.loads(r["reasons_json"] or "[]")
+            labels = reports.session_reject_labels(
+                json.loads(r["reasons_json"] or "[]"), daily=True)
         except json.JSONDecodeError:
-            reasons = []
-        for lbl in reports.session_reject_labels(reasons, daily=True):
+            labels = [reports.UNREADABLE_MARKER]   # unknown ≠ fix-failed
+        for lbl in labels:
             counts[lbl] = counts.get(lbl, 0) + 1
     dups = ledger.db.execute(
         f"SELECT COUNT(*) n FROM sessions WHERE state='REJECTED' AND "
@@ -920,12 +923,13 @@ def _overlapped_run(cfg: C.Config, ledger: Ledger, alerts: list[str], *,
                 rejected += 1
                 deliver.finalize_rejected(cfg, ul, sid)
                 try:
-                    reasons = json.loads(row["reasons_json"] or "[]")
+                    # unfixable-only + fix-failed marker (Adnaan 08-15);
+                    # unparseable reasons are an UNKNOWN, never fix-failed
+                    labels = reports.session_reject_labels(
+                        json.loads(row["reasons_json"] or "[]"))
                 except json.JSONDecodeError:
-                    reasons = []
-                # unfixable-only + fix-failed marker (Adnaan 08-15)
-                reject_label_lists.append(
-                    reports.session_reject_labels(reasons))
+                    labels = [reports.UNREADABLE_MARKER]
+                reject_label_lists.append(labels)
             elif row["state"] == "DELIVERED" and row["fix_attempts"] > 0:
                 fixed += 1
         labels = reports.ordered_reject_labels(reject_label_lists)

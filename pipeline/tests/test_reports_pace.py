@@ -1,5 +1,6 @@
 """§18 step-5 acceptance: batch + daily messages byte-match the §14
 templates on fixture data; pace math unit tests."""
+import json
 from datetime import date, datetime
 
 from pipeline import config as C
@@ -149,7 +150,8 @@ def test_reject_window_anchored_to_transition_not_updated_at(tmp_path):
     led.insert_session(
         session_id=sid, game="kamla", operator_email="Op",
         player_email="p@x.com", drive_path="kamla/Op/p@x.com/x",
-        drive_ctime="2026", md5_video="m", bytes_=1, state="DISCOVERED")
+        drive_ctime="2026-08-15T00:01:00.000Z", md5_video="m", bytes_=1,
+        state="DISCOVERED")
     led.set_reasons(sid, [_r("INP_MOTION_MISSING")], 3)
     led.set_state(sid, "REJECTED")
     ts = led.db.execute(
@@ -160,46 +162,140 @@ def test_reject_window_anchored_to_transition_not_updated_at(tmp_path):
                    "WHERE session_id=?", (sid,))
     led.db.commit()
     in_window = reports.build_sheet_rows(
-        led, datetime.now(C.IST), bounds=("2000-01-01T00:00:00",
-                                          "2100-01-01T00:00:00"))
-    assert in_window[0]["rejected"] == 1          # still found by event ts
+        led, datetime.now(C.IST),
+        bounds=("2000-01-01T00:00:00+00:00", "2100-01-01T00:00:00+00:00"))
+    assert in_window[0]["kamla_rejection_reasons"] == "no-mouse"
     next_day = reports.build_sheet_rows(
         led, datetime.now(C.IST),
-        bounds=(ts + "zz", "2100-01-01T00:00:00"))  # window AFTER the event
-    assert next_day[0]["rejected"] == 0           # not double-counted
+        bounds=(ts + "zz", "2100-01-01T00:00:00+00:00"))  # AFTER the event
+    # not re-counted: no reject in window; upload also outside -> row gone
+    assert next_day == [] or \
+        next_day[0]["kamla_rejection_reasons"] == ""
     led.close()
 
 
-def test_sheet_reject_reasons_unfixable_only(cfg, tmp_path):
+def test_sheet_reject_reasons_unfixable_only_and_game_bucketed(cfg,
+                                                               tmp_path):
     """End-to-end through build_sheet_rows: passengers hidden, all-fixable
-    reject shows the bare marker."""
-    from datetime import timezone as _tz
+    reject shows the bare marker, and an OW rejection lands in the OW
+    column (synthetic — no real OW data exists yet)."""
     from pipeline.ledger import Ledger
     led = Ledger(tmp_path / "l.db")
-    now = datetime.now(_tz.utc).isoformat(timespec="seconds")
     rows = [
-        ("s1", [_r("INP_MOTION_MISSING"),
-                _r("SYN_TS_NOT_PTS", fixable=True)]),   # passenger hidden
-        ("s2", [_r("CNT_CHAT_PII", fixable=True)]),     # all-fixable
+        ("s1", "kamla", [_r("INP_MOTION_MISSING"),
+                         _r("SYN_TS_NOT_PTS", fixable=True)]),  # passenger
+        ("s2", "kamla", [_r("CNT_CHAT_PII", fixable=True)]),    # all-fixable
+        ("s3", "outer_wilds", [_r("CNT_SHORT")]),               # OW bucket
     ]
-    for sid, reasons in rows:
+    for sid, game, reasons in rows:
+        full = f"2026-08-15T00-00-0{sid[-1]}Z_{game}_c_{ord(sid[-1]):016x}"
         led.insert_session(
-            session_id=f"2026-08-15T00-00-0{sid[-1]}Z_kamla_c_"
-                       f"{ord(sid[-1]):016x}",
-            game="kamla", operator_email="Op", player_email="p@x.com",
-            drive_path="kamla/Op/p@x.com/x", drive_ctime="2026",
+            session_id=full, game=game, operator_email="Op",
+            player_email="p@x.com", drive_path=f"{game}/Op/p@x.com/x",
+            drive_ctime="2026-08-15T00:01:00.000Z",
             md5_video=sid, bytes_=1, state="DISCOVERED")
-        full = f"2026-08-15T00-00-0{sid[-1]}Z_kamla_c_{ord(sid[-1]):016x}"
         led.set_reasons(full, reasons, 3)
         led.set_state(full, "REJECTED")
     sheet = reports.build_sheet_rows(
         led, datetime.now(C.IST),
         bounds=("2000-01-01T00:00:00+00:00", "2100-01-01T00:00:00+00:00"))
     led.close()
-    cell = sheet[0]["top_reject_reasons"]
-    assert "no-mouse" in cell and "fix-failed" in cell
-    assert "syn-ts-not-pts" not in cell and "chat-pii" not in cell
-    assert "×" not in cell
+    assert len(sheet) == 1                        # one (operator, player)
+    kcell = sheet[0]["kamla_rejection_reasons"]
+    ocell = sheet[0]["ow_rejection_reasons"]
+    assert "no-mouse" in kcell and "fix-failed" in kcell
+    assert "syn-ts-not-pts" not in kcell and "chat-pii" not in kcell
+    assert "×" not in kcell
+    assert ocell == "<70s"                        # OW reject, OW column
+
+
+def test_sheet_uploaded_hours_parents_only_on_drive_ctime(tmp_path):
+    """*_hrs_uploaded sums the PROBED video duration of PARENT sessions
+    windowed on the real Drive upload time — children would double-count
+    the parent's footage, and created_at is discovery time (d3 gotchas)."""
+    from pipeline.ledger import Ledger
+    led = Ledger(tmp_path / "l.db")
+    par = "2026-08-15T01-00-00Z_kamla_c_00000000000000f2"
+    led.insert_session(
+        session_id=par, game="kamla", operator_email="Op",
+        player_email="p@x.com", drive_path="kamla/Op/p@x.com/x",
+        drive_ctime="2026-08-15T01:02:03.413Z",     # RFC3339 millis Z
+        md5_video="m", bytes_=1, state="DISCOVERED")
+    led.update(par, duration_raw_s=3600.0)
+    led.insert_session(
+        session_id=f"{par}-p1", game="kamla", operator_email="Op",
+        player_email="p@x.com", drive_path="kamla/Op/p@x.com/x",
+        drive_ctime="2026-08-15T01:02:03.413Z", md5_video="", bytes_=0,
+        state="INGESTED", parent_id=par)
+    led.update(f"{par}-p1", duration_raw_s=1800.0)  # child: must NOT count
+    # blank drive_ctime parent: falls back to created_at, still counted
+    par2 = "2026-08-15T02-00-00Z_kamla_c_00000000000000f3"
+    led.insert_session(
+        session_id=par2, game="kamla", operator_email="Op",
+        player_email="p@x.com", drive_path="kamla/Op/p@x.com/y",
+        drive_ctime="", md5_video="m2", bytes_=1, state="DISCOVERED")
+    led.update(par2, duration_raw_s=1800.0)
+    sheet = reports.build_sheet_rows(
+        led, datetime.now(C.IST),
+        bounds=("2000-01-01T00:00:00+00:00", "2100-01-01T00:00:00+00:00"))
+    led.close()
+    assert len(sheet) == 1
+    assert sheet[0]["kamla_hrs_uploaded"] == 1.5   # 1.0 parent + 0.5 blank
+    assert sheet[0]["ow_hrs_uploaded"] == 0.0
+
+
+def test_sheet_suppresses_no_activity_rows(tmp_path):
+    from pipeline.ledger import Ledger
+    led = Ledger(tmp_path / "l.db")
+    sid = "2026-08-15T03-00-00Z_kamla_c_00000000000000f4"
+    led.insert_session(
+        session_id=sid, game="kamla", operator_email="Op",
+        player_email="idle@x.com", drive_path="kamla/Op/idle@x.com/x",
+        drive_ctime="2026-01-01T00:00:00.000Z",     # outside window
+        md5_video="m", bytes_=1, state="DISCOVERED")
+    led.update(sid, duration_raw_s=3600.0)
+    sheet = reports.build_sheet_rows(
+        led, datetime.now(C.IST),
+        bounds=("2026-06-01T00:00:00+00:00", "2026-06-02T00:00:00+00:00"))
+    led.close()
+    assert sheet == []                             # suppressed
+
+
+def test_reject_detail_three_renderings(cfg, tmp_path):
+    """The MD Reject detail section: (i) mixed fixable/unfixable shows the
+    unfixable code, (ii) all-fixable shows fix-failed, (iii) unparseable
+    reasons shows unreadable-reasons — never a false fix-failed."""
+    from pipeline.ledger import Ledger
+    led = Ledger(tmp_path / "l.db")
+    cases = [
+        ("a1", json.dumps([_r("CNT_BLACK_FROZEN"),
+                           _r("CNT_MID_NONGAMEPLAY", fixable=True)])),
+        ("a2", json.dumps([_r("SYN_TS_NOT_PTS", fixable=True)])),
+        ("a3", "{corrupt!!"),
+    ]
+    for tag, rj in cases:
+        sid = f"2026-08-15T00-00-0{tag[-1]}Z_kamla_c_{ord(tag[-1]):016x}"
+        led.insert_session(
+            session_id=sid, game="kamla", operator_email="Op",
+            player_email="p@x.com", drive_path="kamla/Op/p@x.com/x",
+            drive_ctime="2026-08-15T00:01:00.000Z", md5_video=tag,
+            bytes_=1, state="DISCOVERED")
+        led.set_state(sid, "REJECTED")
+        led.db.execute("UPDATE sessions SET reasons_json=? "
+                       "WHERE session_id=?", (rj, sid))
+        led.db.commit()
+    _csv, md_path = reports.write_payment_sheet(
+        cfg, led, datetime.now(C.IST),
+        bounds=("2000-01-01T00:00:00+00:00", "2100-01-01T00:00:00+00:00"))
+    led.close()
+    text = md_path.read_text()
+    lines = {ln.split("`")[1][-2:]: ln for ln in text.splitlines()
+             if ln.startswith("- `")}
+    assert "CNT_BLACK_FROZEN" in lines["31"]
+    assert "CNT_MID_NONGAMEPLAY" not in lines["31"]
+    assert "fix-failed" in lines["32"]
+    assert "unreadable-reasons" in lines["33"]
+    assert "fix-failed" not in lines["33"]
 
 
 # ------------------------------------------------------------------ pace
