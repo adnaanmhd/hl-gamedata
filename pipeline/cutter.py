@@ -137,6 +137,12 @@ def _cut_loop(session_dir: Path, keep, out_root: Path, sid: str, s: dict,
                         f"(< {C.MIN_CLIP_S:.0f}s minimum)"})
             continue
         out_dir = out_root / seg_id
+        # pre-clean: a stale leftover dir must never merge with this
+        # attempt's files (the run layer discards rescinded artifacts, so
+        # anything here is orphaned) — and cleanup-on-failure may then
+        # only ever remove THIS attempt's dirs (review-r4 #0)
+        if out_dir.exists():
+            shutil.rmtree(out_dir, ignore_errors=True)
         out_dir.mkdir(parents=True, exist_ok=True)
         created_dirs.append(out_dir)
         subprocess.run(

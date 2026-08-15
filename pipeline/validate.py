@@ -525,6 +525,12 @@ def map_reasons(rep: dict, aux: dict,
         # audio NEVER blocks (spec has no audio requirement; R-round-3)
         advisories.append("no audio track — warn note only, never blocks")
 
+    # aux notes (VLM-omitted static windows, uncut-AFK audit trail, scanner
+    # failures, statics cap) were write-only — nothing ever read the key, so
+    # the r3 #9/#23 F5 advisory never reached verdict.json; surface them
+    # with every other advisory (review-r4 #18/#22)
+    advisories.extend(aux.get("notes", []))
+
     # bin logic (§10): 1 = no blocking; 2 = all blocking fixable; 3 = any
     # blocking unfixable. HOLD only when no video-independent unfixable
     # reason already decides the session.
@@ -773,8 +779,9 @@ def _seed_shift_record(work_dir: Path) -> None:
 
 
 def _locked_report_update(report_path: Path, name: str,
-                          record: dict) -> None:
-    """Merge one entry into the SHARED work-root translation_report.json.
+                          record: dict | None) -> None:
+    """Merge one entry into the SHARED work-root translation_report.json
+    (record=None DELETES the entry — see _locked_report_remove).
     Up to 8 validation workers race this file; a bare read-modify-write
     loses entries and the lost shift makes qa-v2 spuriously FAIL sync on
     revalidation (review-r1 #8). mkdir is the portable atomic lock; on
@@ -789,10 +796,19 @@ def _locked_report_update(report_path: Path, name: str,
         except FileExistsError:
             # a worker SIGKILLed while holding the lock would disable it
             # forever (review-r2 #43): a lock older than 120 s is orphaned
-            # (the guarded section is milliseconds) — break it
+            # (the guarded section is milliseconds) — break it by RENAME
+            # aside then delete, like run._reclaim_stale_lock: a bare
+            # stat-then-rmdir let two waiters both break it — B could
+            # rmdir the lock A had JUST re-created, and both then held
+            # it, resurrecting the r1 #8 lost update (review-r4 #38/#45).
+            # Only one renamer ever wins os.rename; losers hit OSError
+            # and just retry mkdir.
             try:
                 if time.time() - lock.stat().st_mtime > 120:
-                    os.rmdir(lock)
+                    grave = lock.with_name(
+                        f"{lock.name}.stale-{os.getpid()}")
+                    os.rename(lock, grave)
+                    shutil.rmtree(grave, ignore_errors=True)
                     continue
             except OSError:
                 pass
@@ -802,7 +818,12 @@ def _locked_report_update(report_path: Path, name: str,
             existing = json.loads(report_path.read_text())
         except (FileNotFoundError, json.JSONDecodeError):
             existing = {}
-        existing[name] = record
+        if record is None:
+            if name not in existing:
+                return          # nothing to drop — don't create the file
+            del existing[name]
+        else:
+            existing[name] = record
         # atomic replace: qa's unlocked readers must never see a torn
         # file (review-r2 #42); pid-unique tmp so two writers that ever
         # slip past the lock cannot collide on one tmp name (review-r3 #45)
@@ -815,6 +836,16 @@ def _locked_report_update(report_path: Path, name: str,
                 os.rmdir(lock)
             except OSError:
                 pass
+
+
+def _locked_report_remove(report_path: Path, name: str) -> None:
+    """Drop one sid's entry (same lock discipline). Supersede and the
+    quarantine heal must remove the old upload's shift record: with the
+    entry present, _seed_shift_record early-returns and qa validates the
+    REPLACEMENT bytes against the OLD upload's shift — spurious
+    SYN_TS_NOT_PTS, a burned fix attempt and a paid VLM sweep
+    (review-r4 #7)."""
+    _locked_report_update(report_path, name, None)
 
 
 def _write_verdict(dossier_dir: Path, session_id: str, res: MapResult) -> None:

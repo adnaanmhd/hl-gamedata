@@ -136,7 +136,16 @@ def _generate_once(url: str, headers: dict, body: dict, tag: str) -> str:
             raise _EndpointFailed(last)
         except (urllib.error.URLError, TimeoutError, OSError,
                 http.client.HTTPException, json.JSONDecodeError) as e:
-            last = f"network error ({tag}): {e}"
+            # http.client.InvalidURL embeds the FULL request URL (?key=) in
+            # its message, and the whitespace that triggers it also splits
+            # the key — so scrub the literal key text from the url AND any
+            # key= remnant before {e} can enter `last` (review-r4 #25)
+            msg = str(e)
+            key_in_url = re.search(r"key=([^&]+)", url)
+            if key_in_url:
+                msg = msg.replace(key_in_url.group(1), "***")
+            msg = re.sub(r"key=[^&\s]+", "key=***", msg)
+            last = f"network error ({tag}): {msg}"
             if attempt < C.VLM_MAX_TRIES - 1:
                 time.sleep(min(C.VLM_BACKOFF_BASE_S * (2 ** attempt),
                                C.VLM_BACKOFF_MAX_S))

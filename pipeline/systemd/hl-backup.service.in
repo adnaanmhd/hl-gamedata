@@ -11,5 +11,8 @@ Type=oneshot
 User=__USER__
 WorkingDirectory=__HOME__/hl-gamedata
 Environment=HL_BACKUP_BUCKET=__BUCKET__
-TimeoutStartSec=infinity
+# bounded so a wedged rclone FAILS the unit (firing OnFailure) instead of
+# pinning it in 'activating' forever, where every later timer elapse
+# no-ops and backups stop silently (review-r4 #33)
+TimeoutStartSec=3600
 ExecStart=/bin/bash __HOME__/hl-gamedata/pipeline/systemd/hl_backup.sh

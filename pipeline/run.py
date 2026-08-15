@@ -66,6 +66,20 @@ def _pid_is_pipeline(pid: int) -> bool:
     return b"pipeline" in cmdline or b"pytest" in cmdline
 
 
+def _reclaim_stale_lock(cfg: C.Config) -> None:
+    """Atomic reclaim: RENAME the stale lock aside, then delete the
+    renamed dir. rmtree-then-retry let two starters both remove and both
+    acquire — B's rmtree could delete the lock A had JUST re-created
+    (review-r4 #2/#36/#39). Only one renamer ever wins os.rename; the
+    loser's FileNotFoundError is the sign someone else reclaimed."""
+    grave = cfg.lock_dir.with_name(f"run.lock.stale-{os.getpid()}")
+    try:
+        os.rename(cfg.lock_dir, grave)
+    except OSError:
+        return                       # someone else reclaimed (or it's live)
+    shutil.rmtree(grave, ignore_errors=True)
+
+
 def acquire_lock(cfg: C.Config) -> bool:
     for _ in range(2):
         try:
@@ -77,19 +91,18 @@ def acquire_lock(cfg: C.Config) -> bool:
                 pid = int((cfg.lock_dir / "pid").read_text())
                 if _pid_is_pipeline(pid):
                     return False              # live run holds it
-                shutil.rmtree(cfg.lock_dir, ignore_errors=True)   # stale
+                _reclaim_stale_lock(cfg)
             except (ValueError, FileNotFoundError):
-                # pid file missing/garbled. rmtree-after-grace could steal
-                # a JUST-mkdir'd winner's lock and yield two concurrent
-                # runs (review-r3 #4) — only reclaim when the lock dir is
-                # old enough that no live winner can be mid-write; else
-                # yield and let the next tick decide.
+                # pid file missing/garbled. Reclaiming here could steal a
+                # JUST-mkdir'd winner's lock (review-r3 #4) — only reclaim
+                # when the dir is old enough that no live winner can be
+                # mid-write; else yield to the next tick.
                 try:
                     age = time.time() - cfg.lock_dir.stat().st_mtime
                 except OSError:
                     age = 0.0
                 if age > 2 * 3600:
-                    shutil.rmtree(cfg.lock_dir, ignore_errors=True)
+                    _reclaim_stale_lock(cfg)
                 else:
                     return False
     return False
@@ -185,6 +198,15 @@ def _download_phase(cfg, ledger, sids, alerts) -> None:
                                  f"{msg}"[:300])
                 _alert(cfg, f"download failed for {sid} (will retry): {e}",
                        alerts)
+        except OSError as e:
+            # host-level trouble (disk full, I/O hiccup) anywhere in the
+            # download path is TRANSIENT — quarantining here made a full
+            # disk permanently kill good sessions (review-r4 #3/#17)
+            ledger.set_state(sid, "DISCOVERED",
+                             f"download failed (host-level) — retrying "
+                             f"next run: {type(e).__name__}: {e}"[:300])
+            _alert(cfg, f"download hit host-level error for {sid} "
+                        f"(will retry): {type(e).__name__}: {e}", alerts)
         except Exception as e:
             # nothing a raw exception could mean is retry-fixable, and
             # letting it escape killed the whole D thread for the run
@@ -284,6 +306,22 @@ def _validate_phase(cfg, ledger, sids, alerts, *, workers: int) -> None:
                                       if x["blocking"]))
 
 
+def _discard_split_artifacts(cfg, ledger, sid: str) -> None:
+    """Remove a rescinded cut's leftovers — rowless segment dirs and the
+    manifest. Without this, a fix path that errored or rejected AFTER a
+    completed cut left a truthful-looking manifest behind, and a later
+    FIXING crash adopted the stale split from a rescinded plan
+    (review-r4 #5/#19). Rowed children are live work and are kept."""
+    have_rows = {k["session_id"] for k in ledger.db.execute(
+        "SELECT session_id FROM sessions WHERE parent_id=?",
+        (sid,)).fetchall()}
+    for d in cfg.work.glob(f"{sid}-p[0-9]*"):
+        if d.is_dir() and not d.name.endswith("-analysis") \
+                and d.name not in have_rows:
+            shutil.rmtree(d, ignore_errors=True)
+    (cfg.work / f"{sid}.split-manifest.json").unlink(missing_ok=True)
+
+
 def _recover_split(cfg, ledger, sid: str, row) -> tuple[bool, list[str]]:
     """Mid-fix crash triage for a FIXING parent (review-r3 #1/#5): the
     cutter's manifest marks a COMPLETE cut. Adopt the split ONLY when the
@@ -306,6 +344,18 @@ def _recover_split(cfg, ledger, sid: str, row) -> tuple[bool, list[str]]:
     complete = bool(manifest_ids) and all(
         (cfg.work / seg_id).is_dir() or seg_id in have_rows
         for seg_id in manifest_ids)
+    if not complete and not manifest_ids and have_rows:
+        # rows exist but the manifest is gone: rows are only ever inserted
+        # after a manifest-complete cut, so this is the kill window between
+        # a prior recovery finishing its inserts and the SPLIT commit —
+        # adopt the rowed children as the split; re-cutting here would
+        # clobber live children (review-r4 #0). Guard: no rowless partial
+        # dirs may exist (those would mean a NEWER interrupted cut).
+        rowless = [d for d in cfg.work.glob(f"{sid}-p[0-9]*")
+                   if d.is_dir() and not d.name.endswith("-analysis")
+                   and d.name not in have_rows]
+        if not rowless:
+            return True, sorted(have_rows)
     if not complete:
         # wipe rowless partials so a LATER crash can't adopt them; rowed
         # children are real work and stay
@@ -337,7 +387,10 @@ def _recover_split(cfg, ledger, sid: str, row) -> tuple[bool, list[str]]:
             detail="segment recovered after mid-split crash (manifest)")
         if dur:
             ledger.update(seg_id, duration_raw_s=dur)
-    manifest_path.unlink(missing_ok=True)
+    # the manifest is unlinked by the CALLER after the SPLIT commit — an
+    # unlink here left a kill window (rows in, manifest gone, parent still
+    # FIXING) that re-derived the cut and clobbered live children
+    # (review-r4 #0/#4/#20)
     return True, sorted(set(manifest_ids) | have_rows)
 
 
@@ -380,6 +433,8 @@ def _fix_phase(cfg, ledger, sids, alerts, *, workers: int,
                                      f"{len(kid_ids)} segments (completed "
                                      f"after mid-split crash)")
                     shutil.rmtree(cfg.work / sid, ignore_errors=True)
+                    (cfg.work / f"{sid}.split-manifest.json").unlink(
+                        missing_ok=True)      # only after the SPLIT commit
                     continue
                 # crash mid-fix: the copy may be half-fixed and the stored
                 # plan stale — re-running RETRIM/CUT on it would trim real
@@ -402,10 +457,12 @@ def _fix_phase(cfg, ledger, sids, alerts, *, workers: int,
             plan = fix.plan_fixes(reasons, game=row["game"],
                                   has_raw=has_raw)
             if plan["unfixable"]:
+                _discard_split_artifacts(cfg, ledger, sid)
                 ledger.set_state(sid, "REJECTED",
                                  f"unfixable: {plan['unfixable']}")
                 continue
             if not plan["steps"]:
+                _discard_split_artifacts(cfg, ledger, sid)
                 ledger.set_state(sid, "REJECTED",
                                  "no applicable fix for blocking reasons")
                 continue
@@ -422,13 +479,17 @@ def _fix_phase(cfg, ledger, sids, alerts, *, workers: int,
                                   split_root=cfg.work)
             if out["error"]:
                 # partially-applied plan: never re-run it blind — go back
-                # through validation to re-derive from the current copy
+                # through validation to re-derive from the current copy.
+                # Any cut artifacts from THIS plan are rescinded with it
+                # (review-r4 #5/#19)
+                _discard_split_artifacts(cfg, ledger, sid)
                 ledger.set_state(sid, "REVALIDATING",
                                  f"fix failed: {out['error']}"[:300])
                 continue
             if out["children"] is not None and \
                     not out["children"]["segments"]:
                 # no ≥70 s segment survived the cut — §5: reject
+                _discard_split_artifacts(cfg, ledger, sid)
                 ledger.set_state(sid, "REJECTED",
                                  "split produced no >=70s segment "
                                  f"(dropped {len(out['children']['dropped'])})")
@@ -781,14 +842,21 @@ def _partition_resume(ledger: Ledger) -> tuple[list[_Batch], list[_Batch],
             if s in state:
                 assigned[s] = b["batch_no"]
                 groups.setdefault(b["batch_no"], []).append(s)
-            elif ledger.get(s) is not None:
-                # terminal members (e.g. already DELIVERED before the
-                # kill) stay in the batch's membership: dropping them
-                # under-reported the closing batch message and shrank
-                # summary_json on finish (review-r3 #43/#25); every phase
-                # is state-guarded, so carrying them is free
-                assigned[s] = b["batch_no"]
-                groups.setdefault(b["batch_no"], []).append(s)
+            else:
+                r = ledger.get(s)
+                if r is not None and r["state"] in (
+                        "DELIVERED", "REJECTED", "SPLIT", "DUPLICATE",
+                        "QUARANTINED"):
+                    # TERMINAL members (e.g. DELIVERED before the kill)
+                    # stay in the membership: dropping them under-reported
+                    # the closing batch message (review-r3 #43/#25).
+                    # DISCOVERED/HOLD_VLM members deliberately do NOT ride
+                    # — carrying them marked them `attempted`, deferring
+                    # their re-intake a full tick and closing their batch
+                    # around them (review-r4 #35); they re-enter via
+                    # next_batch / the hold branch instead.
+                    assigned[s] = b["batch_no"]
+                    groups.setdefault(b["batch_no"], []).append(s)
     for s, p in parent.items():
         if s not in assigned and p in assigned:
             assigned[s] = assigned[p]
@@ -860,6 +928,24 @@ def _overlapped_run(cfg: C.Config, ledger: Ledger, alerts: list[str], *,
                 print(f"[dl b{b.no}] resumed {len(b.sids)} session(s) "
                       f"{b.dl_s / 60:.1f}m")
                 q_dv.put(b)
+            # HOLD_VLM retries get ONE guaranteed batch per run BEFORE new
+            # intake — the old only-when-idle branch starved held sessions
+            # indefinitely while fresh uploads kept arriving (review-r4
+            # #9); F5 promises a retry every run, not "when quiet"
+            held = [r["session_id"] for r in dl.by_state("HOLD_VLM")
+                    if r["session_id"] not in attempted][:C.BATCH_SIZE]
+            if held and not stop.is_set():
+                got = flight.acquire(timeout=1.0)
+                while not got and not stop.is_set():
+                    got = flight.acquire(timeout=1.0)
+                if got:
+                    if stop.is_set():
+                        flight.release()
+                    else:
+                        attempted.update(held)
+                        q_dv.put(_Batch(
+                            no=dl.start_batch(sessions=held), sids=held,
+                            t0_utc=datetime.now(timezone.utc), slot=True))
             started = 0
             while not stop.is_set() and started < max_batches:
                 if deliver.disk_free_gb(cfg.home) < C.DISK_LOW_WATER_GB:
@@ -1241,7 +1327,12 @@ def run(cfg: C.Config, *, max_batches: int = 50,
                     deliver.finalize_rejected(cfg, ledger, sid)
                 except Exception as e:
                     print(f"[finalize-failed] {sid}: {e}", file=sys.stderr)
-        except RuntimeError as e:
+        except Exception as e:
+            # any scan crash — not just rclone's RuntimeError: rc=0 garbage
+            # JSON (JSONDecodeError) and malformed listing entries (KeyError)
+            # must also degrade to an alert, never abort the run before the
+            # READY/PACKAGED backlog drains (review-r4 #29). Exception never
+            # catches KeyboardInterrupt/SystemExit (BaseException).
             _alert(cfg, f"Drive scan failed: {e}", alerts)
 
         if C.PIPELINE_OVERLAP:

@@ -167,13 +167,22 @@ def plan_fixes(reasons: list[dict], *, game: str, has_raw: bool) -> dict:
     if retranslate and has_raw:
         steps.append(("FIX_RETRANSLATE", {}))
         csv_fixes = []                    # superseded by the re-translate
+    pre_emitted: set[tuple[str, str]] = set()
+
     def _pre_cut_csv_fixes():
-        """Row/timestamp surgery must precede a cut — the cutter maps CSV
-        rows onto video frames and needs them aligned first (rows before
-        timestamps: the row delta is what tsrepair hard-fails on)."""
-        for want in ("FIX_ROWS_SURGERY", "FIX_TSREPAIR_PTS"):
+        """Structural CSV surgery must precede a cut, gate, or retrim.
+        Header rewrite first of all: gate.py, cutter.py and the retrim
+        tool hard-assert a v2 header, so a plan that reaches them before
+        FIX_HEADER_REWRITE errors on its first step every attempt and
+        burns the fix budget — wrongful reject (review-r4 #23). Then rows
+        before timestamps: the cutter maps CSV rows onto video frames and
+        needs them aligned first (the row delta is what tsrepair
+        hard-fails on)."""
+        for want in ("FIX_HEADER_REWRITE", "FIX_ROWS_SURGERY",
+                     "FIX_TSREPAIR_PTS"):
             for fid, p in csv_fixes:
-                if fid == want:
+                if fid == want and (fid, json.dumps(p)) not in pre_emitted:
+                    pre_emitted.add((fid, json.dumps(p)))
                     steps.append((fid, p))
 
     if cut_windows or (head_cut and tail_cut):
@@ -186,6 +195,8 @@ def plan_fixes(reasons: list[dict], *, game: str, has_raw: bool) -> dict:
         steps.append(("FIX_CUT_SEGMENTS", {"cut": sorted(cuts)}))
         return {"steps": steps, "unfixable": sorted(set(unfixable))}
     if head_cut:
+        # the retrim tool asserts a v2 header too (review-r4 #23)
+        _pre_cut_csv_fixes()
         steps.append(("FIX_RETRIM_HEAD", {"head_s": head_cut}))
         # gate windows carry PRE-trim timestamps; retrim rebases every
         # row — gating here would blank the wrong frames. The re-validation
@@ -197,9 +208,14 @@ def plan_fixes(reasons: list[dict], *, game: str, has_raw: bool) -> dict:
         steps.append(("FIX_CUT_SEGMENTS", {"cut": [(tail_cut, 1e9)]}))
         return {"steps": steps, "unfixable": sorted(set(unfixable))}
     if gate_windows:
+        # gate.py asserts a v2 header — structural surgery first
+        # (review-r4 #23)
+        _pre_cut_csv_fixes()
         steps.append(("FIX_GATE_WINDOW", {"windows": sorted(gate_windows)}))
-    # hygiene before context (canonical CONTEXT/HYGIENE slot)
-    seen = set()
+    # hygiene before context (canonical CONTEXT/HYGIENE slot); seen is
+    # seeded with the pre-gate/-retrim emissions so the csv loop below
+    # cannot plan them a second time (review-r4 #23)
+    seen = set(pre_emitted)
     hygiene_planned = False
     for fid, p in csv_fixes:
         if fid == "FIX_KEY_HYGIENE" and fid in seen:

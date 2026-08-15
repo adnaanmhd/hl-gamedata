@@ -175,6 +175,16 @@ def scan(cfg: C.Config, ledger: Ledger,
     sessions, quarantined, out_of_tree = parse_listing(entries)
     res = ScanResult(out_of_tree=out_of_tree)
 
+    # every directory visible in THIS listing, ancestors included — the
+    # move-heal below keys on a registered path being GONE from the drive
+    # (a move removes the old path; a copy leaves both) (review-r4 #6)
+    listed_dirs: set[str] = set()
+    for e in entries:
+        d = Path(e["Path"]) if e.get("IsDir") else Path(e["Path"]).parent
+        while str(d) not in (".", "/"):
+            listed_dirs.add(str(d))
+            d = d.parent
+
     for path, why in quarantined:
         sid = Path(path).name
         if ledger.get(sid) is None:
@@ -211,7 +221,15 @@ def scan(cfg: C.Config, ledger: Ledger,
                     # player folder) and quarantined; the operator has now
                     # fixed the tree and the same session parses clean at
                     # its proper path. Blocking it forever punishes the
-                    # correction (review-r3 #7) — re-register.
+                    # correction (review-r3 #7) — re-register. Quarantines
+                    # struck AFTER download (validation/delivery crash)
+                    # may have seeded the sid's shift record, and the
+                    # healed re-upload's bytes can differ — drop it
+                    # (review-r4 #7)
+                    from .validate import _locked_report_remove
+                    _locked_report_remove(
+                        cfg.work / "translation_report.json",
+                        ds.session_id)
                     ledger.update(ds.session_id,
                                   drive_path=ds.drive_path,
                                   drive_ctime=ds.ctime, md5_video=vmd5,
@@ -223,10 +241,55 @@ def scan(cfg: C.Config, ledger: Ledger,
                         ds.session_id, "DISCOVERED",
                         f"re-registered: quarantined path healed to "
                         f"{ds.drive_path}")
+                    # post-download quarantines (download/validation crash,
+                    # md5 mismatch, garbage payload) keep a populated work
+                    # dir; the fresh download would merge stale payload
+                    # files — old raw/ sidecars feeding FIX_RETRANSLATE —
+                    # into the new upload. Same wipe both supersede sites
+                    # perform (review-r3 #6, completed by review-r4 #21)
+                    shutil.rmtree(cfg.work / ds.session_id,
+                                  ignore_errors=True)
+                    shutil.rmtree(cfg.work / f"{ds.session_id}-analysis",
+                                  ignore_errors=True)
                     res.integrity_flags.append(
                         f"{ds.session_id}: quarantined path healed — "
                         f"re-registered at {ds.drive_path}")
                     res.discovered.append(ds.session_id)
+                    continue
+                if existing["state"] in ("DISCOVERED", "INCOMPLETE") \
+                        and existing["drive_path"] not in listed_dirs \
+                        and (not vmd5 or not existing["md5_video"]
+                             or vmd5 == existing["md5_video"]):
+                    # pre-download MOVE heal (review-r4 #6): the old path
+                    # is gone from this listing — an operator folder
+                    # rename (free-text names, so typo fixes are routine)
+                    # moved the whole subtree. Without this the row kept
+                    # the dead path and every download retried it forever.
+                    # Gated three ways: pre-download states only (anything
+                    # further along works from its local copy and keeps
+                    # its row), old path ABSENT (a copy leaves both paths
+                    # listed — that stays a collision below), and md5
+                    # match when both sides know it (different bytes are
+                    # never a move). A zip payload has no Drive-side md5 —
+                    # keep the row's old one so the download-time checksum
+                    # still verifies the bytes actually followed the move.
+                    ledger.update(ds.session_id,
+                                  drive_path=ds.drive_path,
+                                  drive_ctime=ds.ctime,
+                                  md5_video=vmd5 or existing["md5_video"],
+                                  bytes=total_bytes,
+                                  operator_email=ds.operator_email,
+                                  player_email=ds.player_email,
+                                  game=ds.game)
+                    # same-state set_state = audit event: drive_path and
+                    # attribution changed on a payment-bearing row
+                    ledger.set_state(
+                        ds.session_id, existing["state"],
+                        f"drive folder moved — re-pointed from "
+                        f"{existing['drive_path']} to {ds.drive_path}")
+                    res.integrity_flags.append(
+                        f"{ds.session_id}: drive folder moved — "
+                        f"re-pointed to {ds.drive_path}")
                     continue
                 res.integrity_flags.append(
                     f"session-id collision: {ds.drive_path} reuses "
@@ -262,6 +325,16 @@ def scan(cfg: C.Config, ledger: Ledger,
                                   ignore_errors=True)
                     shutil.rmtree(cfg.work / f"{ds.session_id}-analysis",
                                   ignore_errors=True)
+                    # ... and the sid's entry in the SHARED shift record:
+                    # left behind, _seed_shift_record early-returns on it
+                    # and qa validates the REPLACEMENT bytes against the
+                    # OLD upload's shift — spurious SYN_TS_NOT_PTS, a
+                    # burned fix attempt and a paid VLM sweep
+                    # (review-r4 #7)
+                    from .validate import _locked_report_remove
+                    _locked_report_remove(
+                        cfg.work / "translation_report.json",
+                        ds.session_id)
                     res.superseded.append(ds.session_id)
                     res.discovered.append(ds.session_id)
                 else:
@@ -290,6 +363,11 @@ def scan(cfg: C.Config, ledger: Ledger,
                 shutil.rmtree(cfg.work / ds.session_id, ignore_errors=True)
                 shutil.rmtree(cfg.work / f"{ds.session_id}-analysis",
                               ignore_errors=True)
+                # stale shift record goes with the stale work dir
+                # (review-r4 #7)
+                from .validate import _locked_report_remove
+                _locked_report_remove(
+                    cfg.work / "translation_report.json", ds.session_id)
                 res.superseded.append(ds.session_id)
                 res.discovered.append(ds.session_id)
             continue
@@ -314,6 +392,12 @@ def scan(cfg: C.Config, ledger: Ledger,
                                f"{dupes[0]['session_id']}")
                     res.duplicates.append(ds.session_id)
                     continue
+                # adjudicated losers (REJECTED/DUPLICATE) neither block a
+                # new copy nor get re-rejected — mirrors the download-time
+                # dedupe filter (review-r2 #2; review-r4 #37)
+                dupes = [r for r in dupes
+                         if r["state"] not in ("REJECTED", "DUPLICATE")]
+            if dupes:
                 # cross-identity: earliest Drive createdTime wins (F3) —
                 # unless the other copy already shipped (can't undeliver);
                 # the ledger detail must state which case actually happened
@@ -328,27 +412,41 @@ def scan(cfg: C.Config, ledger: Ledger,
                 shipped = any(r["state"] in ("DELIVERED", "UPLOADED",
                                              "PACKAGED", "SPLIT")
                               for r in dupes)
-                # the existing copy may only be un-picked while still
-                # pre-download; anything further along keeps its state
-                # (F3 deviation recorded below)
-                clobberable = earliest["state"] in ("DISCOVERED",
-                                                    "INCOMPLETE")
+                # existing copies may only be un-picked while still
+                # pre-download; ALL of them must qualify — checking only
+                # the earliest let a third, mid-pipeline copy deliver
+                # while the ledger evidence named this copy as the keeper
+                # (review-r4 #37)
+                clobberable = all(r["state"] in ("DISCOVERED", "INCOMPLETE")
+                                  for r in dupes)
                 if is_earlier or shipped or not clobberable:
                     if is_earlier:
                         why = f"kept earlier upload {earliest['session_id']}"
                     elif shipped:
+                        # name the copy that actually shipped — with
+                        # several dupes it need not be the earliest
+                        # (review-r4 #37)
+                        winner = next(r for r in dupes
+                                      if r["state"] in ("DELIVERED",
+                                                        "UPLOADED",
+                                                        "PACKAGED", "SPLIT"))
                         why = (f"kept already-shipped later upload "
-                               f"{earliest['session_id']} — this copy has "
+                               f"{winner['session_id']} — this copy has "
                                f"the earlier createdTime but the other "
                                f"already shipped")
                     else:
+                        # name the copy actually in flight — the earliest
+                        # dupe may itself be clobberable (review-r4 #37)
+                        blocker = next(r for r in dupes
+                                       if r["state"] not in ("DISCOVERED",
+                                                             "INCOMPLETE"))
                         why = (f"kept in-flight later upload "
-                               f"{earliest['session_id']} (state "
-                               f"{earliest['state']}) — F3 deviation: this "
+                               f"{blocker['session_id']} (state "
+                               f"{blocker['state']}) — F3 deviation: this "
                                f"copy has the earlier createdTime")
                         res.integrity_flags.append(
                             f"F3 deviation: {ds.session_id} is earlier but "
-                            f"{earliest['session_id']} already in flight — "
+                            f"{blocker['session_id']} already in flight — "
                             f"kept the in-flight copy")
                     ledger.insert_session(
                         session_id=ds.session_id, game=ds.game,
@@ -369,20 +467,26 @@ def scan(cfg: C.Config, ledger: Ledger,
                         f"cross-player duplicate: {ds.session_id} rejected "
                         f"({why})")
                     continue
-                # the NEW copy is the earlier one: reject the later existing
-                ledger.set_state(earliest["session_id"], "REJECTED",
-                                 "cross-identity duplicate — later upload; "
-                                 f"earlier copy {ds.session_id} accepted")
-                ledger.set_reasons(
-                    earliest["session_id"],
-                    [{"code": "INT_DUP_CROSS", "blocking": True,
-                      "fixable": False, "params": {},
-                      "evidence": f"video md5 identical to {ds.session_id} "
-                                  f"which has earlier createdTime"}], 3)
-                res.dup_cross.append(earliest["session_id"])
-                res.integrity_flags.append(
-                    f"cross-player duplicate: {earliest['session_id']} "
-                    f"rejected (kept earlier upload {ds.session_id})")
+                # the NEW copy is the earlier one: reject EVERY later
+                # existing copy — all are pre-download here; leaving one
+                # behind would record a keeper that never delivers
+                # (review-r4 #37)
+                for loser in dupes:
+                    ledger.set_state(
+                        loser["session_id"], "REJECTED",
+                        "cross-identity duplicate — later upload; "
+                        f"earlier copy {ds.session_id} accepted")
+                    ledger.set_reasons(
+                        loser["session_id"],
+                        [{"code": "INT_DUP_CROSS", "blocking": True,
+                          "fixable": False, "params": {},
+                          "evidence": f"video md5 identical to "
+                                      f"{ds.session_id} which has earlier "
+                                      f"createdTime"}], 3)
+                    res.dup_cross.append(loser["session_id"])
+                    res.integrity_flags.append(
+                        f"cross-player duplicate: {loser['session_id']} "
+                        f"rejected (kept earlier upload {ds.session_id})")
 
         ledger.insert_session(
             session_id=ds.session_id, game=ds.game,

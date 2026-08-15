@@ -73,5 +73,11 @@ echo "--- acceptance"
 ffmpeg -version | head -1
 rclone version | head -1
 "$HOME/.local/bin/uv" --version
+# the backup unit is templated with $BUCKET — prove that bucket actually
+# exists and is listable NOW, not silently at 03:00 (provision_vm.sh may
+# have created a suffixed name if the base was taken; review-r4 #31)
+rclone lsd "gcs-backup:$BUCKET" >/dev/null \
+  || { echo "FATAL: gcs-backup:$BUCKET not listable — set HL_BACKUP_BUCKET to the bucket provision_vm.sh created" >&2; exit 1; }
+echo "backup bucket: gs://$BUCKET listable"
 echo "timezone: $(timedatectl show -p Timezone --value)"
 echo "DONE (timers $( [ "${1:-}" = "--enable-timers" ] && echo ENABLED || echo installed, not enabled ))"
