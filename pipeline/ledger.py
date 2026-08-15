@@ -69,6 +69,16 @@ class Ledger:
         self.db.execute("PRAGMA synchronous=NORMAL")
         self.db.execute("PRAGMA busy_timeout=10000")
         self.db.executescript(_SCHEMA)
+        # additive migration (like duration_raw_s, §8 stays a subset):
+        # uploaded_reported_at marks a root whose uploaded-hours a payment
+        # sheet has COUNTED — the late-arrival guard keys on its absence
+        # (d3/review-r4: any session becoming countable after its cohort
+        # window was reported would otherwise be dropped forever)
+        cols = {r["name"] for r in
+                self.db.execute("PRAGMA table_info(sessions)")}
+        if "uploaded_reported_at" not in cols:
+            self.db.execute("ALTER TABLE sessions "
+                            "ADD COLUMN uploaded_reported_at TEXT NULL")
         self.db.commit()
 
     def close(self) -> None:
@@ -133,7 +143,7 @@ class Ledger:
                    "duration_delivered_s", "duration_raw_s", "rrd_sampled",
                    "delivered_at", "dossier_path", "md5_video", "bytes",
                    "game", "drive_path", "drive_ctime", "parent_id",
-                   "operator_email", "player_email"}
+                   "operator_email", "player_email", "uploaded_reported_at"}
         bad = set(fields) - allowed
         assert not bad, f"unknown ledger fields: {bad}"
         sets = ", ".join(f"{k}=?" for k in fields)

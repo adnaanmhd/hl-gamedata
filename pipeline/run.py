@@ -678,12 +678,17 @@ def send_daily_report_if_due(cfg: C.Config, ledger: Ledger,
     except telegram.TelegramError as e:
         print(f"[daily-report-undelivered] {e}", file=sys.stderr)
         return False
-    # marker right after the MESSAGE lands: a sheet-send failure (or a kill
-    # between the two sends) must not re-send the whole report next run
-    # (review-r1 #20/#26); the sheet also sits on disk for the GCS sync
+    # ordering is load-bearing (review-r4 #24/#41 + the late-arrival
+    # guard): anchor first, then the reported-stamps, then the marker.
+    # A kill inside this sequence errs toward a duplicate small message
+    # or a slightly smaller resent sheet — NEVER toward double-counted
+    # payment hours.
+    anchor.write_text(hi)          # next report's window starts here
+    stamped = reports.mark_uploads_reported(ledger, lo, hi)
+    if stamped:
+        print(f"[daily] stamped {stamped} root upload(s) as reported")
     marker.parent.mkdir(parents=True, exist_ok=True)
     marker.touch()
-    anchor.write_text(hi)          # next report's window starts here (#24)
     try:
         telegram.send_document(cfg, csv_path, caption="payment sheet")
     except telegram.TelegramError as e:

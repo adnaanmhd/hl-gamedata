@@ -415,17 +415,102 @@ def test_offset_window_edge_conservation(tmp_path):
     # 10 min after the edge
     put("2026-08-15T06-55-00Z_kamla_c_00000000000000f9",
         "2026-08-15T06:55:22.000Z", "2026-08-15T09:00:00+00:00")
-    win1 = reports.build_sheet_rows(
-        led, datetime.now(C.IST),
-        bounds=("2026-08-14T06:45:22+00:00", edge))
-    win2 = reports.build_sheet_rows(
-        led, datetime.now(C.IST), bounds=(edge, next_edge))
+    win1 = _sheet_and_mark(led, ("2026-08-14T06:45:22+00:00", edge))
+    win2 = _sheet_and_mark(led, (edge, next_edge))
     led.close()
     assert len(win1) == 1 and win1[0]["kamla_accepted_hrs"] == 1.0
     assert len(win2) == 1 and win2[0]["kamla_accepted_hrs"] == 1.0
     # conservation: 2.0 h total across the two windows, no double count
     assert win1[0]["total_delivered_hours"] + \
         win2[0]["total_delivered_hours"] == 2.0
+
+
+def _mk_root(led, sid, ctime, raw=None, player="late@x.com"):
+    led.insert_session(
+        session_id=sid, game="kamla", operator_email="Op",
+        player_email=player, drive_path=f"kamla/Op/{player}/x",
+        drive_ctime=ctime, md5_video=sid[-4:], bytes_=1, state="DISCOVERED")
+    if raw is not None:
+        led.update(sid, duration_raw_s=raw)
+
+
+def _sheet_and_mark(led, bounds):
+    rows = reports.build_sheet_rows(
+        led, datetime.now(C.IST), bounds=bounds)
+    reports.mark_uploads_reported(led, *bounds)
+    return rows
+
+
+def test_late_arrival_incomplete_folder_counted_once(tmp_path, capsys):
+    """d3/r4 route 2 (LIVE): a folder stamped with its earliest file's
+    ctime completes AFTER that window was reported. The hours must appear
+    on exactly ONE sheet — the current one — with a late-arrival log."""
+    from pipeline.ledger import Ledger
+    led = Ledger(tmp_path / "l.db")
+    w1 = ("2026-08-14T06:45:22+00:00", "2026-08-15T06:45:22+00:00")
+    w2 = ("2026-08-15T06:45:22+00:00", "2026-08-16T06:45:22+00:00")
+    # window 1 generates BEFORE the folder completes: no session row yet
+    assert _sheet_and_mark(led, w1) == []
+    # folder completes: session created late, ctime STILL inside window 1
+    _mk_root(led, "2026-08-15T06-00-00Z_kamla_c_0000000000000fb0",
+             "2026-08-15T06:00:00.000Z", raw=3600.0)
+    s2 = _sheet_and_mark(led, w2)
+    assert len(s2) == 1 and s2[0]["kamla_hrs_uploaded"] == 1.0
+    assert "LATE ARRIVAL" in capsys.readouterr().err
+    # window 3: counted once, never again
+    s3 = _sheet_and_mark(
+        led, ("2026-08-16T06:45:22+00:00", "2026-08-17T06:45:22+00:00"))
+    assert s3 == []
+    led.close()
+
+
+def test_late_arrival_undownloaded_at_generation_counted_once(tmp_path):
+    """d3/r4 route 1: uploaded in window 1 but not yet downloaded (raw
+    NULL) at generation — hours surface on window 2's sheet, once."""
+    from pipeline.ledger import Ledger
+    led = Ledger(tmp_path / "l.db")
+    w1 = ("2026-08-14T06:45:22+00:00", "2026-08-15T06:45:22+00:00")
+    w2 = ("2026-08-15T06:45:22+00:00", "2026-08-16T06:45:22+00:00")
+    _mk_root(led, "2026-08-15T05-00-00Z_kamla_c_0000000000000fb1",
+             "2026-08-15T05:00:00.000Z", raw=None)     # undownloaded
+    s1 = _sheet_and_mark(led, w1)
+    assert s1 == [] or s1[0]["kamla_hrs_uploaded"] == 0.0
+    led.update("2026-08-15T05-00-00Z_kamla_c_0000000000000fb1",
+               duration_raw_s=1800.0)                  # download finishes
+    s2 = _sheet_and_mark(led, w2)
+    assert len(s2) == 1 and s2[0]["kamla_hrs_uploaded"] == 0.5
+    s3 = _sheet_and_mark(
+        led, ("2026-08-16T06:45:22+00:00", "2026-08-17T06:45:22+00:00"))
+    assert s3 == []
+    led.close()
+
+
+def test_uploaded_hours_conservation_invariant(tmp_path):
+    """The family-killer invariant (d3): the sum of uploaded hours across
+    ALL sheets equals the sum of duration_raw_s over all countable
+    non-dup/quarantined roots — nothing dropped, nothing doubled."""
+    from pipeline.ledger import Ledger
+    led = Ledger(tmp_path / "l.db")
+    windows = [
+        ("2026-08-14T06:45:22+00:00", "2026-08-15T06:45:22+00:00"),
+        ("2026-08-15T06:45:22+00:00", "2026-08-16T06:45:22+00:00"),
+        ("2026-08-16T06:45:22+00:00", "2026-08-17T06:45:22+00:00")]
+    # a mix: on-time, late-completing, late-downloaded, next-window
+    _mk_root(led, "2026-08-14T07-00-00Z_kamla_c_0000000000000fb2",
+             "2026-08-14T07:00:00.000Z", raw=3600.0)   # on time, w1
+    _mk_root(led, "2026-08-15T04-00-00Z_kamla_c_0000000000000fb3",
+             "2026-08-15T04:00:00.000Z", raw=None)     # in w1, probed later
+    _mk_root(led, "2026-08-15T09-00-00Z_kamla_c_0000000000000fb4",
+             "2026-08-15T09:00:00.000Z", raw=900.0)    # w2 on time
+    total = 0.0
+    for i, w in enumerate(windows):
+        if i == 1:   # the slow download completes between sends
+            led.update("2026-08-15T04-00-00Z_kamla_c_0000000000000fb3",
+                       duration_raw_s=1800.0)
+        for row in _sheet_and_mark(led, w):
+            total += row["total_uploaded_hours"]
+    led.close()
+    assert total == round((3600 + 1800 + 900) / 3600.0, 2)  # 1.75, once
 
 
 def test_sheet_suppresses_no_activity_rows(tmp_path):
@@ -438,6 +523,9 @@ def test_sheet_suppresses_no_activity_rows(tmp_path):
         drive_ctime="2026-01-01T00:00:00.000Z",     # outside window
         md5_video="m", bytes_=1, state="DISCOVERED")
     led.update(sid, duration_raw_s=3600.0)
+    # ALREADY REPORTED on its own window's sheet — without the stamp this
+    # would now (correctly) surface as a late arrival instead
+    led.update(sid, uploaded_reported_at="2026-01-02T00:00:00+00:00")
     sheet = reports.build_sheet_rows(
         led, datetime.now(C.IST),
         bounds=("2026-06-01T00:00:00+00:00", "2026-06-02T00:00:00+00:00"))

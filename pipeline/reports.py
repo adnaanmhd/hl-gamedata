@@ -224,6 +224,35 @@ def _day_bounds_utc(day_ist: datetime) -> tuple[str, str]:
             (start + timedelta(days=1)).isoformat(timespec="seconds"))
 
 
+def r_countable(root) -> bool:
+    """A root's uploaded-hours are countable once the video was probed."""
+    return root["duration_raw_s"] is not None
+
+
+def mark_uploads_reported(ledger: Ledger, lo: str, hi: str) -> int:
+    """Stamp uploaded_reported_at on every root the just-generated sheet
+    counted (in-window, or late-arrival) whose hours were countable. The
+    stamp is what stops a late arrival being counted twice. Returns the
+    number stamped."""
+    lo_dt, hi_dt = _parse_ts(lo), _parse_ts(hi)
+    if lo_dt is None or hi_dt is None:
+        return 0
+    n = 0
+    now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    for r in ledger.db.execute(
+            "SELECT session_id, drive_ctime, created_at, duration_raw_s,"
+            " uploaded_reported_at FROM sessions WHERE parent_id IS NULL"
+            " AND player_email != '' AND uploaded_reported_at IS NULL"
+            " AND state NOT IN ('DUPLICATE','QUARANTINED')").fetchall():
+        if r["duration_raw_s"] is None:
+            continue
+        up = _parse_ts(r["drive_ctime"]) or _parse_ts(r["created_at"])
+        if up is not None and up < hi_dt:      # in-window OR late arrival
+            ledger.update(r["session_id"], uploaded_reported_at=now)
+            n += 1
+    return n
+
+
 def _parse_ts(v: str | None) -> datetime | None:
     """Normalize the ledger's two timestamp dialects to aware datetimes:
     drive_ctime is RFC3339 with millis + Z ('…T11:08:34.413Z') while
@@ -267,7 +296,7 @@ def build_sheet_rows(ledger: Ledger, day_ist: datetime,
     rows = ledger.db.execute(
         "SELECT session_id, game, operator_email, player_email, parent_id,"
         " state, drive_ctime, created_at, duration_raw_s,"
-        " duration_delivered_s, reasons_json"
+        " duration_delivered_s, reasons_json, uploaded_reported_at"
         " FROM sessions WHERE player_email != ''").fetchall()
     children: dict[str, list] = {}
     for r in rows:
@@ -295,9 +324,24 @@ def build_sheet_rows(ledger: Ledger, day_ist: datetime,
                 print(f"[sheet] {root['session_id']}: blank/unparseable "
                       f"drive_ctime — windowing upload on created_at",
                       file=sys.stderr)
-        if up is None or lo_dt is None or hi_dt is None \
-                or not (lo_dt <= up < hi_dt):
+        if up is None or lo_dt is None or hi_dt is None:
             continue
+        in_window = lo_dt <= up < hi_dt
+        # LATE-ARRIVAL GUARD (d3/review-r4): a root whose cohort window
+        # has already been reported (up < lo) but which no sheet has
+        # counted yet — folder completed after its MIN-file-ctime stamp,
+        # or download finished after generation — joins the CURRENT
+        # window instead of vanishing. Requires countable hours (raw
+        # probed); the send site marks what it counted.
+        late = (not in_window and up < lo_dt
+                and r_countable(root) and not root["uploaded_reported_at"])
+        if not in_window and not late:
+            continue
+        if late:
+            print(f"[sheet] LATE ARRIVAL: {root['session_id']} uploaded "
+                  f"{root['drive_ctime'] or root['created_at']} — its "
+                  f"window was already reported; counted in the current "
+                  f"sheet (conservation)", file=sys.stderr)
         g_root = game_col.get(root["game"] or "")
         if g_root is not None:
             bucket(root)[f"{g_root}_hrs_uploaded"] += \
