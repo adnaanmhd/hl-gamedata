@@ -649,7 +649,11 @@ exactly, zero double-DELIVERED, hours once, no stub rrd shipped, rrd sampling 5/
 both systemd timers armed; first scheduled fire observed 16:30 IST. R22 ramp decision:
 HOLD at 8 workers — the stage gauge is validation-bound but loadavg > vCPUs during
 validation bursts; ramp to 10 only after a CPU%-based (not loadavg) reading on a full
-batch. Residual wart filed to the review loop: a batch emptied by kill-regroup is never
+batch. **Reading taken 08-15 ~21:50 IST** (post-r5 tick, full overlap in flight —
+b15 downloading, b14 validated+uploading, 8 workers): **94.5% busy over a 60 s
+/proc/stat sample across 16 vCPUs** → the R22 "<~90% sustained" ramp condition is
+NOT met; **HOLD at 8 stands, now data-backed** (Adnaan acknowledged the reading
+requirement same evening). Re-sample before any future ramp attempt. Residual wart filed to the review loop: a batch emptied by kill-regroup is never
 finish_batch()ed (observed batch_no=2). Tests after every step:
 `PYTHONPATH=. uv run --with pytest --with numpy --with opencv-python-headless --with rerun-sdk
 pytest pipeline/tests translator/tests -q` (Mac AND VM from step 10 on; the extra `--with`s are
