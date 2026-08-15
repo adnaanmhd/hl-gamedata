@@ -52,7 +52,7 @@ chmod 600 "$HOME/.config/rclone/rclone.conf"
 
 # --- systemd units (§7.7): template + install, do NOT enable here ---------
 UNITS="$HOME/hl-gamedata/pipeline/systemd"
-for u in hl-pipeline.service hl-pipeline.timer hl-backup.service hl-backup.timer; do
+for u in hl-pipeline.service hl-pipeline.timer hl-backup.service hl-backup.timer hl-pipeline-alert.service; do
   sed -e "s|__USER__|$ME|g" -e "s|__HOME__|$HOME|g" -e "s|__BUCKET__|$BUCKET|g" \
     "$UNITS/$u.in" | sudo tee "/etc/systemd/system/$u" >/dev/null
 done

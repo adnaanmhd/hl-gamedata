@@ -157,7 +157,18 @@ def deliver_session(cfg: C.Config, ledger: Ledger, session_id: str, *,
     game = row["game"]
     stage_dir, sampled = stage_session(cfg, session_id, game,
                                        dest_prefix=dest_prefix)
-    if not sampled:
+    if row["state"] in ("PACKAGED", "UPLOADED"):
+        # resume past READY: the sampling decision is already recorded —
+        # and possibly already uploaded. The base draw is deterministic,
+        # but the §1.4 floor branch below depends on delivery counts that
+        # changed since; re-rolling could flip the ledger to 0 while the
+        # rrd pair sits on Drive II (review-r1 #25). Honor the record.
+        want = bool(row["rrd_sampled"])
+        if want and not sampled:
+            rrdmod.write_script(stage_dir)
+            rrdmod.generate(stage_dir)
+        sampled = want
+    elif not sampled:
         # spec §1.4 floor: the deterministic 20% draw can undershoot on
         # small daily counts — force-sample when today's delivered set for
         # this game would drop below 15% sampled

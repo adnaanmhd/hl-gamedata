@@ -2,6 +2,8 @@
 Description=HL Phase-1 gaming pipeline run (R8: 30-min tick, queue-drain-then-exit)
 Wants=network-online.target
 After=network-online.target
+# a crash-looping run must not stay silent in journald (review-r1 #31)
+OnFailure=hl-pipeline-alert.service
 
 [Service]
 Type=oneshot

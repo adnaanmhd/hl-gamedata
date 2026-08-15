@@ -18,9 +18,11 @@ from __future__ import annotations
 import csv
 import importlib.util
 import json
+import os
 import re
 import shutil
 import sys
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -757,9 +759,40 @@ def _seed_shift_record(work_dir: Path) -> None:
             continue
         su = round(k * frame_us)
         if matches(su):
-            existing[work_dir.name] = {"shift_us": su, "inferred": True}
-            report_path.write_text(json.dumps(existing, indent=2))
+            _locked_report_update(report_path, work_dir.name,
+                                  {"shift_us": su, "inferred": True})
             return
+
+
+def _locked_report_update(report_path: Path, name: str,
+                          record: dict) -> None:
+    """Merge one entry into the SHARED work-root translation_report.json.
+    Up to 8 validation workers race this file; a bare read-modify-write
+    loses entries and the lost shift makes qa-v2 spuriously FAIL sync on
+    revalidation (review-r1 #8). mkdir is the portable atomic lock; on
+    timeout we write anyway — worst case equals the pre-lock behavior."""
+    lock = report_path.parent / (report_path.name + ".lock")
+    held = False
+    for _ in range(100):                     # <=5 s
+        try:
+            os.mkdir(lock)
+            held = True
+            break
+        except FileExistsError:
+            time.sleep(0.05)
+    try:
+        try:
+            existing = json.loads(report_path.read_text())
+        except (FileNotFoundError, json.JSONDecodeError):
+            existing = {}
+        existing[name] = record
+        report_path.write_text(json.dumps(existing, indent=2))
+    finally:
+        if held:
+            try:
+                os.rmdir(lock)
+            except OSError:
+                pass
 
 
 def _write_verdict(dossier_dir: Path, session_id: str, res: MapResult) -> None:

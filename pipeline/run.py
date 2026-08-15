@@ -90,7 +90,10 @@ def _validate_worker(args: dict) -> dict:
     # R23 run-level stickiness: start at the parent-injected rung (spawn
     # workers are fresh interpreters — module state alone would reset every
     # pool generation) and report the ending rung back for the parent's max.
-    vlmmod._rung = int(args.get("vlm_rung", 0))
+    # max(), not assignment: pool processes serve many jobs, and a rung
+    # climbed on an earlier job in this generation must not be clobbered
+    # back to the batch-start value (review-r1 #11).
+    vlmmod._rung = max(vlmmod._rung, int(args.get("vlm_rung", 0)))
     try:
         res = validate_session(
             Path(args["work_dir"]), Path(args["dossier_dir"]),
@@ -113,11 +116,16 @@ def _validate_worker(args: dict) -> dict:
 
 # ------------------------------------------------------------ run phases
 
+_ALERT_LOCK = threading.Lock()
+
+
 def _alert(cfg: C.Config, text: str, sent: list[str]) -> None:
-    """Telegram alert; failures are logged, never fatal. Deduped per run."""
-    if text in sent:
-        return
-    sent.append(text)
+    """Telegram alert; failures are logged, never fatal. Deduped per run.
+    The lock makes check-then-append atomic across D/V/U threads."""
+    with _ALERT_LOCK:
+        if text in sent:
+            return
+        sent.append(text)
     try:
         telegram.send_message(cfg, f"⚠️ {text}")
     except telegram.TelegramError as e:
@@ -239,12 +247,19 @@ def _validate_phase(cfg, ledger, sids, alerts, *, workers: int) -> None:
                                       if x["blocking"]))
 
 
-def _fix_phase(cfg, ledger, sids, alerts, *, workers: int) -> list[str]:
+def _fix_phase(cfg, ledger, sids, alerts, *, workers: int,
+               children_sink=None) -> list[str]:
     """Fix FIX_QUEUED sessions (≤2 attempts each, R2); returns new child
-    session ids created by splits."""
+    session ids created by splits. `children_sink` (a set) is told about
+    every child the moment its ledger row exists, so the driver's
+    `attempted` set can never race D into claiming a child this run
+    (review-r1 #10)."""
     children_created: list[str] = []
     for _pass in range(C.FIX_RETRIES):
-        todo = [s for s in sids
+        # children get their own fix passes within the run — scanning only
+        # the original sids left bin-2 children stranded in FIX_QUEUED and
+        # their batch open (review-r1 #18/#21)
+        todo = [s for s in sids + children_created
                 if (row := ledger.get(s))
                 and row["state"] in ("FIX_QUEUED", "FIXING")]
         if not todo:
@@ -252,6 +267,25 @@ def _fix_phase(cfg, ledger, sids, alerts, *, workers: int) -> list[str]:
         for sid in todo:
             row = ledger.get(sid)
             if row["state"] == "FIXING":
+                kids = ledger.db.execute(
+                    "SELECT session_id FROM sessions WHERE parent_id=?",
+                    (sid,)).fetchall()
+                if kids:
+                    # crash landed between child insertion and the parent's
+                    # SPLIT transition: re-validating the parent could
+                    # re-verdict it deliverable and ship the whole video ON
+                    # TOP of its segments (review-r1 #4) — complete the
+                    # split instead, exactly as the pre-kill run would have
+                    for k in kids:
+                        if k["session_id"] not in children_created:
+                            children_created.append(k["session_id"])
+                        if children_sink is not None:
+                            children_sink.add(k["session_id"])
+                    ledger.set_state(sid, "SPLIT",
+                                     f"{len(kids)} segments (completed "
+                                     f"after mid-split crash)")
+                    shutil.rmtree(cfg.work / sid, ignore_errors=True)
+                    continue
                 # crash mid-fix: the copy may be half-fixed and the stored
                 # plan stale — re-running RETRIM/CUT on it would trim real
                 # gameplay twice (review finding #6). Re-validate instead:
@@ -319,6 +353,8 @@ def _fix_phase(cfg, ledger, sids, alerts, *, workers: int) -> list[str]:
                         ledger.update(seg["id"],
                                       duration_raw_s=seg["duration_s"])
                     children_created.append(seg["id"])
+                    if children_sink is not None:
+                        children_sink.add(seg["id"])
                 ledger.set_state(sid, "SPLIT",
                                  f"{len(out['children']['segments'])} "
                                  f"segments"
@@ -518,12 +554,19 @@ def send_daily_report_if_due(cfg: C.Config, ledger: Ledger,
     msg = reports.build_daily_message(d, p)
     try:
         telegram.send_message(cfg, msg)
-        telegram.send_document(cfg, csv_path, caption="payment sheet")
     except telegram.TelegramError as e:
         print(f"[daily-report-undelivered] {e}", file=sys.stderr)
         return False
+    # marker right after the MESSAGE lands: a sheet-send failure (or a kill
+    # between the two sends) must not re-send the whole report next run
+    # (review-r1 #20/#26); the sheet also sits on disk for the GCS sync
     marker.parent.mkdir(parents=True, exist_ok=True)
     marker.touch()
+    try:
+        telegram.send_document(cfg, csv_path, caption="payment sheet")
+    except telegram.TelegramError as e:
+        print(f"[daily-sheet-undelivered] {e} — sheet remains at "
+              f"{csv_path}", file=sys.stderr)
     return True
 
 
@@ -606,6 +649,15 @@ def _overlapped_run(cfg: C.Config, ledger: Ledger, alerts: list[str], *,
     flight = threading.Semaphore(C.MAX_BATCHES_IN_FLIGHT)
     attempted: set[str] = set()
 
+    def _release(b: _Batch) -> None:
+        """Idempotent flight-slot release. EVERY path a batch can take —
+        delivered, left open, thread crash, shutdown drain — must end
+        here exactly once; a leaked slot wedges D in acquire() forever
+        while the process holds the run lock (review-r1 #0/#1/#2)."""
+        if b.slot:
+            b.slot = False
+            flight.release()
+
     d_resume, v_resume, u_resume = _partition_resume(ledger)
     for b in d_resume + v_resume + u_resume:
         attempted.update(b.sids)
@@ -629,34 +681,48 @@ def _overlapped_run(cfg: C.Config, ledger: Ledger, alerts: list[str], *,
                     _alert(cfg, f"disk under {C.DISK_LOW_WATER_GB} GB free "
                                 f"— downloads paused (F7)", alerts)
                     break               # V/U keep draining and wiping
-                flight.acquire()
+                # stop-aware acquire: a timeout-less acquire cannot be
+                # woken by stop.set() and is the deadlock half of the
+                # leaked-slot wedge (review-r1 #0)
+                got = flight.acquire(timeout=1.0)
+                while not got and not stop.is_set():
+                    got = flight.acquire(timeout=1.0)
                 if stop.is_set():
-                    flight.release()
+                    if got:
+                        flight.release()
                     break
-                sids = [s for s in ingest.next_batch(dl)
-                        if s not in attempted]
-                hold_retry = False
-                if not sids:
-                    # nothing new to download: hand HOLD_VLM retries to V
-                    sids = [r["session_id"]
-                            for r in dl.by_state("HOLD_VLM")
-                            if r["session_id"] not in attempted]
-                    sids = sids[:C.BATCH_SIZE]
-                    hold_retry = True
-                if not sids:
-                    flight.release()
-                    break
-                attempted.update(sids)
-                b = _Batch(no=dl.start_batch(sessions=sids), sids=sids,
-                           t0_utc=datetime.now(timezone.utc), slot=True)
-                started += 1
-                if not hold_retry:
-                    t0 = time.monotonic()
-                    _download_phase(cfg, dl, sids, alerts)
-                    b.dl_s = time.monotonic() - t0
-                    print(f"[dl b{b.no}] {len(sids)} session(s) "
-                          f"{b.dl_s / 60:.1f}m")
-                q_dv.put(b)
+                slot_held = True
+                try:
+                    sids = [s for s in ingest.next_batch(
+                                dl, exclude=attempted)]
+                    hold_retry = False
+                    if not sids:
+                        # nothing new to download: HOLD_VLM retries to V
+                        sids = [r["session_id"]
+                                for r in dl.by_state("HOLD_VLM")
+                                if r["session_id"] not in attempted]
+                        sids = sids[:C.BATCH_SIZE]
+                        hold_retry = True
+                    if not sids:
+                        flight.release()
+                        slot_held = False
+                        break
+                    attempted.update(sids)
+                    b = _Batch(no=dl.start_batch(sessions=sids), sids=sids,
+                               t0_utc=datetime.now(timezone.utc), slot=True)
+                    started += 1
+                    if not hold_retry:
+                        t0 = time.monotonic()
+                        _download_phase(cfg, dl, sids, alerts)
+                        b.dl_s = time.monotonic() - t0
+                        print(f"[dl b{b.no}] {len(sids)} session(s) "
+                              f"{b.dl_s / 60:.1f}m")
+                    slot_held = False       # ownership rides with b.slot
+                    q_dv.put(b)
+                except Exception:
+                    if slot_held:
+                        flight.release()
+                    raise
         except Exception as e:
             _alert(cfg, f"download thread crashed: {type(e).__name__}: {e}",
                    alerts)
@@ -697,12 +763,11 @@ def _overlapped_run(cfg: C.Config, ledger: Ledger, alerts: list[str], *,
         if still_open:
             # gate-failed session handed back to V's domain — NEXT run
             # (attempted-set semantics); the batch stays open and its
-            # message fires on the run that finishes it (§6)
+            # message fires on the run that finishes it (§6). The flight
+            # slot is released by u_thread's finally, never here.
             print(f"[up b{b.no}] batch left open — "
                   f"{len(still_open)} session(s) mid-pipeline "
                   f"(e.g. {still_open[0]})")
-            if b.slot:
-                flight.release()
             return
         counts = ul.counts_by_state()
         hours = {g: ul.delivered_hours(g) for g in C.GAMES}
@@ -729,22 +794,35 @@ def _overlapped_run(cfg: C.Config, ledger: Ledger, alerts: list[str], *,
                     cfg, reports.build_batch_message(stats, _pace_now(ul)))
             except telegram.TelegramError as e:
                 print(f"[batch-msg-undelivered] {e}", file=sys.stderr)
-        if b.slot:
-            flight.release()
 
     def u_thread() -> None:
+        """One crash must cost one batch, not the thread: a dead U leaves
+        every queued batch's flight slot unreleased and wedges D, then V,
+        then the whole run — while it still holds the run lock
+        (review-r1 #1). Hence per-batch guard + slot release in finally."""
         ul = Ledger(cfg.ledger_path)
         try:
             for b in u_resume:
-                u_process(ul, b)
+                try:
+                    u_process(ul, b)
+                except Exception as e:
+                    _alert(cfg, f"upload failed for batch {b.no} — will "
+                                f"resume next run: {type(e).__name__}: {e}",
+                           alerts)
+                finally:
+                    _release(b)
             while True:
                 b = q_vu.get()
                 if b is None:
                     break
-                u_process(ul, b)
-        except Exception as e:
-            _alert(cfg, f"upload thread crashed: {type(e).__name__}: {e}",
-                   alerts)
+                try:
+                    u_process(ul, b)
+                except Exception as e:
+                    _alert(cfg, f"upload failed for batch {b.no} — will "
+                                f"resume next run: {type(e).__name__}: {e}",
+                           alerts)
+                finally:
+                    _release(b)
         finally:
             ul.close()
 
@@ -756,7 +834,11 @@ def _overlapped_run(cfg: C.Config, ledger: Ledger, alerts: list[str], *,
     def v_process(b: _Batch) -> None:
         t0 = time.monotonic()
         _validate_phase(cfg, ledger, b.sids, alerts, workers=cfg.workers)
-        kids = _fix_phase(cfg, ledger, b.sids, alerts, workers=cfg.workers)
+        # children_sink=attempted: a child that lands HOLD_VLM mid-fix must
+        # already be in `attempted` when D's hold-retry branch looks, or
+        # the same session rides two live batches (review-r1 #10)
+        kids = _fix_phase(cfg, ledger, b.sids, alerts, workers=cfg.workers,
+                          children_sink=attempted)
         b.sids = b.sids + kids
         attempted.update(kids)
         b.val_s = time.monotonic() - t0
@@ -768,12 +850,27 @@ def _overlapped_run(cfg: C.Config, ledger: Ledger, alerts: list[str], *,
 
     try:
         for b in v_resume:
-            v_process(b)
+            try:
+                v_process(b)
+            except Exception as e:
+                # one batch's failure must not kill the run: sessions keep
+                # their ledger states and resume next run; the slot dies
+                # here instead of wedging D (review-r1 #2)
+                _alert(cfg, f"validation failed for batch {b.no} — will "
+                            f"resume next run: {type(e).__name__}: {e}",
+                       alerts)
+                _release(b)
         while True:
             item = q_dv.get()
             if item is None:
                 break
-            v_process(item)
+            try:
+                v_process(item)
+            except Exception as e:
+                _alert(cfg, f"validation failed for batch {item.no} — will "
+                            f"resume next run: {type(e).__name__}: {e}",
+                       alerts)
+                _release(item)
             # periodic duties INSIDE the drain loop: a multi-hour backlog
             # run must not sail past 14:00 IST or leave the nightly GCS
             # sync mirroring a stale backup (§6)
@@ -782,9 +879,100 @@ def _overlapped_run(cfg: C.Config, ledger: Ledger, alerts: list[str], *,
             ledger.backup_daily(cfg.backups, keep=C.LEDGER_BACKUP_KEEP)
     finally:
         stop.set()
+        # drain anything D queued that V never consumed — their slots must
+        # die here or dthr.join() below waits on a wedged acquire forever
+        try:
+            while True:
+                leftover = q_dv.get_nowait()
+                if leftover is not None:
+                    _release(leftover)
+        except queue.Empty:
+            pass
         q_vu.put(None)
-        uthr.join()
-        dthr.join()
+        uthr.join(timeout=600)
+        dthr.join(timeout=600)
+        # D may have queued one more batch mid-shutdown (it was inside a
+        # download when stop fired) — sweep again now that it has exited
+        try:
+            while True:
+                leftover = q_dv.get_nowait()
+                if leftover is not None:
+                    _release(leftover)
+        except queue.Empty:
+            pass
+        if uthr.is_alive() or dthr.is_alive():
+            # daemon threads die with the process; the run lock is released
+            # by run()'s finally — next tick starts clean (review-r1 #6)
+            _alert(cfg, "driver thread failed to stop within 10 min — "
+                        "exiting run; state resumes next tick", alerts)
+
+
+def _close_stale_batches(ledger: Ledger) -> None:
+    """Finish any open batch with no member still mid-pipeline. Kill-time
+    regrouping (children became strays, members went terminal in successor
+    batches) and non-RESUMABLE parking (HOLD_VLM/DISCOVERED) both orphan
+    open batches rows forever otherwise (review-r1 #19/#23; observed live
+    as batch_no=2 on go-live day). Bookkeeping close only — no Telegram
+    message; the sessions' hours were reported by the batches that actually
+    delivered them."""
+    for b in ledger.open_batches():
+        try:
+            sids = (json.loads(b["summary_json"] or "{}")
+                    .get("sessions")) or []
+        except json.JSONDecodeError:
+            sids = []
+        rows = [ledger.get(s) for s in sids]
+        if any(r and r["state"] in _MID_PIPELINE for r in rows):
+            continue
+        ledger.finish_batch(b["batch_no"], {
+            "delivered": sum(1 for r in rows
+                             if r and r["state"] == "DELIVERED"),
+            "rejected": sum(1 for r in rows
+                            if r and r["state"] == "REJECTED"),
+            "sessions": sids, "closed_by": "stale-batch-sweep"})
+
+
+def _sweep_terminal_work(cfg: C.Config, ledger: Ledger) -> None:
+    """A kill between the DELIVERED commit and the local wipe leaks work/,
+    -analysis/ and stage dirs forever — resumed runs skip DELIVERED
+    sessions, so nothing ever reclaimed them (review-r1 #22). REJECTED is
+    deliberately excluded: finalize_rejected owns that wipe."""
+    if cfg.work.exists():
+        for p in cfg.work.iterdir():
+            if not p.is_dir():
+                continue
+            sid = p.name[:-len("-analysis")] \
+                if p.name.endswith("-analysis") else p.name
+            row = ledger.get(sid)
+            if row and row["state"] in ("DELIVERED", "SPLIT", "DUPLICATE"):
+                shutil.rmtree(p, ignore_errors=True)
+    if cfg.stage.exists():
+        for pattern in ("*/*/*", "*/*/*/*"):
+            for sdir in cfg.stage.glob(pattern):
+                if not sdir.is_dir():
+                    continue
+                row = ledger.get(sdir.name)
+                if row and row["state"] == "DELIVERED":
+                    shutil.rmtree(sdir, ignore_errors=True)
+
+
+def _upload_ceiling_alert(cfg: C.Config, ledger: Ledger,
+                          alerts: list[str]) -> None:
+    """§5/§13: alert when a rolling 24 h's deliveries approach the external
+    750 GB/user/day Drive cap (alert line at 600 GB). Approximation, stated:
+    `bytes` is the Drive-I source size; delivered volume adds the ~20%
+    rrd sample and small overheads — the 1.25 factor covers it
+    (review-r1 #28)."""
+    lo = (datetime.now(timezone.utc)
+          - timedelta(hours=24)).isoformat(timespec="seconds")
+    row = ledger.db.execute(
+        "SELECT COALESCE(SUM(bytes),0) b FROM sessions "
+        "WHERE state='DELIVERED' AND delivered_at>=?", (lo,)).fetchone()
+    approx_gb = row["b"] * 1.25 / (1024 ** 3)
+    if approx_gb > 600:
+        _alert(cfg, f"Drive upload ceiling: ~{approx_gb:.0f} GB delivered "
+                    f"in the last 24 h — the 750 GB/day SA cap is close "
+                    f"(§5); consider a second delivery SA", alerts)
 
 
 def run(cfg: C.Config, *, max_batches: int = 50,
@@ -806,6 +994,13 @@ def run(cfg: C.Config, *, max_batches: int = 50,
             if res.integrity_flags:
                 for f in res.integrity_flags:
                     print(f"[integrity] {f}")
+            for sid in res.dup_cross:
+                # scan-time cross-dup rejects get their dossier + coaching
+                # + local wipe like every other reject (review-r1 #24)
+                try:
+                    deliver.finalize_rejected(cfg, ledger, sid)
+                except Exception as e:
+                    print(f"[finalize-failed] {sid}: {e}", file=sys.stderr)
         except RuntimeError as e:
             _alert(cfg, f"Drive scan failed: {e}", alerts)
 
@@ -817,6 +1012,9 @@ def run(cfg: C.Config, *, max_batches: int = 50,
             _overlapped_run(cfg, ledger, alerts, max_batches=max_batches,
                             dest_prefix=dest_prefix,
                             send_telegram=send_telegram)
+            _close_stale_batches(ledger)
+            _sweep_terminal_work(cfg, ledger)
+            _upload_ceiling_alert(cfg, ledger, alerts)
             held = ledger.counts_by_state().get("HOLD_VLM", 0)
             if held:
                 _alert(cfg, f"{held} session(s) still HOLD_VLM at end of "
@@ -835,8 +1033,7 @@ def run(cfg: C.Config, *, max_batches: int = 50,
             # the retry cadence (§13)
             resume = [r["session_id"] for r in ledger.by_state(*RESUMABLE)
                       if r["session_id"] not in attempted]
-            batch = resume or [s for s in ingest.next_batch(ledger)
-                               if s not in attempted]
+            batch = resume or ingest.next_batch(ledger, exclude=attempted)
             if not batch:
                 batch = [r["session_id"]
                          for r in ledger.by_state("HOLD_VLM")
@@ -863,6 +1060,9 @@ def run(cfg: C.Config, *, max_batches: int = 50,
                             b, _pace_now(ledger)))
                 except telegram.TelegramError as e:
                     print(f"[batch-msg-undelivered] {e}", file=sys.stderr)
+        _close_stale_batches(ledger)
+        _sweep_terminal_work(cfg, ledger)
+        _upload_ceiling_alert(cfg, ledger, alerts)
         held = ledger.counts_by_state().get("HOLD_VLM", 0)
         if held:
             _alert(cfg, f"{held} session(s) still HOLD_VLM at end of run — "

@@ -336,9 +336,18 @@ def lagging_game(ledger: Ledger) -> str | None:
     return None
 
 
-def next_batch(ledger: Ledger, size: int = C.BATCH_SIZE) -> list[str]:
-    """FIFO by Drive createdTime, lagging game first (§9.4)."""
-    rows = ledger.by_state("DISCOVERED")
+def next_batch(ledger: Ledger, size: int | None = None,
+               exclude: set[str] | frozenset[str] = frozenset()) -> list[str]:
+    """FIFO by Drive createdTime, lagging game first (§9.4). `exclude`
+    (the run's attempted set) is filtered BEFORE the slice: slicing first
+    let a head-of-queue clique of persistent download failures starve the
+    entire intake — every run re-batched only them, emptied the list at
+    the caller's filter, and never reached newer sessions (review-r1 #7).
+    `size` binds at call time, not import time."""
+    if size is None:
+        size = C.BATCH_SIZE
+    rows = [r for r in ledger.by_state("DISCOVERED")
+            if r["session_id"] not in exclude]
     prio = lagging_game(ledger)
     rows.sort(key=lambda r: ((0 if r["game"] == prio else 1),
                              r["drive_ctime"] or "9", r["session_id"]))
@@ -460,11 +469,15 @@ def download(cfg: C.Config, ledger: Ledger, session_id: str) -> str:
         if not stub.exists():
             stub.touch()          # placeholder only — never staged (§12)
 
-    # zip payloads arrive with no Drive-side video md5 — backfill it now so
-    # they sit inside the dedupe rules like everyone else (review-2 #2)
-    if not row["md5_video"] and (dst / "video.mp4").exists():
-        local_md5 = _md5_file(dst / "video.mp4")
-        ledger.update(session_id, md5_video=local_md5)
+    # zip payloads arrive with no Drive-side video md5 — backfill it and
+    # run the dedupe rules here. Re-entrant BY DESIGN: the md5 update and
+    # the dup verdict used to be separable by a kill, after which the
+    # `not md5` guard skipped the check forever (review-r1 #3) — now the
+    # check runs on every completion until the session leaves DOWNLOADING.
+    if (dst / "video.mp4").exists():
+        local_md5 = row["md5_video"] or _md5_file(dst / "video.mp4")
+        if not row["md5_video"]:
+            ledger.update(session_id, md5_video=local_md5)
         dupes = [r for r in ledger.by_md5(local_md5)
                  if r["session_id"] != session_id
                  and r["state"] not in ("QUARANTINED",)]
@@ -475,6 +488,31 @@ def download(cfg: C.Config, ledger: Ledger, session_id: str) -> str:
                 ledger.set_state(session_id, "DUPLICATE",
                                  f"same-player duplicate of "
                                  f"{dupes[0]['session_id']} (zip payload)")
+                shutil.rmtree(dst, ignore_errors=True)
+                return "duplicate"
+            # F3: earliest Drive createdTime wins (review-r1 #9) — with
+            # the shipped-copy exception, and never stomping a session
+            # another driver thread is actively working (§6 ownership):
+            # a later copy is only rejected while still pre-download.
+            shipped = any(r["state"] in ("PACKAGED", "UPLOADED",
+                                         "DELIVERED") for r in dupes)
+            rejectable_losers = [
+                r for r in dupes
+                if r["state"] in ("DISCOVERED", "INCOMPLETE")
+                and (r["drive_ctime"] or "9") > (row["drive_ctime"] or "9")]
+            if not shipped and len(rejectable_losers) == len(dupes):
+                for r in rejectable_losers:
+                    ledger.set_reasons(r["session_id"], [
+                        {"code": "INT_DUP_CROSS", "blocking": True,
+                         "fixable": False, "params": {},
+                         "evidence": f"video md5 identical to "
+                                     f"{session_id} which has earlier "
+                                     f"createdTime (zip payload)"}], 3)
+                    ledger.set_state(
+                        r["session_id"], "REJECTED",
+                        f"cross-identity duplicate — later upload; "
+                        f"earlier copy {session_id} accepted")
+                # this copy is the keeper: fall through to INGESTED
             else:
                 ledger.set_reasons(session_id, [
                     {"code": "INT_DUP_CROSS", "blocking": True,
@@ -484,8 +522,8 @@ def download(cfg: C.Config, ledger: Ledger, session_id: str) -> str:
                     3)
                 ledger.set_state(session_id, "REJECTED",
                                  "cross-identity duplicate (zip payload)")
-            shutil.rmtree(dst, ignore_errors=True)
-            return "duplicate"
+                shutil.rmtree(dst, ignore_errors=True)
+                return "duplicate"
 
     dur = _probe_duration(dst / "video.mp4")
     if dur:

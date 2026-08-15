@@ -1,0 +1,8 @@
+[Unit]
+Description=Telegram alert when a pipeline run fails (review-r1 #31)
+
+[Service]
+Type=oneshot
+User=__USER__
+WorkingDirectory=__HOME__/hl-gamedata
+ExecStart=__HOME__/.local/bin/uv run python -c "from pipeline import config, telegram; telegram.send_message(config.load(), '⚠️ pipeline run FAILED (systemd) — check journalctl -u hl-pipeline')"

@@ -78,10 +78,10 @@ def _driver_fakes(monkeypatch, tl, dl_s=0.05, val_s=0.1, up_s=0.25,
 
     monkeypatch.setattr(runmod, "_download_phase", fake_download)
     monkeypatch.setattr(runmod, "_validate_phase",
-                        lambda cfg, ledger, sids, alerts, workers:
+                        lambda cfg, ledger, sids, alerts, workers, **kw:
                         fake_validate(cfg, ledger, sids, alerts, workers))
     monkeypatch.setattr(runmod, "_fix_phase",
-                        lambda cfg, ledger, sids, alerts, workers:
+                        lambda cfg, ledger, sids, alerts, workers, **kw:
                         fake_fix(cfg, ledger, sids, alerts, workers))
     monkeypatch.setattr(runmod, "_deliver_phase", fake_deliver)
     monkeypatch.setattr(runmod.ingest, "scan",
@@ -101,12 +101,11 @@ def test_overlap_proof(cfg, monkeypatch):
     led.close()
     tl = []
     _driver_fakes(monkeypatch, tl)
-    # one-session batches: next_batch's `size` default binds C.BATCH_SIZE
-    # at import time, so patching the constant cannot shrink batches —
-    # wrap the real function instead (production always passes no size)
+    # one-session batches: wrap the real function so the driver's calls
+    # (which pass exclude=attempted) get size=1
     orig_next = ingest.next_batch
     monkeypatch.setattr(runmod.ingest, "next_batch",
-                        lambda led: orig_next(led, size=1))
+                        lambda led, **kw: orig_next(led, size=1, **kw))
     assert runmod.run(cfg, send_telegram=False) == 0
     led = Ledger(cfg.ledger_path)
     assert all(led.get(s)["state"] == "DELIVERED" for s in SIDS[:5])
@@ -305,6 +304,160 @@ def test_partition_resume_groups_and_routes(cfg):
                           (stray_batch.no,)).fetchone()
     assert json.loads(srow["summary_json"])["sessions"] == ["stray"]
     assert u_q == []
+    led.close()
+
+
+def test_u_crash_releases_slot_and_next_run_delivers(cfg, monkeypatch):
+    """review-r1 #1/#12: one U-batch crash must cost that batch only —
+    the run still completes (no flight-slot wedge, no held lock), the
+    sessions survive in READY, and the NEXT run delivers them."""
+    monkeypatch.setattr(C, "PIPELINE_OVERLAP", True)
+    led = Ledger(cfg.ledger_path)
+    _seed_discovered(led, [SIDS[0]])
+    led.close()
+    tl = []
+    _driver_fakes(monkeypatch, tl, dl_s=0.0, val_s=0.0, up_s=0.0)
+    alerts_seen = []
+    monkeypatch.setattr(runmod, "_alert",
+                        lambda c, t, s: alerts_seen.append(t))
+
+    def boom(cfg_, ledger_, sids, alerts, dest_prefix=C.VENDOR):
+        raise RuntimeError("upload exploded")
+    monkeypatch.setattr(runmod, "_deliver_phase", boom)
+    assert runmod.run(cfg, send_telegram=False) == 0     # completes: no wedge
+    led = Ledger(cfg.ledger_path)
+    assert led.get(SIDS[0])["state"] == "READY"
+    assert len(led.open_batches()) == 1                  # open, not lost
+    led.close()
+    assert any("upload failed for batch" in a for a in alerts_seen)
+
+    _driver_fakes(monkeypatch, tl, dl_s=0.0, val_s=0.0, up_s=0.0)
+    assert runmod.run(cfg, send_telegram=False) == 0
+    led = Ledger(cfg.ledger_path)
+    assert led.get(SIDS[0])["state"] == "DELIVERED"
+    assert led.open_batches() == []
+    led.close()
+
+
+def test_v_crash_releases_slot_and_next_run_recovers(cfg, monkeypatch):
+    """review-r1 #2: a validation-side crash on one batch alerts, releases
+    the flight slot, and the run exits cleanly; the batch resumes next
+    run from its ledger states."""
+    monkeypatch.setattr(C, "PIPELINE_OVERLAP", True)
+    led = Ledger(cfg.ledger_path)
+    _seed_discovered(led, [SIDS[0]])
+    led.close()
+    tl = []
+    _driver_fakes(monkeypatch, tl, dl_s=0.0, val_s=0.0, up_s=0.0)
+    alerts_seen = []
+    monkeypatch.setattr(runmod, "_alert",
+                        lambda c, t, s: alerts_seen.append(t))
+    monkeypatch.setattr(
+        runmod, "_validate_phase",
+        lambda cfg_, ledger_, sids, alerts, workers, **kw:
+        (_ for _ in ()).throw(RuntimeError("validate exploded")))
+    assert runmod.run(cfg, send_telegram=False) == 0
+    led = Ledger(cfg.ledger_path)
+    assert led.get(SIDS[0])["state"] == "INGESTED"       # downloaded, parked
+    led.close()
+    assert any("validation failed for batch" in a for a in alerts_seen)
+
+    _driver_fakes(monkeypatch, tl, dl_s=0.0, val_s=0.0, up_s=0.0)
+    assert runmod.run(cfg, send_telegram=False) == 0
+    led = Ledger(cfg.ledger_path)
+    assert led.get(SIDS[0])["state"] == "DELIVERED"
+    led.close()
+
+
+def test_d_crash_alerts_and_vu_still_drain(cfg, monkeypatch):
+    """review-r1 #13: a D-thread crash alerts and poisons the queue; V/U
+    still drain what exists and the run exits instead of wedging."""
+    monkeypatch.setattr(C, "PIPELINE_OVERLAP", True)
+    led = Ledger(cfg.ledger_path)
+    _seed_discovered(led, [SIDS[0]])
+    led.insert_session(
+        session_id=SIDS[5], game="kamla", operator_email="Op",
+        player_email="p@x.com", drive_path=f"kamla/Op/p@x.com/{SIDS[5]}",
+        drive_ctime="2026-08-14T10:09:00.000Z", md5_video="m9", bytes_=1,
+        state="READY")
+    led.close()
+    tl = []
+    _driver_fakes(monkeypatch, tl, dl_s=0.0, val_s=0.0, up_s=0.0)
+    alerts_seen = []
+    monkeypatch.setattr(runmod, "_alert",
+                        lambda c, t, s: alerts_seen.append(t))
+    monkeypatch.setattr(
+        runmod.ingest, "next_batch",
+        lambda led_, **kw: (_ for _ in ()).throw(RuntimeError("scan died")))
+    assert runmod.run(cfg, send_telegram=False) == 0
+    led = Ledger(cfg.ledger_path)
+    assert led.get(SIDS[5])["state"] == "DELIVERED"      # U drained resume
+    led.close()
+    assert any("download thread crashed" in a for a in alerts_seen)
+
+
+def test_hold_vlm_retries_next_run_via_d_hold_branch(cfg, monkeypatch):
+    """review-r1 #15: a HOLD_VLM session with local media is re-picked by
+    D's hold branch on a later run and delivers once the sweep succeeds."""
+    monkeypatch.setattr(C, "PIPELINE_OVERLAP", True)
+    led = Ledger(cfg.ledger_path)
+    _seed_discovered(led, [SIDS[0]])
+    led.set_state(SIDS[0], "INGESTED")
+    led.set_state(SIDS[0], "HOLD_VLM", "sweep failed last run")
+    led.close()
+    tl = []
+    _driver_fakes(monkeypatch, tl, dl_s=0.0, val_s=0.0, up_s=0.0)
+    assert runmod.run(cfg, send_telegram=False) == 0
+    led = Ledger(cfg.ledger_path)
+    assert led.get(SIDS[0])["state"] == "DELIVERED"
+    assert led.open_batches() == []
+    led.close()
+
+
+def test_partition_resume_split_parent_child_becomes_stray(cfg):
+    """review-r1 #29: after a kill, a child whose parent is terminal SPLIT
+    (non-RESUMABLE) and who is in no batch summary must still be resumed —
+    as a stray batch routed to V."""
+    led = Ledger(cfg.ledger_path)
+    led.insert_session(
+        session_id="par", game="kamla", operator_email="o",
+        player_email="p@x.com", drive_path="kamla/o/p/par",
+        drive_ctime="2026", md5_video="m", bytes_=1, state="INGESTED")
+    led.set_state("par", "SPLIT", "2 segments")
+    led.insert_session(
+        session_id="par-p1", game="kamla", operator_email="o",
+        player_email="p@x.com", drive_path="kamla/o/p/par",
+        drive_ctime="2026", md5_video="", bytes_=1, state="INGESTED",
+        parent_id="par")
+    d_q, v_q, u_q = runmod._partition_resume(led)
+    assert d_q == [] and u_q == []
+    assert len(v_q) == 1 and v_q[0].sids == ["par-p1"]
+    led.close()
+
+
+def test_close_stale_batches_closes_emptied_and_parked(cfg):
+    """review-r1 #19/#23: a batch whose members all went terminal via
+    kill-regroup successors (or sit parked in HOLD_VLM) is finished by the
+    end-of-run sweep; one with a mid-pipeline member stays open."""
+    led = Ledger(cfg.ledger_path)
+    for sid, st in (("t1", "DELIVERED"), ("t2", "REJECTED"),
+                    ("h1", "HOLD_VLM"), ("m1", "READY")):
+        led.insert_session(
+            session_id=sid, game="kamla", operator_email="o",
+            player_email="p@x.com", drive_path=f"kamla/o/p/{sid}",
+            drive_ctime="2026", md5_video=sid, bytes_=1, state=st)
+    b_done = led.start_batch(sessions=["t1", "t2"])
+    b_hold = led.start_batch(sessions=["h1"])
+    b_live = led.start_batch(sessions=["m1"])
+    runmod._close_stale_batches(led)
+    opens = [b["batch_no"] for b in led.open_batches()]
+    assert opens == [b_live]
+    fin = led.db.execute("SELECT summary_json FROM batches WHERE batch_no=?",
+                         (b_done,)).fetchone()
+    s = json.loads(fin["summary_json"])
+    assert s["delivered"] == 1 and s["rejected"] == 1
+    assert s["closed_by"] == "stale-batch-sweep"
+    assert b_hold not in opens
     led.close()
 
 
