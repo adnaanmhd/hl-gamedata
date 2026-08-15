@@ -28,12 +28,17 @@ command -v rclone >/dev/null 2>&1 || curl -fsS https://rclone.org/install.sh | s
 [ -x "$HOME/.local/bin/uv" ] || curl -LsSf https://astral.sh/uv/install.sh | sh
 
 mkdir -p "$HOME/hl-pipeline/logs" "$HOME/.config/hl-gamedata" "$HOME/.config/rclone"
+# enforce key-file perms regardless of how they were copied (review-r2 #29)
+chmod 600 "$HOME/.config/hl-gamedata/"* 2>/dev/null || true
 
 # --- rclone remotes (§7.4): deterministic content, safe to overwrite ------
+# drive-collect is scope=drive.readonly: R6 says Drive I is READ-ONLY
+# forever — enforce it at the token level, not just by discipline
+# (review-r2 #39)
 cat > "$HOME/.config/rclone/rclone.conf" <<EOF
 [drive-collect]
 type = drive
-scope = drive
+scope = drive.readonly
 service_account_file = $HOME/.config/hl-gamedata/sa.json
 team_drive = 0AILWuC6lcBKLUk9PVA
 
@@ -52,7 +57,7 @@ chmod 600 "$HOME/.config/rclone/rclone.conf"
 
 # --- systemd units (§7.7): template + install, do NOT enable here ---------
 UNITS="$HOME/hl-gamedata/pipeline/systemd"
-for u in hl-pipeline.service hl-pipeline.timer hl-backup.service hl-backup.timer hl-pipeline-alert.service; do
+for u in hl-pipeline.service hl-pipeline.timer hl-backup.service hl-backup.timer hl-pipeline-alert.service hl-backup-alert.service; do
   sed -e "s|__USER__|$ME|g" -e "s|__HOME__|$HOME|g" -e "s|__BUCKET__|$BUCKET|g" \
     "$UNITS/$u.in" | sudo tee "/etc/systemd/system/$u" >/dev/null
 done

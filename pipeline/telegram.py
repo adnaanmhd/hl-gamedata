@@ -36,8 +36,10 @@ def send_message(cfg: C.Config, text: str) -> None:
     except Exception as e:
         raise TelegramError(f"sendMessage failed: {type(e).__name__}") from e
     if not resp.get("ok"):
+        # redact BEFORE truncating — truncation first could leave a
+        # partial token in the error string (review-r2 #28)
         raise TelegramError(f"sendMessage rejected: "
-                            f"{str(resp)[:200].replace(cfg.tg_token, '***')}")
+                            f"{str(resp).replace(cfg.tg_token, '***')[:200]}")
 
 
 def send_document(cfg: C.Config, path: Path, caption: str = "") -> None:

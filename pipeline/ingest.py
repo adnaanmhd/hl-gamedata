@@ -240,6 +240,23 @@ def scan(cfg: C.Config, ledger: Ledger,
                         f"{ds.session_id}: re-upload with different md5 while "
                         f"state={existing['state']} — not superseding "
                         f"(supersede applies after a reject only)")
+            elif ds.payload == "zip" and existing["state"] == "REJECTED" \
+                    and (total_bytes != (existing["bytes"] or 0)
+                         or (ds.ctime or "") >
+                         (existing["drive_ctime"] or "")):
+                # zip payloads carry no Drive-side video md5, which made
+                # the md5-based supersede unreachable — a corrected
+                # re-upload after a reject was silently ignored forever
+                # (review-r2 #9). Changed bytes or a newer createdTime is
+                # the re-upload signal; the download-time dedupe re-checks
+                # the fresh md5 against everyone else, so the review-2 #1
+                # side-door stays closed.
+                ledger.supersede(ds.session_id, new_md5="",
+                                 new_bytes=total_bytes,
+                                 new_ctime=ds.ctime,
+                                 dossier_root=cfg.dossiers)
+                res.superseded.append(ds.session_id)
+                res.discovered.append(ds.session_id)
             continue
 
         # cross/same-player duplicate detection on the Drive-side video md5
@@ -269,15 +286,35 @@ def scan(cfg: C.Config, ledger: Ledger,
                 earliest = min(dupes, key=lambda r: r["drive_ctime"] or "9")
                 is_earlier = (earliest["drive_ctime"] or "9") <= \
                     (ds.ctime or "9")
-                shipped = earliest["state"] in ("DELIVERED", "UPLOADED",
-                                                "PACKAGED")
-                if is_earlier or shipped:
-                    why = (f"kept earlier upload {earliest['session_id']}"
-                           if is_earlier else
-                           f"kept already-{earliest['state'].lower()} later "
-                           f"upload {earliest['session_id']} — this copy "
-                           f"has the earlier createdTime but the other "
-                           f"already shipped")
+                # shipped across ALL dupes, and SPLIT counts: a split
+                # parent's segments are already delivered — clobbering it
+                # and re-queuing the same bytes double-delivers
+                # (review-r2 #5)
+                shipped = any(r["state"] in ("DELIVERED", "UPLOADED",
+                                             "PACKAGED", "SPLIT")
+                              for r in dupes)
+                # the existing copy may only be un-picked while still
+                # pre-download; anything further along keeps its state
+                # (F3 deviation recorded below)
+                clobberable = earliest["state"] in ("DISCOVERED",
+                                                    "INCOMPLETE")
+                if is_earlier or shipped or not clobberable:
+                    if is_earlier:
+                        why = f"kept earlier upload {earliest['session_id']}"
+                    elif shipped:
+                        why = (f"kept already-shipped later upload "
+                               f"{earliest['session_id']} — this copy has "
+                               f"the earlier createdTime but the other "
+                               f"already shipped")
+                    else:
+                        why = (f"kept in-flight later upload "
+                               f"{earliest['session_id']} (state "
+                               f"{earliest['state']}) — F3 deviation: this "
+                               f"copy has the earlier createdTime")
+                        res.integrity_flags.append(
+                            f"F3 deviation: {ds.session_id} is earlier but "
+                            f"{earliest['session_id']} already in flight — "
+                            f"kept the in-flight copy")
                     ledger.insert_session(
                         session_id=ds.session_id, game=ds.game,
                         operator_email=ds.operator_email,
@@ -357,7 +394,16 @@ def next_batch(ledger: Ledger, size: int | None = None,
 # ---------------------------------------------------------------- download
 
 class DownloadError(Exception):
-    pass
+    """kind routes the caller's response (review-r2 #0/#10):
+    - "transient": network/rclone — re-queue as DISCOVERED, retry next run
+    - "zip_incomplete": multi-part zip mid-upload — retryable (R4)
+    - "quarantine": permanent (bad checksum, unusable archive, garbage
+      payload) — retrying can never succeed; QUARANTINED + alert, Drive I
+      original untouched for a human."""
+
+    def __init__(self, msg: str, *, kind: str = "transient"):
+        super().__init__(msg)
+        self.kind = kind
 
 
 def _unzip_payload(work_dir: Path) -> None:
@@ -384,7 +430,17 @@ def _unzip_payload(work_dir: Path) -> None:
                 with z.open(n) as src, (work_dir / base).open("wb") as dst:
                     shutil.copyfileobj(src, dst)
     except zipfile.BadZipFile as e:
-        raise DownloadError(f"unreadable zip payload: {e}") from e
+        # possibly a multi-part upload still missing parts — retryable
+        raise DownloadError(f"unreadable zip payload: {e}",
+                            kind="zip_incomplete") from e
+    except (NotImplementedError, RuntimeError, OSError) as e:
+        # Deflate64 (Windows Explorer >2 GB zips raise NotImplementedError),
+        # encrypted members (RuntimeError), disk errors: retrying can never
+        # succeed, and before this carried a kind it escaped the caller's
+        # except entirely and killed the D thread every run (review-r2 #0)
+        raise DownloadError(
+            f"unusable zip archive ({type(e).__name__}): {e}",
+            kind="quarantine") from e
     for p in parts:
         p.unlink(missing_ok=True)
     (work_dir / "_reassembled.zip").unlink(missing_ok=True)
@@ -440,14 +496,19 @@ def download(cfg: C.Config, ledger: Ledger, session_id: str) -> str:
             shutil.rmtree(dst, ignore_errors=True)
             dst.mkdir(parents=True, exist_ok=True)
             if attempt == 2:
-                raise DownloadError("video md5 mismatch after 3 attempts")
+                raise DownloadError("video md5 mismatch after 3 attempts",
+                                    kind="quarantine")
         else:
             break
 
     missing = [f for f in C.REQUIRED_FILES if not (dst / f).exists()]
     kind = sniff_payload(dst)
     if kind == "garbage":
-        raise DownloadError(f"unrecognizable payload (missing: {missing})")
+        # a complete, checksum-verified download that still sniffs as
+        # garbage can never improve by retrying — before this carried a
+        # kind it re-entered DISCOVERED forever (review-r2 #10, R4/R2)
+        raise DownloadError(f"unrecognizable payload (missing: {missing})",
+                            kind="quarantine")
     if missing and kind == "v2":
         # sidecars may be absent post-unzip; completeness rule still applies
         ledger.incomplete_seen(row["drive_path"], missing)
@@ -478,9 +539,15 @@ def download(cfg: C.Config, ledger: Ledger, session_id: str) -> str:
         local_md5 = row["md5_video"] or _md5_file(dst / "video.mp4")
         if not row["md5_video"]:
             ledger.update(session_id, md5_video=local_md5)
+        # adjudicated LOSERS (REJECTED/DUPLICATE) are excluded: when the
+        # scan already picked this copy as the winner, seeing its beaten
+        # duplicate here must not kill the keeper — that ended with BOTH
+        # copies terminal and the footage never delivered (review-r2 #2);
+        # exclusion also makes crash-mid-dedupe resume converge (#22)
         dupes = [r for r in ledger.by_md5(local_md5)
                  if r["session_id"] != session_id
-                 and r["state"] not in ("QUARANTINED",)]
+                 and r["state"] not in ("QUARANTINED", "REJECTED",
+                                        "DUPLICATE")]
         if dupes:
             same_player = any(r["player_email"] == row["player_email"]
                               for r in dupes)

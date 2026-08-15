@@ -779,6 +779,15 @@ def _locked_report_update(report_path: Path, name: str,
             held = True
             break
         except FileExistsError:
+            # a worker SIGKILLed while holding the lock would disable it
+            # forever (review-r2 #43): a lock older than 120 s is orphaned
+            # (the guarded section is milliseconds) — break it
+            try:
+                if time.time() - lock.stat().st_mtime > 120:
+                    os.rmdir(lock)
+                    continue
+            except OSError:
+                pass
             time.sleep(0.05)
     try:
         try:
@@ -786,7 +795,11 @@ def _locked_report_update(report_path: Path, name: str,
         except (FileNotFoundError, json.JSONDecodeError):
             existing = {}
         existing[name] = record
-        report_path.write_text(json.dumps(existing, indent=2))
+        # atomic replace: qa's unlocked readers must never see a torn
+        # file (review-r2 #42)
+        tmp = report_path.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps(existing, indent=2))
+        os.replace(tmp, report_path)
     finally:
         if held:
             try:

@@ -120,7 +120,10 @@ def test_daily_report_sheet_failure_does_not_resend_message(cfg, ledger,
     monkeypatch.setattr(runmod.telegram, "send_document", doc_fail)
     now = datetime.now(C.IST).replace(hour=C.DAILY_REPORT_HOUR_IST)
     assert runmod.send_daily_report_if_due(cfg, ledger, now) is True
-    assert len(sent) == 1
+    # the report message + the sheet-failure alert (review-r2 #46) — but
+    # never a duplicate report
+    assert len(sent) == 2
+    assert "payment sheet attachment failed" in sent[1]
     # second invocation: marker present, nothing re-sent
     assert runmod.send_daily_report_if_due(cfg, ledger, now) is False
-    assert len(sent) == 1
+    assert len(sent) == 2

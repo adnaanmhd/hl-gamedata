@@ -1,7 +1,10 @@
 [Unit]
-Description=HL nightly GCS backup sync — ledger backups, dossiers, reports (R19/§7.7)
+Description=HL nightly GCS backup — ledger backups, dossiers, reports (R19/§7.7)
 Wants=network-online.target
 After=network-online.target
+# belt for the script's own inline alert — which shares the uv/python
+# failure mode it reports (review-r2 #49)
+OnFailure=hl-backup-alert.service
 
 [Service]
 Type=oneshot

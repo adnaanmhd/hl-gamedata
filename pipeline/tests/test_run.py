@@ -380,7 +380,8 @@ def test_zip_download_error_stays_retryable(cfg, ledger, monkeypatch):
 
     def bad_zip(cfg_, ledger_, sid):
         ledger_.set_state(sid, "DOWNLOADING")
-        raise ingest.DownloadError("unreadable zip payload: BadZipFile")
+        raise ingest.DownloadError("unreadable zip payload: BadZipFile",
+                                   kind="zip_incomplete")
 
     monkeypatch.setattr(ingest, "download", bad_zip)
     runmod._download_phase(cfg, ledger, [SID1], [])
