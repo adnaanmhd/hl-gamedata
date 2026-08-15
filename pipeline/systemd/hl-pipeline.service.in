@@ -8,6 +8,9 @@ Type=oneshot
 User=__USER__
 WorkingDirectory=__HOME__/hl-gamedata
 Environment=HL_PIPELINE_WORKERS=8
+# journald must see run output live, not at exit — python block-buffers
+# into the tee pipe otherwise
+Environment=PYTHONUNBUFFERED=1
 # oneshot default start timeout would kill a multi-hour backlog run
 TimeoutStartSec=infinity
 # bash for pipefail; tee -> journald AND ~/hl-pipeline/logs/ (plan §7.7).

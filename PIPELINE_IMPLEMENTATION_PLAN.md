@@ -640,7 +640,15 @@ v2 delta steps (order; 7∥8 can run in parallel, 9 needs neither):
 | 13 | **Go-live + kill matrix + ramp** — gate (a), if real uploads exist: one full unattended cycle on them; **else gate (b), synthetic: the six local sessions seeded at INGESTED into a TEST pipeline home (`HL_PIPELINE_HOME=~/hl-pipeline-test`, test-mode Telegram) → full validate/fix/deliver pass to Drive II `_pipeline_test/` (purged after — `deliver.cleanup_test_folder` exists), with D exercised by the live (empty) Drive scan** — Drive I still had zero files at 08-14 22:41, so (a) is likely unavailable on the target evening; the first real uploads then run under watch as production, not as the go-live gate. Kill matrix: `kill -9` during validation and during upload, each resuming cleanly (no double-DELIVERED, hours counted once, no stub rrd staged); **under gate (b) the download-kill leg is deferred to the first watched real uploads — nothing downloads in (b) by its own premise (DOWNLOADING-resume is already unit-covered in `test_run.py`/`test_ingest.py`)**; then R22 ramp 8→10 against the stage-times gauge | gate (a) or (b) green + kill matrix green (2 legs under (b), 3rd on first real uploads); ramp decision logged; per-batch stage times visible in logs |
 
 Go-live = step 13's gate green. Target: **live 2026-08-15 evening IST** (slack to Aug 16
-morning). Tests after every step:
+morning). **ACHIEVED 2026-08-15 16:30 IST** — gate (a) ran on the first 13 real uploads
+(watched cycle 15:26–16:26: 21 delivered = 1.98 h to Drive II, 6 rejected with dossiers,
+10 split parents; 3-leg kill matrix green — download/validation/upload kills each resumed
+exactly, zero double-DELIVERED, hours once, no stub rrd shipped, rrd sampling 5/21 ≈ 20%);
+both systemd timers armed; first scheduled fire observed 16:30 IST. R22 ramp decision:
+HOLD at 8 workers — the stage gauge is validation-bound but loadavg > vCPUs during
+validation bursts; ramp to 10 only after a CPU%-based (not loadavg) reading on a full
+batch. Residual wart filed to the review loop: a batch emptied by kill-regroup is never
+finish_batch()ed (observed batch_no=2). Tests after every step:
 `PYTHONPATH=. uv run --with pytest --with numpy --with opencv-python-headless --with rerun-sdk
 pytest pipeline/tests translator/tests -q` (Mac AND VM from step 10 on; the extra `--with`s are
 mandatory on a clean host — `translator/rrd.py:26` imports rerun at module top).
