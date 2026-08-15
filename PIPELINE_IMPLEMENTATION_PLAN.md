@@ -673,7 +673,7 @@ mandatory on a clean host — `translator/rrd.py:26` imports rerun at module top
 | **Q14** | DR home for ledger backups + dossiers | **Small GCS bucket**, nightly sync (08-15) |
 | **Q15** | VLM quota ladder semantics | **Sticky per run; all calls incl. the sweep; fallback verdicts deliver + flag; prev key as automatic last resort** (08-15 → R23) |
 | **Q16** | New Gemini key | **Supplied 08-15** (AQ.-format — endpoints settled by the §7.6 smoke matrix); old key kept as `GEMINI_API_KEY_PREV` for the R23 rung |
-| **Q17** | Build-session review protocol | **Adversarial code-review loop ≤5 iterations: rounds 1–2 full-codebase, rounds 3–5 delta-only; leftovers flagged to Adnaan; then an independent FULLY-LIVE e2e verifier (real VLM calls, Drive II `_pipeline_test/` only); path-scoped commit per green iteration, never push** (08-15) |
+| **Q17** | Build-session review protocol | **Adversarial code-review loop ≤5 iterations; leftovers flagged to Adnaan; then an independent FULLY-LIVE e2e verifier (real VLM calls, Drive II `_pipeline_test/` only); path-scoped commit per green iteration, never push** (08-15). **Amended mid-loop 08-15 (after iteration 1): iterations 2–5 EACH run full-codebase review + delta review (files changed since loop start) + adversarial hunting for bugs introduced by the loop's own fixes; all four run — the earlier rounds-3–5-delta-only clause is superseded** |
 | **Q18** | Plan-doc versioning | **Commit plan + companion docs at every revision, path-scoped** (08-15; v2 = `10b70c3`) |
 
 **Remaining action items**: (a) ~~gcloud SDK + auth + project~~ **done 08-15**; (b) if the §7.6
