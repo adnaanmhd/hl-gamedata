@@ -566,9 +566,13 @@ def send_daily_report_if_due(cfg: C.Config, ledger: Ledger,
         "SELECT COUNT(*) n, COALESCE(SUM(duration_delivered_s),0) s "
         "FROM sessions WHERE state='DELIVERED' AND delivered_at>=? AND "
         "delivered_at<?", (lo, hi)).fetchone()
+    # windowed on the REJECTED transition ts (immutable events row), not
+    # updated_at — finalize_rejected bumps updated_at after the report is
+    # sent, which re-counted the session in the NEXT day's window
     rej_rows = ledger.db.execute(
-        "SELECT reasons_json FROM sessions WHERE state='REJECTED' AND "
-        "updated_at>=? AND updated_at<?", (lo, hi)).fetchall()
+        f"SELECT reasons_json FROM sessions WHERE state='REJECTED' AND "
+        f"{reports.REJECT_TS}>=? AND {reports.REJECT_TS}<?",
+        (lo, hi)).fetchall()
     # unfixable-only per stored fixable fields, ALL labels per session,
     # fix-failed marker for all-fixable rejects (Adnaan 08-15); the count
     # orders the line but is not printed
@@ -581,9 +585,9 @@ def send_daily_report_if_due(cfg: C.Config, ledger: Ledger,
         for lbl in reports.session_reject_labels(reasons, daily=True):
             counts[lbl] = counts.get(lbl, 0) + 1
     dups = ledger.db.execute(
-        "SELECT COUNT(*) n FROM sessions WHERE state='REJECTED' AND "
-        "updated_at>=? AND updated_at<? AND reasons_json LIKE "
-        "'%INT_DUP_CROSS%'", (lo, hi)).fetchone()["n"]
+        f"SELECT COUNT(*) n FROM sessions WHERE state='REJECTED' AND "
+        f"{reports.REJECT_TS}>=? AND {reports.REJECT_TS}<? AND "
+        f"reasons_json LIKE '%INT_DUP_CROSS%'", (lo, hi)).fetchone()["n"]
     p = _pace_now(ledger)
     d = reports.DailyStats(
         day_ist=now_ist,

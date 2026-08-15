@@ -39,6 +39,15 @@ REASON_LABELS = {
     "INT_PATH": ("bad drive path", "bad-path"),
 }
 
+# Reject-window anchor: the REJECTED transition time from the immutable
+# events audit — NOT sessions.updated_at, which finalize_rejected bumps
+# again when it writes the dossier (deliver.py), pushing a session counted
+# in one daily window into the NEXT window too (double-count; found via
+# the d3 session's reproduction gotcha, 08-15).
+REJECT_TS = ("(SELECT MAX(ts) FROM events WHERE "
+             "events.session_id = sessions.session_id "
+             "AND events.to_state = 'REJECTED')")
+
 # Marker for sessions that reached REJECTED with only FIXABLE reasons
 # stored ("fix retries exhausted", R2): with fixable reasons hidden from
 # every reject surface, such a player's cell would go blank while
@@ -205,7 +214,7 @@ def build_sheet_rows(ledger: Ledger, day_ist: datetime,
           THEN 1 ELSE 0 END) uploaded_today,
       SUM(CASE WHEN state='DELIVERED' AND delivered_at>=? AND
           delivered_at<? THEN 1 ELSE 0 END) delivered_today,
-      SUM(CASE WHEN state='REJECTED' AND updated_at>=? AND updated_at<?
+      SUM(CASE WHEN state='REJECTED' AND {rts}>=? AND {rts}<?
           THEN 1 ELSE 0 END) rejected_today,
       COALESCE(SUM(CASE WHEN state='DELIVERED' AND delivered_at>=? AND
           delivered_at<? THEN duration_delivered_s END),0)/3600.0 h_today,
@@ -215,14 +224,14 @@ def build_sheet_rows(ledger: Ledger, day_ist: datetime,
     WHERE player_email != '' AND state NOT IN ('DUPLICATE','QUARANTINED')
     GROUP BY game, operator_email, player_email
     ORDER BY game, operator_email, player_email
-    """
+    """.format(rts=REJECT_TS)
     args = [lo, hi] * 4
     rows = []
     for r in ledger.db.execute(q, args).fetchall():
         rr = ledger.db.execute(
-            "SELECT reasons_json FROM sessions WHERE game=? AND "
-            "player_email=? AND state='REJECTED' AND updated_at>=? AND "
-            "updated_at<?",
+            f"SELECT reasons_json FROM sessions WHERE game=? AND "
+            f"player_email=? AND state='REJECTED' AND {REJECT_TS}>=? AND "
+            f"{REJECT_TS}<?",
             (r["game"], r["player_email"], lo, hi)).fetchall()
         per_session: list[list[str]] = []
         for x in rr:
@@ -285,9 +294,9 @@ def write_payment_sheet(cfg: C.Config, ledger: Ledger, day_ist: datetime,
 
     lo, hi = bounds or _day_bounds_utc(day_ist)
     rejects = ledger.db.execute(
-        "SELECT session_id, reasons_json, dossier_path FROM sessions "
-        "WHERE state='REJECTED' AND updated_at>=? AND updated_at<? "
-        "ORDER BY session_id", (lo, hi)).fetchall()
+        f"SELECT session_id, reasons_json, dossier_path FROM sessions "
+        f"WHERE state='REJECTED' AND {REJECT_TS}>=? AND {REJECT_TS}<? "
+        f"ORDER BY session_id", (lo, hi)).fetchall()
     md += ["", "## Reject detail", ""]
     if rejects:
         for r in rejects:

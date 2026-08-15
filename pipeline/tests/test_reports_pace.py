@@ -139,6 +139,37 @@ def test_ordered_labels_exhaustive_count_desc_tie_alpha_no_counts():
     assert not any("×" in lbl for lbl in out)
 
 
+def test_reject_window_anchored_to_transition_not_updated_at(tmp_path):
+    """finalize_rejected bumps updated_at AFTER a reject is counted; the
+    window must key on the immutable REJECTED event ts or the session is
+    double-counted in the next day's report (d3 gotcha, 08-15)."""
+    from pipeline.ledger import Ledger
+    led = Ledger(tmp_path / "l.db")
+    sid = "2026-08-15T00-00-00Z_kamla_c_00000000000000dd"
+    led.insert_session(
+        session_id=sid, game="kamla", operator_email="Op",
+        player_email="p@x.com", drive_path="kamla/Op/p@x.com/x",
+        drive_ctime="2026", md5_video="m", bytes_=1, state="DISCOVERED")
+    led.set_reasons(sid, [_r("INP_MOTION_MISSING")], 3)
+    led.set_state(sid, "REJECTED")
+    ts = led.db.execute(
+        "SELECT MAX(ts) t FROM events WHERE session_id=? AND "
+        "to_state='REJECTED'", (sid,)).fetchone()["t"]
+    # simulate the post-send dossier write pushing updated_at far ahead
+    led.db.execute("UPDATE sessions SET updated_at='2099-01-01T00:00:00' "
+                   "WHERE session_id=?", (sid,))
+    led.db.commit()
+    in_window = reports.build_sheet_rows(
+        led, datetime.now(C.IST), bounds=("2000-01-01T00:00:00",
+                                          "2100-01-01T00:00:00"))
+    assert in_window[0]["rejected"] == 1          # still found by event ts
+    next_day = reports.build_sheet_rows(
+        led, datetime.now(C.IST),
+        bounds=(ts + "zz", "2100-01-01T00:00:00"))  # window AFTER the event
+    assert next_day[0]["rejected"] == 0           # not double-counted
+    led.close()
+
+
 def test_sheet_reject_reasons_unfixable_only(cfg, tmp_path):
     """End-to-end through build_sheet_rows: passengers hidden, all-fixable
     reject shows the bare marker."""
