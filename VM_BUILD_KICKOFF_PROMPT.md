@@ -81,12 +81,14 @@ After Phase 1 is complete and green, iterate:
    real defects — correctness, concurrency (threads+spawn+SQLite), resume/idempotency
    (double-DELIVERED, double-counted hours), security (key leakage into logs/ledger/Telegram),
    ruling violations (R1–R23, F1–F13), test gaps, and Linux-vs-macOS behavior.
-   **Amended by Adnaan mid-loop (2026-08-15, after iteration 1): EVERY remaining iteration
-   (2–5) runs the full composition — (a) FULL-codebase review (`pipeline/`, changed `tools/`,
-   systemd units, interfaces into `translator/`/the engine), (b) a dedicated DELTA review of
-   all files changed since the loop started, and (c) adversarial hunting for bugs/issues
-   introduced by the loop's own changes/fixes — and all four remaining iterations run (the
-   original rounds-3–5-delta-only clause is superseded).** Findings must carry evidence
+   **Amended by Adnaan mid-loop (2026-08-15, after iteration 1): iterations 2–4 run the full
+   composition — (a) FULL-codebase review (`pipeline/`, changed `tools/`, systemd units,
+   interfaces into `translator/`/the engine), (b) a dedicated DELTA review of all files
+   changed since the loop started, and (c) adversarial hunting for bugs/issues introduced by
+   the loop's own changes/fixes. Second amendment (2026-08-15, after iteration 4's launch):
+   iteration 5 drops lane (a) — it reviews ONLY the delta and fix-regressions from the
+   previous iterations' changes. All iterations run (the original rounds-3–5-delta-only
+   clause stays superseded for 2–4).** Findings must carry evidence
    (file:line, repro, or recomputation) and severity (BLOCKER/MAJOR/MINOR).
 2. **Verify every finding yourself against the code before acting** — reviewers can be wrong;
    fix only verified findings, note rejected ones with the disproof.
