@@ -197,13 +197,19 @@ def build_daily_message(d: DailyStats, pace: PaceStatus | None) -> str:
 # Schema per Adnaan (08-15, via the d3 session; respec same day): one row
 # per (operator, player) spanning both games — three kamla_/ow_ pairs
 # after the identity columns. No game column, no counts, no cumulative.
-# v3 (08-15): + the two total columns. Their names are Adnaan's EXACT
-# strings — "hours" vs "hrs" and "delivered" vs "accepted" deliberately
-# NOT normalized to the neighboring columns (flagged to him by d3; a
-# harmonization later is a one-line change here).
+# v4 (08-15): COHORT accounting + the pending pair. A player's footage is
+# judged in the window it was UPLOADED in — accepted/pending/rejected are
+# attributed back to the root upload's window regardless of when the
+# outcome happened (delivery-time keying made rows internally
+# incomparable: "1.29 uploaded / 0.44 accepted" read as rejection when it
+# was just the pipeline's 1-2 h latency). Total column names are Adnaan's
+# EXACT strings — "hours" vs "hrs" and "delivered" vs "accepted"
+# deliberately NOT normalized (flagged; one-line change here if he
+# harmonizes).
 SHEET_COLS = ["date", "operator", "player_email",
               "kamla_hrs_uploaded", "ow_hrs_uploaded",
               "kamla_accepted_hrs", "ow_accepted_hrs",
+              "kamla_pending_hrs", "ow_pending_hrs",
               "kamla_rejection_reasons", "ow_rejection_reasons",
               "total_uploaded_hours", "total_delivered_hours"]
 
@@ -230,31 +236,40 @@ def _parse_ts(v: str | None) -> datetime | None:
 
 def build_sheet_rows(ledger: Ledger, day_ist: datetime,
                      bounds: tuple[str, str] | None = None) -> list[dict]:
-    """One row per (operator, player) spanning both games (Adnaan 08-15).
-    Hours only, no money (R11).
+    """One row per (operator, player), COHORT accounting (v4, 08-15):
+    every ROOT upload (parent_id IS NULL, not DUPLICATE/QUARANTINED)
+    whose drive_ctime falls in the window contributes — to that window —
+    every hour derived from it, however late the outcome:
 
-    - *_hrs_uploaded: sum of duration_raw_s (the probed video.mp4
-      duration) for PARENT sessions only — split children repeat their
-      parent's footage and would double-count — windowed on the REAL
-      Drive upload time (drive_ctime; created_at is discovery time and
-      clusters whole poll batches onto one instant — d3 gotcha A).
-      Blank drive_ctime falls back to created_at, logged.
-    - *_accepted_hrs: sum of duration_delivered_s for DELIVERED in
-      window; children included — they are the delivered units.
-    - *_rejection_reasons: unfixable-only labels per session (stored
-      fixable flag), deduped, count-ordered desc then alpha, counts never
-      printed, fix-failed marker for all-fixable rejects; bucketed by the
-      session's own game; windowed on REJECT_TS.
-    - Rows with no activity in the window are suppressed."""
+    - *_hrs_uploaded: the root's duration_raw_s (probed video.mp4).
+      Windowed on the REAL upload time (created_at is discovery time and
+      clusters poll batches); blank ctime falls back to created_at, logged.
+    - *_accepted_hrs: SUM(duration_delivered_s) over DELIVERED nodes in
+      the root's tree — walked RECURSIVELY (live trees reach depth 2;
+      a one-level join drops hours). SPLIT nodes contribute nothing
+      themselves: their children carry the hours.
+    - *_pending_hrs: SUM(duration_raw_s) over tree nodes not yet
+      DELIVERED/REJECTED/SPLIT — derived from STATE, never by
+      subtraction (trim/cut loss would masquerade as work in progress).
+    - *_rejection_reasons: unfixable labels from REJECTED tree nodes
+      (stored fixable flag, deduped, count-ordered, no counts printed,
+      fix-failed marker; unreadable-reasons on parse failure).
+    - uploaded != accepted+pending+rejected by design: head/tail trim and
+      dropped segments are legitimate loss.
+    Rows with no activity in the window are suppressed. Hours only, no
+    money (R11)."""
     lo, hi = bounds or _day_bounds_utc(day_ist)
     lo_dt, hi_dt = _parse_ts(lo), _parse_ts(hi)
     day = day_ist.strftime("%Y-%m-%d")
     rows = ledger.db.execute(
-        f"SELECT session_id, game, operator_email, player_email, parent_id,"
-        f" state, drive_ctime, created_at, duration_raw_s,"
-        f" duration_delivered_s, delivered_at, reasons_json,"
-        f" {REJECT_TS} rejected_ts"
-        f" FROM sessions WHERE player_email != ''").fetchall()
+        "SELECT session_id, game, operator_email, player_email, parent_id,"
+        " state, drive_ctime, created_at, duration_raw_s,"
+        " duration_delivered_s, reasons_json"
+        " FROM sessions WHERE player_email != ''").fetchall()
+    children: dict[str, list] = {}
+    for r in rows:
+        if r["parent_id"]:
+            children.setdefault(r["parent_id"], []).append(r)
     per_key: dict[tuple[str, str], dict] = {}
 
     def bucket(r):
@@ -262,41 +277,51 @@ def build_sheet_rows(ledger: Ledger, day_ist: datetime,
         return per_key.setdefault(k, {
             "kamla_hrs_uploaded": 0.0, "ow_hrs_uploaded": 0.0,
             "kamla_accepted_hrs": 0.0, "ow_accepted_hrs": 0.0,
+            "kamla_pending_hrs": 0.0, "ow_pending_hrs": 0.0,
             "kamla_rej": [], "ow_rej": []})
 
     game_col = {"kamla": "kamla", "outer_wilds": "ow"}
-    for r in rows:
-        g = game_col.get(r["game"] or "")
-        if g is None:
-            continue        # never dump an unknown game into a column
-        # uploaded hours: parents only, real upload time, not quarantined/dup
-        if r["parent_id"] is None and \
-                r["state"] not in ("DUPLICATE", "QUARANTINED"):
-            up = _parse_ts(r["drive_ctime"])
-            if up is None:
-                up = _parse_ts(r["created_at"])
-                if up is not None:
-                    print(f"[sheet] {r['session_id']}: blank/unparseable "
-                          f"drive_ctime — windowing upload on created_at",
-                          file=sys.stderr)
-            if up is not None and lo_dt is not None and hi_dt is not None \
-                    and lo_dt <= up < hi_dt:
-                bucket(r)[f"{g}_hrs_uploaded"] += \
-                    (r["duration_raw_s"] or 0.0) / 3600.0
-        # accepted hours: the delivered units (children included)
-        if r["state"] == "DELIVERED" and r["delivered_at"] \
-                and lo <= r["delivered_at"] < hi:
-            bucket(r)[f"{g}_accepted_hrs"] += \
-                (r["duration_delivered_s"] or 0.0) / 3600.0
-        # rejection reasons, windowed on the immutable REJECTED event ts
-        if r["state"] == "REJECTED" and r["rejected_ts"] \
-                and lo <= r["rejected_ts"] < hi:
-            try:
-                reasons = json.loads(r["reasons_json"] or "[]")
-                labels = session_reject_labels(reasons, daily=True)
-            except json.JSONDecodeError:
-                labels = [UNREADABLE_MARKER]     # unknown, never fix-failed
-            bucket(r)[f"{g}_rej"].append(labels)
+    for root in rows:
+        if root["parent_id"] is not None or \
+                root["state"] in ("DUPLICATE", "QUARANTINED"):
+            continue
+        up = _parse_ts(root["drive_ctime"])
+        if up is None:
+            up = _parse_ts(root["created_at"])
+            if up is not None:
+                print(f"[sheet] {root['session_id']}: blank/unparseable "
+                      f"drive_ctime — windowing upload on created_at",
+                      file=sys.stderr)
+        if up is None or lo_dt is None or hi_dt is None \
+                or not (lo_dt <= up < hi_dt):
+            continue
+        g_root = game_col.get(root["game"] or "")
+        if g_root is not None:
+            bucket(root)[f"{g_root}_hrs_uploaded"] += \
+                (root["duration_raw_s"] or 0.0) / 3600.0
+        # recursive walk of the whole tree (root included)
+        stack = [root]
+        while stack:
+            n = stack.pop()
+            stack.extend(children.get(n["session_id"], []))
+            g = game_col.get(n["game"] or "")
+            if g is None:
+                continue     # never dump an unknown game into a column
+            if n["state"] == "DELIVERED":
+                bucket(n)[f"{g}_accepted_hrs"] += \
+                    (n["duration_delivered_s"] or 0.0) / 3600.0
+            elif n["state"] == "REJECTED":
+                try:
+                    labels = session_reject_labels(
+                        json.loads(n["reasons_json"] or "[]"), daily=True)
+                except json.JSONDecodeError:
+                    labels = [UNREADABLE_MARKER]
+                bucket(n)[f"{g}_rej"].append(labels)
+            elif n["state"] != "SPLIT":
+                # still in flight (SPLIT itself carries nothing — its
+                # children hold the hours)
+                bucket(n)[f"{g}_pending_hrs"] += \
+                    (n["duration_raw_s"] or 0.0) / 3600.0
 
     out = []
     for (op, player), b in sorted(per_key.items()):
@@ -306,6 +331,8 @@ def build_sheet_rows(ledger: Ledger, day_ist: datetime,
             "ow_hrs_uploaded": round(b["ow_hrs_uploaded"], 2),
             "kamla_accepted_hrs": round(b["kamla_accepted_hrs"], 2),
             "ow_accepted_hrs": round(b["ow_accepted_hrs"], 2),
+            "kamla_pending_hrs": round(b["kamla_pending_hrs"], 2),
+            "ow_pending_hrs": round(b["ow_pending_hrs"], 2),
             "kamla_rejection_reasons":
                 " ".join(ordered_reject_labels(b["kamla_rej"])),
             "ow_rejection_reasons":
@@ -316,11 +343,12 @@ def build_sheet_rows(ledger: Ledger, day_ist: datetime,
             row["kamla_hrs_uploaded"] + row["ow_hrs_uploaded"], 2)
         row["total_delivered_hours"] = round(
             row["kamla_accepted_hrs"] + row["ow_accepted_hrs"], 2)
-        # suppress no-activity rows: nothing uploaded/accepted/rejected in
-        # the window (the old sheet listed every player ever seen)
+        # suppress no-activity rows (the old sheet listed every player
+        # ever seen); pending counts as activity
         if any(row[c] > 0.0 for c in
                ("kamla_hrs_uploaded", "ow_hrs_uploaded",
-                "kamla_accepted_hrs", "ow_accepted_hrs")) \
+                "kamla_accepted_hrs", "ow_accepted_hrs",
+                "kamla_pending_hrs", "ow_pending_hrs")) \
                 or row["kamla_rejection_reasons"] \
                 or row["ow_rejection_reasons"]:
             out.append(row)
@@ -349,24 +377,20 @@ def write_payment_sheet(cfg: C.Config, ledger: Ledger, day_ist: datetime,
         md.append("| " + " | ".join(str(r[c]) for c in SHEET_COLS) + " |")
 
     ops: dict[str, dict] = {}
+    num_cols = ("kamla_hrs_uploaded", "ow_hrs_uploaded",
+                "kamla_accepted_hrs", "ow_accepted_hrs",
+                "kamla_pending_hrs", "ow_pending_hrs",
+                "total_uploaded_hours", "total_delivered_hours")
     for r in rows:
-        o = ops.setdefault(r["operator"], {
-            "ku": 0.0, "ou": 0.0, "ka": 0.0, "oa": 0.0,
-            "tu": 0.0, "td": 0.0})
-        o["ku"] += r["kamla_hrs_uploaded"]
-        o["ou"] += r["ow_hrs_uploaded"]
-        o["ka"] += r["kamla_accepted_hrs"]
-        o["oa"] += r["ow_accepted_hrs"]
-        o["tu"] += r["total_uploaded_hours"]
-        o["td"] += r["total_delivered_hours"]
+        o = ops.setdefault(r["operator"], {c: 0.0 for c in num_cols})
+        for c in num_cols:
+            o[c] += r[c]
     md += ["", "## Per-operator rollup", "",
-           "| operator | kamla_hrs_uploaded | ow_hrs_uploaded | "
-           "kamla_accepted_hrs | ow_accepted_hrs | total_uploaded_hours | "
-           "total_delivered_hours |", "|---|---|---|---|---|---|---|"]
+           "| operator | " + " | ".join(num_cols) + " |",
+           "|" + "|".join("---" for _ in range(len(num_cols) + 1)) + "|"]
     for op, o in sorted(ops.items()):
-        md.append(f"| {op} | {o['ku']:.2f} | {o['ou']:.2f} | "
-                  f"{o['ka']:.2f} | {o['oa']:.2f} | {o['tu']:.2f} | "
-                  f"{o['td']:.2f} |")
+        md.append("| " + op + " | "
+                  + " | ".join(f"{o[c]:.2f}" for c in num_cols) + " |")
 
     lo, hi = bounds or _day_bounds_utc(day_ist)
     rejects = ledger.db.execute(

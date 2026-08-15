@@ -140,10 +140,11 @@ def test_ordered_labels_exhaustive_count_desc_tie_alpha_no_counts():
     assert not any("×" in lbl for lbl in out)
 
 
-def test_reject_window_anchored_to_transition_not_updated_at(tmp_path):
-    """finalize_rejected bumps updated_at AFTER a reject is counted; the
-    window must key on the immutable REJECTED event ts or the session is
-    double-counted in the next day's report (d3 gotcha, 08-15)."""
+def test_sheet_cohort_attributes_late_outcome_to_upload_window(tmp_path):
+    """v4 cohort rule: a session UPLOADED in window 1 but REJECTED much
+    later (and with updated_at bumped later still) appears in window 1's
+    sheet and in no other — outcome timing and timestamp bumps are
+    irrelevant by construction."""
     from pipeline.ledger import Ledger
     led = Ledger(tmp_path / "l.db")
     sid = "2026-08-15T00-00-00Z_kamla_c_00000000000000dd"
@@ -154,23 +155,18 @@ def test_reject_window_anchored_to_transition_not_updated_at(tmp_path):
         state="DISCOVERED")
     led.set_reasons(sid, [_r("INP_MOTION_MISSING")], 3)
     led.set_state(sid, "REJECTED")
-    ts = led.db.execute(
-        "SELECT MAX(ts) t FROM events WHERE session_id=? AND "
-        "to_state='REJECTED'", (sid,)).fetchone()["t"]
-    # simulate the post-send dossier write pushing updated_at far ahead
+    # outcome recorded far later + dossier write bumps updated_at
     led.db.execute("UPDATE sessions SET updated_at='2099-01-01T00:00:00' "
                    "WHERE session_id=?", (sid,))
     led.db.commit()
-    in_window = reports.build_sheet_rows(
+    upload_window = reports.build_sheet_rows(
         led, datetime.now(C.IST),
-        bounds=("2000-01-01T00:00:00+00:00", "2100-01-01T00:00:00+00:00"))
-    assert in_window[0]["kamla_rejection_reasons"] == "no-mouse"
-    next_day = reports.build_sheet_rows(
+        bounds=("2026-08-15T00:00:00+00:00", "2026-08-16T00:00:00+00:00"))
+    assert upload_window[0]["kamla_rejection_reasons"] == "no-mouse"
+    later_window = reports.build_sheet_rows(
         led, datetime.now(C.IST),
-        bounds=(ts + "zz", "2100-01-01T00:00:00+00:00"))  # AFTER the event
-    # not re-counted: no reject in window; upload also outside -> row gone
-    assert next_day == [] or \
-        next_day[0]["kamla_rejection_reasons"] == ""
+        bounds=("2026-08-16T00:00:00+00:00", "2026-08-17T00:00:00+00:00"))
+    assert later_window == []                 # never re-counted elsewhere
     led.close()
 
 
@@ -242,6 +238,9 @@ def test_sheet_uploaded_hours_parents_only_on_drive_ctime(tmp_path):
     assert len(sheet) == 1
     assert sheet[0]["kamla_hrs_uploaded"] == 1.5   # 1.0 parent + 0.5 blank
     assert sheet[0]["ow_hrs_uploaded"] == 0.0
+    # cohort pending: both DISCOVERED roots (1.0 + 0.5) + INGESTED child
+    # (0.5) are still in flight
+    assert sheet[0]["kamla_pending_hrs"] == 2.0
 
 
 def test_sheet_totals_sum_rounded_parts_across_both_games(tmp_path):
@@ -282,6 +281,52 @@ def test_sheet_totals_sum_rounded_parts_across_both_games(tmp_path):
     assert r["total_uploaded_hours"] == 0.25
     assert r["kamla_accepted_hrs"] == 0.08 and r["ow_accepted_hrs"] == 0.14
     assert r["total_delivered_hours"] == 0.22
+
+
+def test_sheet_cohort_walks_depth2_tree_split_carries_nothing(tmp_path):
+    """v4 trap: split trees reach depth 2 in the live ledger — a one-level
+    join drops the grandchildren's hours. Root SPLIT -> p1 SPLIT ->
+    p1-p1 DELIVERED; p2 REJECTED; p3 VALIDATING (pending). SPLIT nodes
+    contribute nothing themselves."""
+    from pipeline.ledger import Ledger
+    led = Ledger(tmp_path / "l.db")
+    root = "2026-08-15T06-00-00Z_kamla_c_00000000000000f7"
+
+    def put(sid, state, parent=None, raw=None, delivered=None,
+            reasons=None):
+        led.insert_session(
+            session_id=sid, game="kamla", operator_email="Op",
+            player_email="deep@x.com", drive_path="kamla/Op/deep@x.com/x",
+            drive_ctime="2026-08-15T06:01:00.000Z", md5_video=sid[-4:],
+            bytes_=1, state="DISCOVERED", parent_id=parent)
+        if raw:
+            led.update(sid, duration_raw_s=raw)
+        if reasons is not None:
+            led.set_reasons(sid, reasons, 3)
+        if delivered:
+            led.update(sid, duration_delivered_s=delivered,
+                       delivered_at="2026-08-15T09:00:00+00:00")
+        led.set_state(sid, state)
+
+    put(root, "SPLIT", raw=7200.0)                     # contributes nothing
+    put(f"{root}-p1", "SPLIT", parent=root, raw=3600.0)   # nothing either
+    put(f"{root}-p1-p1", "DELIVERED", parent=f"{root}-p1",
+        raw=1500.0, delivered=1440.0)                  # depth 2!
+    put(f"{root}-p2", "REJECTED", parent=root,
+        reasons=[{"code": "CNT_BLACK_FROZEN", "blocking": True,
+                  "fixable": False, "params": {}, "evidence": "e"}])
+    put(f"{root}-p3", "VALIDATING", parent=root, raw=1080.0)
+    sheet = reports.build_sheet_rows(
+        led, datetime.now(C.IST),
+        bounds=("2026-08-15T00:00:00+00:00", "2026-08-16T00:00:00+00:00"))
+    led.close()
+    assert len(sheet) == 1
+    r = sheet[0]
+    assert r["kamla_hrs_uploaded"] == 2.0     # root raw only
+    assert r["kamla_accepted_hrs"] == 0.4     # depth-2 grandchild found
+    assert r["kamla_pending_hrs"] == 0.3      # VALIDATING child only
+    assert r["kamla_rejection_reasons"] == "black-frozen"
+    assert r["total_delivered_hours"] == 0.4
 
 
 def test_sheet_suppresses_no_activity_rows(tmp_path):

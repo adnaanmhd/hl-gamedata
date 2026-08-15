@@ -96,7 +96,11 @@ def test_payment_sheet_hours_only_and_grouped_by_player(cfg, ledger):
         ledger.set_state(sid, "PACKAGED")
         ledger.set_state(sid, "UPLOADED")
         ledger.set_state(sid, "DELIVERED")
-    csv_path, md_path = reports.write_payment_sheet(cfg, ledger, now)
+    # explicit bounds covering the seeded drive_ctime (v4 cohort keys the
+    # whole row on the upload time)
+    csv_path, md_path = reports.write_payment_sheet(
+        cfg, ledger, now,
+        bounds=("2026-08-14T00:00:00+00:00", "2026-08-16T00:00:00+00:00"))
     assert csv_path.exists() and md_path.exists()
     text = csv_path.read_text()
     assert "a@x.com" in text and "b@y.com" in text
