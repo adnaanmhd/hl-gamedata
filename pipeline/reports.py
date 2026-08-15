@@ -35,7 +35,16 @@ REASON_LABELS = {
     "CNT_BLACK_FROZEN": ("black/frozen video", "black-frozen"),
     "SYN_UNMEASURABLE_SUSPECT": ("unverifiable sync", "sync-suspect"),
     "INT_TAMPER": ("integrity", "tamper"),
+    "QA_FAIL_UNMAPPED": ("unmapped QA failure", "qa-unmapped"),
+    "INT_PATH": ("bad drive path", "bad-path"),
 }
+
+# Marker for sessions that reached REJECTED with only FIXABLE reasons
+# stored ("fix retries exhausted", R2): with fixable reasons hidden from
+# every reject surface, such a player's cell would go blank while
+# `rejected` still counts them — the bare marker keeps the surfaces
+# honest (Adnaan, 08-15; no ×N per the same ruling).
+FIX_FAILED_MARKER = "fix-failed"
 
 
 def reason_label(code: str, daily: bool = False) -> str:
@@ -43,6 +52,32 @@ def reason_label(code: str, daily: bool = False) -> str:
     if pair:
         return pair[1] if daily else pair[0]
     return code.lower().replace("_", "-")
+
+
+def session_reject_labels(reasons: list[dict],
+                          daily: bool = False) -> list[str]:
+    """One rejected session's surface labels: blocking AND NOT fixable,
+    judged per reason's OWN stored `fixable` field — three codes are
+    conditionally fixable per instance (CNT_MID_NONGAMEPLAY, CNT_CHAT_PII,
+    QA_FAIL_UNMAPPED), so a code-name list would misattribute them.
+    Deduped (labels, not codes — NOTIF_MID/EDGE share a nickname). A
+    session with no unfixable reason gets the bare FIX_FAILED_MARKER."""
+    labels = sorted({reason_label(r["code"], daily) for r in reasons
+                     if r.get("blocking") and not r.get("fixable")})
+    return labels or [FIX_FAILED_MARKER]
+
+
+def ordered_reject_labels(per_session_labels: list[list[str]]) -> list[str]:
+    """Aggregate label lists across sessions: EVERY distinct label (no
+    silent caps), ordered by occurrence count descending then
+    alphabetically — the count decides order but is never printed
+    (Adnaan, 08-15)."""
+    counts: dict[str, int] = {}
+    for labels in per_session_labels:
+        for lbl in labels:
+            counts[lbl] = counts.get(lbl, 0) + 1
+    return [lbl for lbl, _ in
+            sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))]
 
 
 @dataclass
@@ -133,8 +168,9 @@ def build_daily_message(d: DailyStats, pace: PaceStatus | None) -> str:
         lines.append(f"⚠️ pace: need {pace.need_total:.0f} h/day (trailing "
                      f"{pace.trailing_24h:.0f}) — projected finish {proj}")
     if d.reject_counts:
+        # labels only — the count orders but is not printed (Adnaan 08-15)
         lines.append("rejects: " + " · ".join(
-            f"{label} ×{n}" for label, n in d.reject_counts))
+            label for label, _n in d.reject_counts))
     for line in d.integrity_lines:
         lines.append(f"integrity: {line}")
     lines.append("📎 payment sheet attached")
@@ -188,17 +224,15 @@ def build_sheet_rows(ledger: Ledger, day_ist: datetime,
             "player_email=? AND state='REJECTED' AND updated_at>=? AND "
             "updated_at<?",
             (r["game"], r["player_email"], lo, hi)).fetchall()
-        counts: dict[str, int] = {}
+        per_session: list[list[str]] = []
         for x in rr:
             try:
-                for reason in json.loads(x["reasons_json"] or "[]"):
-                    if reason.get("blocking"):
-                        lbl = reason_label(reason["code"], daily=True)
-                        counts[lbl] = counts.get(lbl, 0) + 1
+                reasons = json.loads(x["reasons_json"] or "[]")
             except json.JSONDecodeError:
                 continue
-        top = " ".join(f"{k}×{v}" for k, v in
-                       sorted(counts.items(), key=lambda kv: -kv[1])[:3])
+            per_session.append(session_reject_labels(reasons, daily=True))
+        # unfixable-only, exhaustive (no [:3] cap), labels without counts
+        top = " ".join(ordered_reject_labels(per_session))
         rows.append({
             "date": day, "game": r["game"],
             "operator_email": r["operator_email"],

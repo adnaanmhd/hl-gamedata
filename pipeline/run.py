@@ -493,7 +493,8 @@ def process_batch(cfg: C.Config, ledger: Ledger, sids: list[str], *,
     dstats = _deliver_phase(cfg, ledger, all_sids, alerts,
                             dest_prefix=dest_prefix)
 
-    rejected, labels, fixed = 0, [], 0
+    rejected, fixed = 0, 0
+    reject_label_lists: list[list[str]] = []
     for sid in all_sids:
         row = ledger.get(sid)
         if not row:
@@ -502,17 +503,15 @@ def process_batch(cfg: C.Config, ledger: Ledger, sids: list[str], *,
             rejected += 1
             deliver.finalize_rejected(cfg, ledger, sid)
             try:
-                blocking = [x["code"] for x in
-                            json.loads(row["reasons_json"] or "[]")
-                            if x.get("blocking")]
+                reasons = json.loads(row["reasons_json"] or "[]")
             except json.JSONDecodeError:
-                blocking = []
-            if blocking:
-                lbl = reports.reason_label(blocking[0])
-                if lbl not in labels:
-                    labels.append(lbl)
+                reasons = []
+            # unfixable-only per the stored fixable field; fix-failed
+            # marker for all-fixable rejects (Adnaan 08-15)
+            reject_label_lists.append(reports.session_reject_labels(reasons))
         elif row["state"] == "DELIVERED" and row["fix_attempts"] > 0:
             fixed += 1
+    labels = reports.ordered_reject_labels(reject_label_lists)
 
     counts = ledger.counts_by_state()
     hours = {g: ledger.delivered_hours(g) for g in C.GAMES}
@@ -570,16 +569,16 @@ def send_daily_report_if_due(cfg: C.Config, ledger: Ledger,
     rej_rows = ledger.db.execute(
         "SELECT reasons_json FROM sessions WHERE state='REJECTED' AND "
         "updated_at>=? AND updated_at<?", (lo, hi)).fetchall()
+    # unfixable-only per stored fixable fields, ALL labels per session,
+    # fix-failed marker for all-fixable rejects (Adnaan 08-15); the count
+    # orders the line but is not printed
     counts: dict[str, int] = {}
     for r in rej_rows:
         try:
-            blocking = [x["code"] for x in
-                        json.loads(r["reasons_json"] or "[]")
-                        if x.get("blocking")]
+            reasons = json.loads(r["reasons_json"] or "[]")
         except json.JSONDecodeError:
-            blocking = []
-        if blocking:
-            lbl = reports.reason_label(blocking[0], daily=True)
+            reasons = []
+        for lbl in reports.session_reject_labels(reasons, daily=True):
             counts[lbl] = counts.get(lbl, 0) + 1
     dups = ledger.db.execute(
         "SELECT COUNT(*) n FROM sessions WHERE state='REJECTED' AND "
@@ -597,7 +596,8 @@ def send_daily_report_if_due(cfg: C.Config, ledger: Ledger,
         collected_ow=ledger.collected_hours("outer_wilds"),
         days_left=max(int((C.DEADLINE_IST - now_ist).total_seconds()
                           // 86400), 0),
-        reject_counts=sorted(counts.items(), key=lambda kv: -kv[1]),
+        reject_counts=sorted(counts.items(),
+                             key=lambda kv: (-kv[1], kv[0])),
         integrity_lines=([f"{dups} cross-player duplicate"
                           f"{'s' if dups > 1 else ''} (kept earlier upload)"]
                          if dups else []))
@@ -832,7 +832,8 @@ def _overlapped_run(cfg: C.Config, ledger: Ledger, alerts: list[str], *,
         dstats = _deliver_phase(cfg, ul, b.sids, alerts,
                                 dest_prefix=dest_prefix)
         b.up_s = time.monotonic() - t0
-        rejected, labels, fixed = 0, [], 0
+        rejected, fixed = 0, 0
+        reject_label_lists: list[list[str]] = []
         for sid in b.sids:
             row = ul.get(sid)
             if not row:
@@ -841,17 +842,15 @@ def _overlapped_run(cfg: C.Config, ledger: Ledger, alerts: list[str], *,
                 rejected += 1
                 deliver.finalize_rejected(cfg, ul, sid)
                 try:
-                    blocking = [x["code"] for x in
-                                json.loads(row["reasons_json"] or "[]")
-                                if x.get("blocking")]
+                    reasons = json.loads(row["reasons_json"] or "[]")
                 except json.JSONDecodeError:
-                    blocking = []
-                if blocking:
-                    lbl = reports.reason_label(blocking[0])
-                    if lbl not in labels:
-                        labels.append(lbl)
+                    reasons = []
+                # unfixable-only + fix-failed marker (Adnaan 08-15)
+                reject_label_lists.append(
+                    reports.session_reject_labels(reasons))
             elif row["state"] == "DELIVERED" and row["fix_attempts"] > 0:
                 fixed += 1
+        labels = reports.ordered_reject_labels(reject_label_lists)
         # the R22 tuning gauge: what bound this batch
         print(f"[batch b{b.no}] stages dl {b.dl_s / 60:.1f}m · "
               f"val {b.val_s / 60:.1f}m · up {b.up_s / 60:.1f}m")
