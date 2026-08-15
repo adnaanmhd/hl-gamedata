@@ -488,3 +488,123 @@ def write_payment_sheet(cfg: C.Config, ledger: Ledger, day_ist: datetime,
     md_path = out / f"payment-{day}.md"
     md_path.write_text("\n".join(md) + "\n")
     return csv_path, md_path
+
+
+# ------------------------------------------------ folder issues (d3, 08-15)
+
+# Second daily report (Adnaan via d3, 08-15): chase-work — session folders
+# missing pipeline-REQUIRED files (both rrd files exempt by the same-day
+# amendment) + every path-quarantined folder. A live SNAPSHOT, deliberately
+# NOT window-based: no REPORT_OFFSET_H, no cohort logic; a folder reappears
+# every day until fixed. Rides a SEPARATE Telegram message + CSV: the
+# payment sheet gets forwarded to operators, chase-work must forward alone.
+FOLDER_ISSUE_COLS = ["problem", "operator", "player_email", "folder",
+                     "detail", "first_seen_by_pipeline", "age_hours",
+                     "drive_path"]
+
+
+def _issue_identity(drive_path: str) -> tuple[str, str, str]:
+    """(operator, player_email, folder) when the path parses as
+    game/operator/player/session; else blanks + the full path as the
+    folder — a depth-2 stray has no operator segment, and printing a
+    guess would misdirect the chase (d3 ruling)."""
+    parts = Path(drive_path).parts
+    if len(parts) == 4:
+        return parts[1], parts[2], parts[3]
+    return "", "", drive_path
+
+
+def build_folder_issues(ledger: Ledger,
+                        now: datetime | None = None) -> list[dict]:
+    """Rows for the folder-issues report: incomplete uploads first, then
+    bad paths; oldest first within each section. first_seen is when the
+    PIPELINE first saw the folder (resets on a fresh ledger), NOT upload
+    time — the column name says exactly that."""
+    now = now or datetime.now(timezone.utc)
+    rows: list[dict] = []
+    for r in ledger.incomplete_list():          # already first_seen-ordered
+        op, player, folder = _issue_identity(r["drive_path"])
+        first = r["first_seen"]
+        age = (now - datetime.fromisoformat(first)).total_seconds() / 3600.0
+        try:
+            missing = ", ".join(json.loads(r["missing_json"] or "[]"))
+        except json.JSONDecodeError:
+            missing = r["missing_json"] or ""
+        rows.append({"problem": "incomplete_upload", "operator": op,
+                     "player_email": player, "folder": folder,
+                     "detail": missing, "first_seen_by_pipeline": first,
+                     "age_hours": round(age, 1),
+                     "drive_path": r["drive_path"]})
+    bad: list[dict] = []
+    for r in ledger.by_state("QUARANTINED"):
+        try:
+            reasons = json.loads(r["reasons_json"] or "[]")
+        except json.JSONDecodeError:
+            reasons = []
+        path_reason = next((x for x in reasons
+                            if x.get("code") == "INT_PATH"), None)
+        if path_reason is None:
+            # other quarantines are pipeline trouble, not folder-naming
+            # chase-work — Adnaan's ruling covers the three scan path
+            # reasons, all of which carry INT_PATH
+            continue
+        op, player, folder = _issue_identity(r["drive_path"] or "")
+        first = r["created_at"] or ""
+        try:
+            age = (now - datetime.fromisoformat(first)
+                   ).total_seconds() / 3600.0
+        except ValueError:
+            age = 0.0
+        bad.append({"problem": "bad_path", "operator": op,
+                    "player_email": player, "folder": folder,
+                    "detail": path_reason.get("evidence", ""),
+                    "first_seen_by_pipeline": first,
+                    "age_hours": round(age, 1),
+                    "drive_path": r["drive_path"] or ""})
+    bad.sort(key=lambda r: r["first_seen_by_pipeline"])
+    return rows + bad
+
+
+def write_folder_issues_csv(cfg: C.Config, ledger: Ledger,
+                            day_ist: datetime) -> tuple[Path, list[dict]]:
+    """One CSV for both lists (the problem column tells them apart) under
+    the day's reports dir."""
+    day = day_ist.strftime("%Y-%m-%d")
+    out = cfg.reports_dir / day
+    out.mkdir(parents=True, exist_ok=True)
+    rows = build_folder_issues(ledger)
+    path = out / f"folder-issues-{day}.csv"
+    with path.open("w", newline="") as f:
+        w = csv.DictWriter(f, fieldnames=FOLDER_ISSUE_COLS)
+        w.writeheader()
+        w.writerows(rows)
+    return path, rows
+
+
+def build_folder_issues_message(rows: list[dict],
+                                day_ist: datetime) -> str:
+    """Two sections, ≤10 lines each + an overflow count (no silent caps)."""
+    inc = [r for r in rows if r["problem"] == "incomplete_upload"]
+    bad = [r for r in rows if r["problem"] == "bad_path"]
+    lines = [f"🗂 folder issues — {day_ist.strftime('%b')} {day_ist.day}"]
+
+    def _fmt(r):
+        who = " / ".join(x for x in (r["operator"], r["player_email"])
+                         if x) or r["drive_path"]
+        return (f"- {who} / {r['folder']} — {r['detail']} · first seen "
+                f"{r['age_hours']:.0f} h ago")
+
+    lines.append(f"incomplete uploads ({len(inc)}):")
+    lines.extend(_fmt(r) for r in inc[:10])
+    if len(inc) > 10:
+        lines.append(f"  … and {len(inc) - 10} more in the csv")
+    if not inc:
+        lines.append("- none")
+    lines.append(f"badly-named / misplaced folders ({len(bad)}):")
+    lines.extend(_fmt(r) for r in bad[:10])
+    if len(bad) > 10:
+        lines.append(f"  … and {len(bad) - 10} more in the csv")
+    if not bad:
+        lines.append("- none")
+    lines.append("📎 folder-issues csv attached")
+    return "\n".join(lines)

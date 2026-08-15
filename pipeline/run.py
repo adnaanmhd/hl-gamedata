@@ -766,6 +766,51 @@ def send_daily_report_if_due(cfg: C.Config, ledger: Ledger,
     return True
 
 
+def send_folder_issues_if_due(cfg: C.Config, ledger: Ledger,
+                              now_ist: datetime | None = None) -> bool:
+    """Second daily report (Adnaan via d3, 08-15): incomplete uploads +
+    badly-named folders. A live snapshot, NOT window-based — no offset, no
+    anchor, no cohort logic (different question from the payment sheet);
+    same trigger hour, own marker, SEPARATE message + CSV so chase-work
+    forwards without the payment sheet. An empty snapshot sends nothing
+    (an empty forward is noise) but still writes the marker."""
+    now_ist = now_ist or datetime.now(C.IST)
+    if now_ist.hour < C.DAILY_REPORT_HOUR_IST:
+        return False
+    day = now_ist.strftime("%Y-%m-%d")
+    marker = cfg.reports_dir / day / ".issues-sent"
+    if marker.exists():
+        return False
+    csv_path, rows = reports.write_folder_issues_csv(cfg, ledger, now_ist)
+    if not rows:
+        print("[folder-issues] none outstanding — not sent")
+        marker.parent.mkdir(parents=True, exist_ok=True)
+        marker.touch()
+        return False
+    msg = reports.build_folder_issues_message(rows, now_ist)
+    try:
+        telegram.send_message(cfg, msg)
+    except telegram.TelegramError as e:
+        # marker unwritten — retried next tick; a duplicate message is the
+        # cheap failure mode (same doctrine as the payment report)
+        print(f"[folder-issues-undelivered] {e}", file=sys.stderr)
+        return False
+    marker.parent.mkdir(parents=True, exist_ok=True)
+    marker.touch()
+    try:
+        telegram.send_document(cfg, csv_path, caption="folder issues")
+    except telegram.TelegramError as e:
+        print(f"[folder-issues-csv-undelivered] {e} — file at {csv_path}",
+              file=sys.stderr)
+        try:
+            telegram.send_message(
+                cfg, f"⚠️ folder-issues csv failed to send — file is on "
+                     f"the VM at {csv_path}")
+        except telegram.TelegramError:
+            pass
+    return True
+
+
 def _batch_fallback_count(cfg: C.Config, sids: list[str]) -> int:
     """R23 'N on fallback model' from the dossiers of record: the run-level
     _VLM_RUN_STATE map is empty for crash-resumed batches, which silently
@@ -1176,6 +1221,7 @@ def _overlapped_run(cfg: C.Config, ledger: Ledger, alerts: list[str], *,
             try:
                 if send_telegram:
                     send_daily_report_if_due(cfg, ledger)
+                    send_folder_issues_if_due(cfg, ledger)
                 ledger.backup_daily(cfg.backups, keep=C.LEDGER_BACKUP_KEEP)
             except Exception as e:
                 _alert(cfg, f"periodic duties failed (run continues): "
@@ -1402,6 +1448,7 @@ def run(cfg: C.Config, *, max_batches: int = 50,
                         f"VLM sweep repeatedly failing (§13)", alerts)
         if send_telegram:
             send_daily_report_if_due(cfg, ledger)
+            send_folder_issues_if_due(cfg, ledger)
         ledger.close()
         return 0
     finally:
