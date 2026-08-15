@@ -1,0 +1,16 @@
+[Unit]
+Description=HL Phase-1 gaming pipeline run (R8: 30-min tick, queue-drain-then-exit)
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=__USER__
+WorkingDirectory=__HOME__/hl-gamedata
+Environment=HL_PIPELINE_WORKERS=8
+# oneshot default start timeout would kill a multi-hour backlog run
+TimeoutStartSec=infinity
+# bash for pipefail; tee -> journald AND ~/hl-pipeline/logs/ (plan §7.7).
+# uv by absolute path: systemd has no user PATH. The --with trio is
+# mandatory: translator/rrd.py imports rerun at module top.
+ExecStart=/bin/bash -o pipefail -c 'exec __HOME__/.local/bin/uv run --with numpy --with opencv-python-headless --with rerun-sdk python -m pipeline run 2>&1 | tee -a __HOME__/hl-pipeline/logs/pipeline-$(date +%%F).log'

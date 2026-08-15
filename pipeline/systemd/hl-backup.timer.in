@@ -1,0 +1,9 @@
+[Unit]
+Description=HL nightly GCS backup at 03:00 local (= IST — vm_setup.sh sets the VM timezone first)
+
+[Timer]
+OnCalendar=03:00
+Persistent=true
+
+[Install]
+WantedBy=timers.target
