@@ -61,6 +61,7 @@ class BatchStats:
     pending: int = 0
     incomplete: int = 0
     ok: bool = True
+    on_fallback: int = 0     # R23: verdicts that used a laddered-down model
 
 
 def build_batch_message(b: BatchStats, pace: PaceStatus | None) -> str:
@@ -84,6 +85,10 @@ def build_batch_message(b: BatchStats, pace: PaceStatus | None) -> str:
         f"(Σ {total:.1f}/{2 * C.TARGET_HOURS_PER_GAME:.0f})")
     lines.append(f"queue: {b.pending} sessions pending · "
                  f"{b.incomplete} incomplete")
+    if b.on_fallback:
+        # R23-approved format addition (08-15): only when a verdict came
+        # from a laddered-down model
+        lines.append(f"{b.on_fallback} on fallback model")
     if pace is not None and pace.alarm:
         lines.append(
             f"⚠️ PACE need {pace.need_total:.0f} h/day · trailing "

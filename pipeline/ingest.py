@@ -5,9 +5,12 @@ batch (FIFO + lagging-game priority) -> download + checksum verify + payload
 sniff. Drive I is READ-ONLY forever (R6): nothing is ever written or deleted
 there, and no status files land in it.
 
-Path contract (§2, Q1/Q5): `<game>/<operator_email>/<player_email>/<session>/`
-with the game folders directly at the drive root. Strict parsing: bad game
-token or non-email folder names -> QUARANTINED + report line.
+Path contract (§2, Q1/Q5 as amended 08-15):
+`<game>/<operator_NAME>/<player_email>/<session>/` with the game folders
+directly at the drive root. Operator folders are FREE-TEXT NAMES (Q5
+amendment); player folders stay strict emails and session folders stay the
+strict id pattern — the junk guard lives one level down. Bad game token,
+non-email player, or malformed session id -> QUARANTINED + report line.
 """
 from __future__ import annotations
 
@@ -122,9 +125,9 @@ def parse_listing(entries: list[dict]) -> tuple[list[DriveSession],
             continue
         game, op, player, sess = parts
         why = None
-        if not _EMAIL_RE.match(op):
-            why = f"operator folder {op!r} is not an email"
-        elif not _EMAIL_RE.match(player):
+        # operator level: free-text names by ruling (Q5 amended 08-15) —
+        # no format check; junk detection relies on the two levels below
+        if not _EMAIL_RE.match(player):
             why = f"player folder {player!r} is not an email"
         elif not _SESSION_RE.match(sess):
             why = f"session folder {sess!r} doesn't match the id pattern"

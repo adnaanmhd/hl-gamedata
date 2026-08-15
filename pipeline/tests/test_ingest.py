@@ -18,14 +18,27 @@ def test_parse_valid_session():
     assert set(C.REQUIRED_FILES) <= set(s.files)
 
 
-def test_parse_quarantines_non_email_and_bad_depth():
-    entries = (make_session_entries(op="Bisrambha+Samik")
+def test_parse_operator_names_ingest_since_q5_amendment():
+    """Q5 amended 08-15: operator folders are free-text NAMES — the 08-14
+    name-folders (`kamla/Rukaiya+Tanzeela`, …) are valid by design."""
+    sessions, quarantined, _ = ingest.parse_listing(
+        make_session_entries(op="Bisrambha+Samik"))
+    assert not quarantined
+    assert len(sessions) == 1
+    assert sessions[0].operator_email == "Bisrambha+Samik"
+
+
+def test_parse_quarantines_non_email_player_and_bad_depth():
+    """The junk guard lives one level down: player folders stay strict
+    emails, and short paths still quarantine."""
+    entries = (make_session_entries(player="Rukaiya Tanzeela")
                + [{"Path": f"kamla/x@y.co/{SID2}/video.mp4", "Name": "video.mp4",
                    "IsDir": False, "Size": 1, "ModTime": "", "Hashes": {}}])
     sessions, quarantined, _ = ingest.parse_listing(entries)
     assert sessions == []
     whys = " | ".join(w for _, w in quarantined)
-    assert "not an email" in whys and "depth" in whys
+    assert "player folder" in whys and "not an email" in whys
+    assert "depth" in whys
 
 
 def test_parse_ignores_out_of_tree():

@@ -6,7 +6,24 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from pipeline import config as C          # noqa: E402
+from pipeline import run as _runmod       # noqa: E402
+from pipeline import vlm as _vlmmod       # noqa: E402
 from pipeline.ledger import Ledger        # noqa: E402
+
+
+@pytest.fixture(autouse=True)
+def _module_state(monkeypatch):
+    """The pre-driver suite IS the lockstep regression (§18.8): it runs
+    with PIPELINE_OVERLAP=False; driver tests opt in explicitly. Also
+    resets vlm endpoint/rung stickiness and the run-level R23 state so
+    nothing leaks between tests."""
+    monkeypatch.setattr(C, "PIPELINE_OVERLAP", False)
+    monkeypatch.setattr(_vlmmod, "_which", None)
+    monkeypatch.setattr(_vlmmod, "_rung", 0)
+    # "" = prev-key rung unarmed; None would read the REAL secrets.env
+    monkeypatch.setattr(_vlmmod, "_prev_key_cache", "")
+    _vlmmod._session_models.clear()
+    _runmod._reset_vlm_run_state()
 
 
 @pytest.fixture

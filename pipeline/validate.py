@@ -554,6 +554,9 @@ def _metrics(rep: dict, aux: dict) -> dict:
         "frame_sync": (rep.get("lag") or {}).get("frame_sync"),
         "vlm_requests": (rep.get("vlm") or {}).get("requests"),
         "scanner": aux.get("scanner_stats"),
+        # R23: models that actually answered; any rung>0 entry flags the
+        # verdict as fallback-model (dossier + batch line)
+        "models_used": aux.get("models_used") or [],
     }
 
 
@@ -631,8 +634,12 @@ def validate_session(work_dir: Path, dossier_dir: Path, *,
 
     eng = load_engine()
     gem = None
+    vlmmod.begin_session()
     if gemini_key and not skip_vlm:
-        gem = eng.Gemini(gemini_key, gemini_model or "gemini-3.7-flash")
+        # LadderGemini, not eng.Gemini: gives the SWEEP the R21 endpoint
+        # failover + R23 rung ladder without touching the engine (§10a)
+        gem = vlmmod.LadderGemini(gemini_key,
+                                  gemini_model or "gemini-3.7-flash")
     raw_dir = work_dir / "raw"
     raw_by_sid = {}
     if (raw_dir / "metadata.json").exists() and \
@@ -667,6 +674,8 @@ def validate_session(work_dir: Path, dossier_dir: Path, *,
                      vlm_expected=bool(gemini_key) and not skip_vlm)
     aux["has_raw"] = bool(raw_by_sid)
     aux["vlm_required"] = True
+    # every (key tag, model) that answered — R23 flag trail into the verdict
+    aux["models_used"] = vlmmod.session_models()
 
     res = map_reasons(rep, aux, expected_game)
     _write_verdict(dossier_dir, work_dir.name, res)

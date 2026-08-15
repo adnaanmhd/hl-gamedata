@@ -8,9 +8,12 @@ Schema is plan §8 verbatim plus one additive column `duration_raw_s`
 (pre-trim clip length probed at ingest) — needed for the §14 "collected"
 line; additive-only so §8 stays a valid subset.
 
-Concurrency: one writer process (run.py holds the run lock); workers return
-results to the parent, which does all ledger writes. WAL mode so a crashed
-process never corrupts the file.
+Concurrency: one process (run.py holds the run lock), up to three writer
+threads (D/V/U under the R20 overlap driver), ONE connection per thread,
+short transactions; validation subprocesses never touch the ledger — the
+owning thread writes. WAL + busy_timeout so concurrent writers queue
+briefly instead of raising `database is locked`, and a crashed process
+never corrupts the file.
 """
 from __future__ import annotations
 
@@ -64,6 +67,7 @@ class Ledger:
         self.db.row_factory = sqlite3.Row
         self.db.execute("PRAGMA journal_mode=WAL")
         self.db.execute("PRAGMA synchronous=NORMAL")
+        self.db.execute("PRAGMA busy_timeout=10000")
         self.db.executescript(_SCHEMA)
         self.db.commit()
 
@@ -204,12 +208,21 @@ class Ledger:
             "SELECT * FROM incomplete ORDER BY first_seen").fetchall()
 
     # -------------------------------------------------------------- batches
-    def start_batch(self) -> int:
+    def start_batch(self, sessions: list[str] | None = None) -> int:
+        """Open a batch. The sid list is written at START (not only at
+        finish) so an in-flight batch — the only kind that ever needs
+        resuming — regroups exactly after a kill (plan §6)."""
         cur = self.db.execute(
-            "INSERT INTO batches(started, summary_json) VALUES(?, '{}')",
-            (_now(),))
+            "INSERT INTO batches(started, summary_json) VALUES(?, ?)",
+            (_now(), json.dumps({"sessions": sessions or []})))
         self.db.commit()
         return cur.lastrowid
+
+    def open_batches(self) -> list[sqlite3.Row]:
+        """Batches started but never finished — resume regroup input."""
+        return self.db.execute(
+            "SELECT * FROM batches WHERE finished IS NULL "
+            "ORDER BY batch_no").fetchall()
 
     def finish_batch(self, batch_no: int, summary: dict) -> None:
         self.db.execute(

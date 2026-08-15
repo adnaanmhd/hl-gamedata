@@ -71,6 +71,22 @@ VLM_BACKOFF_BASE_S = 2.0
 VLM_BACKOFF_MAX_S = 60.0
 VLM_MAX_TRIES = 5
 
+# Endpoint failover (R21): genlang <-> Vertex express. Merged DARK; flipped
+# to the §7.6 smoke-matrix result from the VM before go-live (config commit).
+# False = single-endpoint behavior (status quo).
+VLM_FAILOVER_ENABLED = False
+
+# R23 quota ladder: complete rung-model list on GEMINI_API_KEY, top rung
+# first (the model of record). Below the last entry comes the prev-key rung
+# (GEMINI_API_KEY_PREV at the rung-0 model), then HOLD_VLM. Rungs are sticky
+# for the rest of the run; every run restarts at rung 0. Ids below rung 0
+# are [assumed] until the §7.6 probes verify them (plan §2).
+VLM_MODEL_LADDER = ("gemini-3.7-flash", "gemini-3.5-flash", "gemini-3.1-pro")
+
+# Overlap driver (R20): False = byte-identical lockstep fallback.
+PIPELINE_OVERLAP = True
+MAX_BATCHES_IN_FLIGHT = 3         # R5 amendment: <=3 batches (~30 sessions)
+
 # Ledger states (§6 state machine)
 STATES = (
     "DISCOVERED", "INCOMPLETE", "DOWNLOADING", "INGESTED", "VALIDATING",
@@ -124,6 +140,10 @@ class Config:
 
     @property
     def gemini_key(self) -> str: return self.secrets.get("GEMINI_API_KEY", "")
+    @property
+    def gemini_key_prev(self) -> str:
+        # R23 last-resort rung; empty string = rung not armed
+        return self.secrets.get("GEMINI_API_KEY_PREV", "")
     @property
     def gemini_model(self) -> str:
         return self.secrets.get("GEMINI_MODEL", "gemini-3.7-flash")

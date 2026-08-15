@@ -12,11 +12,15 @@ from __future__ import annotations
 
 import concurrent.futures
 import json
+import multiprocessing
 import os
+import queue
 import shutil
 import subprocess
 import sys
+import threading
 import time
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -26,6 +30,22 @@ from .ledger import Ledger
 
 RESUMABLE = ("DOWNLOADING", "INGESTED", "VALIDATING", "FIX_QUEUED",
              "FIXING", "REVALIDATING", "READY", "PACKAGED", "UPLOADED")
+
+# States that mean "still mid-pipeline this run" — a batch whose session
+# sits in one of these after U's pass stays OPEN and carries to the next
+# run via the start-written batches.summary_json (plan §6).
+_MID_PIPELINE = set(RESUMABLE)
+
+# R23 run-level VLM state, owned by the parent process: the run's current
+# sticky rung (injected into every validation job, max of worker reports
+# kept — survives spawn pool generations) and, per session, whether the
+# LAST verdict used a laddered-down model. Reset at every run() entry.
+_VLM_RUN_STATE: dict = {"rung": 0, "fallback": {}}
+
+
+def _reset_vlm_run_state() -> None:
+    _VLM_RUN_STATE["rung"] = 0
+    _VLM_RUN_STATE["fallback"] = {}
 
 
 # ------------------------------------------------------------------ lock
@@ -65,7 +85,12 @@ def release_lock(cfg: C.Config) -> None:
 
 def _validate_worker(args: dict) -> dict:
     """Runs in a subprocess: full Phase-II validation of one session."""
+    from . import vlm as vlmmod
     from .validate import validate_session
+    # R23 run-level stickiness: start at the parent-injected rung (spawn
+    # workers are fresh interpreters — module state alone would reset every
+    # pool generation) and report the ending rung back for the parent's max.
+    vlmmod._rung = int(args.get("vlm_rung", 0))
     try:
         res = validate_session(
             Path(args["work_dir"]), Path(args["dossier_dir"]),
@@ -74,11 +99,16 @@ def _validate_worker(args: dict) -> dict:
         return {"sid": args["sid"], "bin": res.bin,
                 "hold_vlm": res.hold_vlm, "reasons": res.reasons,
                 "advisories": res.advisories,
-                "engine_verdict": res.engine_verdict}
+                "engine_verdict": res.engine_verdict,
+                "vlm_rung": vlmmod._rung,
+                "vlm_fallback": any(
+                    m.get("rung", 0) > 0
+                    for m in (res.metrics or {}).get("models_used", []))}
     except Exception as e:
         import traceback
         return {"sid": args["sid"], "error": f"{type(e).__name__}: {e}",
-                "tb": traceback.format_exc()[-1500:]}
+                "tb": traceback.format_exc()[-1500:],
+                "vlm_rung": vlmmod._rung}
 
 
 # ------------------------------------------------------------ run phases
@@ -145,14 +175,21 @@ def _validate_phase(cfg, ledger, sids, alerts, *, workers: int) -> None:
                      "payload": ingest.sniff_payload(work),
                      "expected_game": row["game"] or None,
                      "gemini_key": cfg.gemini_key,
-                     "gemini_model": cfg.gemini_model})
+                     "gemini_model": cfg.gemini_model,
+                     "vlm_rung": _VLM_RUN_STATE["rung"]})
     if not jobs:
         return
+    # spawn, not the platform default: fork on Linux would clone a
+    # multi-threaded parent holding sqlite/stdio locks and intermittently
+    # deadlock children (plan §6); macOS already spawns, so Mac tests
+    # cannot surface the fork wedge — the guard in __main__.py makes
+    # spawn's main-module re-import safe
+    ctx = multiprocessing.get_context("spawn")
     results: list[dict] = []
     if workers > 1 and len(jobs) > 1:
         try:
             with concurrent.futures.ProcessPoolExecutor(
-                    max_workers=workers) as ex:
+                    max_workers=workers, mp_context=ctx) as ex:
                 results = list(ex.map(_validate_worker, jobs))
         except concurrent.futures.process.BrokenProcessPool:
             # a native crash (cv2/ffmpeg segfault, OOM kill) took the pool
@@ -163,7 +200,7 @@ def _validate_phase(cfg, ledger, sids, alerts, *, workers: int) -> None:
             for j in jobs:
                 try:
                     with concurrent.futures.ProcessPoolExecutor(
-                            max_workers=1) as ex1:
+                            max_workers=1, mp_context=ctx) as ex1:
                         results.append(
                             list(ex1.map(_validate_worker, [j]))[0])
                 except concurrent.futures.process.BrokenProcessPool:
@@ -176,11 +213,17 @@ def _validate_phase(cfg, ledger, sids, alerts, *, workers: int) -> None:
             results.append(_validate_worker(j))
     for r in results:
         sid = r["sid"]
+        if "vlm_rung" in r:
+            # parent keeps the max — the run's rung survives pool
+            # generations (R23 run-level stickiness)
+            _VLM_RUN_STATE["rung"] = max(_VLM_RUN_STATE["rung"],
+                                         int(r["vlm_rung"]))
         if "error" in r:
             ledger.set_state(sid, "QUARANTINED",
                              f"validation crashed: {r['error']}")
             _alert(cfg, f"validation crashed on {sid}: {r['error']}", alerts)
             continue
+        _VLM_RUN_STATE["fallback"][sid] = bool(r.get("vlm_fallback"))
         ledger.set_reasons(sid, r["reasons"], r["bin"])
         if r["hold_vlm"]:
             ledger.set_state(sid, "HOLD_VLM",
@@ -353,7 +396,7 @@ def _deliver_phase(cfg, ledger, sids, alerts,
 def process_batch(cfg: C.Config, ledger: Ledger, sids: list[str], *,
                   alerts: list[str],
                   dest_prefix: str = C.VENDOR) -> reports.BatchStats:
-    batch_no = ledger.start_batch()
+    batch_no = ledger.start_batch(sessions=sids)
     t0 = datetime.now(timezone.utc)
     _download_phase(cfg, ledger, sids, alerts)
     _validate_phase(cfg, ledger, sids, alerts, workers=cfg.workers)
@@ -397,7 +440,9 @@ def process_batch(cfg: C.Config, ledger: Ledger, sids: list[str], *,
         hours_kamla=hours["kamla"], hours_ow=hours["outer_wilds"],
         pending=counts.get("DISCOVERED", 0),
         incomplete=len(ledger.incomplete_list()),
-        ok=dstats["upload_failures"] == 0)
+        ok=dstats["upload_failures"] == 0,
+        on_fallback=sum(1 for s in all_sids
+                        if _VLM_RUN_STATE["fallback"].get(s)))
     ledger.finish_batch(batch_no, {
         "delivered": b.delivered, "rejected": b.rejected,
         "hours_delta": b.hours_delta, "auto_fixed": b.auto_fixed,
@@ -482,6 +527,266 @@ def send_daily_report_if_due(cfg: C.Config, ledger: Ledger,
     return True
 
 
+# ------------------------------------------------- overlap driver (R20)
+
+@dataclass
+class _Batch:
+    """One batch's descriptor as it moves D -> V -> U (plan §6)."""
+    no: int
+    sids: list[str]
+    t0_utc: datetime
+    slot: bool = False        # True when D took a flight-semaphore slot
+    dl_s: float = 0.0
+    val_s: float = 0.0
+    up_s: float = 0.0
+    on_fallback: int = 0      # R23 count for this batch's verdicts
+
+
+def _partition_resume(ledger: Ledger) -> tuple[list[_Batch], list[_Batch],
+                                               list[_Batch]]:
+    """Group RESUMABLE rows back into their original batches (open batches'
+    start-written summary_json; split children ride with their parent),
+    FIFO-regroup any strays into new batches, and route each batch to its
+    most-upstream owner: D (still downloading), V (validating/fixing), or
+    U (delivering only). A kill at any instant resumes exactly (§13)."""
+    rows = ledger.by_state(*RESUMABLE)
+    if not rows:
+        return [], [], []
+    state = {r["session_id"]: r["state"] for r in rows}
+    parent = {r["session_id"]: r["parent_id"] for r in rows}
+    assigned: dict[str, int] = {}
+    groups: dict[int, list[str]] = {}
+    for b in ledger.open_batches():
+        try:
+            sids = (json.loads(b["summary_json"] or "{}")
+                    .get("sessions")) or []
+        except json.JSONDecodeError:
+            sids = []
+        for s in sids:
+            if s in state and s not in assigned:
+                assigned[s] = b["batch_no"]
+                groups.setdefault(b["batch_no"], []).append(s)
+    for s, p in parent.items():
+        if s not in assigned and p in assigned:
+            assigned[s] = assigned[p]
+            groups[assigned[p]].append(s)
+    strays = [s for s in state if s not in assigned]
+    for i in range(0, len(strays), C.BATCH_SIZE):
+        chunk = strays[i:i + C.BATCH_SIZE]
+        groups[ledger.start_batch(sessions=chunk)] = chunk
+    d_q: list[_Batch] = []
+    v_q: list[_Batch] = []
+    u_q: list[_Batch] = []
+    v_states = {"INGESTED", "VALIDATING", "FIX_QUEUED", "FIXING",
+                "REVALIDATING"}
+    for no in sorted(groups):
+        b = _Batch(no=no, sids=groups[no],
+                   t0_utc=datetime.now(timezone.utc))
+        sts = {state[s] for s in b.sids}
+        if "DOWNLOADING" in sts:
+            d_q.append(b)
+        elif sts & v_states:
+            v_q.append(b)
+        else:
+            u_q.append(b)
+    return d_q, v_q, u_q
+
+
+def _overlapped_run(cfg: C.Config, ledger: Ledger, alerts: list[str], *,
+                    max_batches: int, dest_prefix: str,
+                    send_telegram: bool) -> None:
+    """Three threads at batch granularity (R20): D downloads batch N+1
+    while V (this thread) validates batch N and U uploads batch N−1.
+    Handoff via two queues of _Batch descriptors; ≤MAX_BATCHES_IN_FLIGHT
+    new batches local at once; every thread has its OWN Ledger connection;
+    writes stay phase-scoped exactly as in lockstep (§6)."""
+    q_dv: queue.Queue = queue.Queue()
+    q_vu: queue.Queue = queue.Queue()
+    stop = threading.Event()
+    flight = threading.Semaphore(C.MAX_BATCHES_IN_FLIGHT)
+    attempted: set[str] = set()
+
+    d_resume, v_resume, u_resume = _partition_resume(ledger)
+    for b in d_resume + v_resume + u_resume:
+        attempted.update(b.sids)
+
+    def d_thread() -> None:
+        dl = Ledger(cfg.ledger_path)
+        try:
+            for b in d_resume:
+                if stop.is_set():
+                    q_dv.put(b)     # V decides; never strand a batch
+                    continue
+                t0 = time.monotonic()
+                _download_phase(cfg, dl, b.sids, alerts)
+                b.dl_s = time.monotonic() - t0
+                print(f"[dl b{b.no}] resumed {len(b.sids)} session(s) "
+                      f"{b.dl_s / 60:.1f}m")
+                q_dv.put(b)
+            started = 0
+            while not stop.is_set() and started < max_batches:
+                if deliver.disk_free_gb(cfg.home) < C.DISK_LOW_WATER_GB:
+                    _alert(cfg, f"disk under {C.DISK_LOW_WATER_GB} GB free "
+                                f"— downloads paused (F7)", alerts)
+                    break               # V/U keep draining and wiping
+                flight.acquire()
+                if stop.is_set():
+                    flight.release()
+                    break
+                sids = [s for s in ingest.next_batch(dl)
+                        if s not in attempted]
+                hold_retry = False
+                if not sids:
+                    # nothing new to download: hand HOLD_VLM retries to V
+                    sids = [r["session_id"]
+                            for r in dl.by_state("HOLD_VLM")
+                            if r["session_id"] not in attempted]
+                    sids = sids[:C.BATCH_SIZE]
+                    hold_retry = True
+                if not sids:
+                    flight.release()
+                    break
+                attempted.update(sids)
+                b = _Batch(no=dl.start_batch(sessions=sids), sids=sids,
+                           t0_utc=datetime.now(timezone.utc), slot=True)
+                started += 1
+                if not hold_retry:
+                    t0 = time.monotonic()
+                    _download_phase(cfg, dl, sids, alerts)
+                    b.dl_s = time.monotonic() - t0
+                    print(f"[dl b{b.no}] {len(sids)} session(s) "
+                          f"{b.dl_s / 60:.1f}m")
+                q_dv.put(b)
+        except Exception as e:
+            _alert(cfg, f"download thread crashed: {type(e).__name__}: {e}",
+                   alerts)
+        finally:
+            dl.close()
+            q_dv.put(None)
+
+    def u_process(ul: Ledger, b: _Batch) -> None:
+        t0 = time.monotonic()
+        dstats = _deliver_phase(cfg, ul, b.sids, alerts,
+                                dest_prefix=dest_prefix)
+        b.up_s = time.monotonic() - t0
+        rejected, labels, fixed = 0, [], 0
+        for sid in b.sids:
+            row = ul.get(sid)
+            if not row:
+                continue
+            if row["state"] == "REJECTED":
+                rejected += 1
+                deliver.finalize_rejected(cfg, ul, sid)
+                try:
+                    blocking = [x["code"] for x in
+                                json.loads(row["reasons_json"] or "[]")
+                                if x.get("blocking")]
+                except json.JSONDecodeError:
+                    blocking = []
+                if blocking:
+                    lbl = reports.reason_label(blocking[0])
+                    if lbl not in labels:
+                        labels.append(lbl)
+            elif row["state"] == "DELIVERED" and row["fix_attempts"] > 0:
+                fixed += 1
+        # the R22 tuning gauge: what bound this batch
+        print(f"[batch b{b.no}] stages dl {b.dl_s / 60:.1f}m · "
+              f"val {b.val_s / 60:.1f}m · up {b.up_s / 60:.1f}m")
+        still_open = [s for s in b.sids
+                      if (r := ul.get(s)) and r["state"] in _MID_PIPELINE]
+        if still_open:
+            # gate-failed session handed back to V's domain — NEXT run
+            # (attempted-set semantics); the batch stays open and its
+            # message fires on the run that finishes it (§6)
+            print(f"[up b{b.no}] batch left open — "
+                  f"{len(still_open)} session(s) mid-pipeline "
+                  f"(e.g. {still_open[0]})")
+            if b.slot:
+                flight.release()
+            return
+        counts = ul.counts_by_state()
+        hours = {g: ul.delivered_hours(g) for g in C.GAMES}
+        stats = reports.BatchStats(
+            batch_no=b.no, finished_ist=datetime.now(C.IST),
+            duration_min=max(round((datetime.now(timezone.utc) - b.t0_utc)
+                                   .total_seconds() / 60), 1),
+            delivered=dstats["delivered"],
+            total=len([s for s in b.sids if ul.get(s)]),
+            auto_fixed=fixed, rejected=rejected, reject_labels=labels,
+            hours_delta=dstats["hours"],
+            hours_kamla=hours["kamla"], hours_ow=hours["outer_wilds"],
+            pending=counts.get("DISCOVERED", 0),
+            incomplete=len(ul.incomplete_list()),
+            ok=dstats["upload_failures"] == 0,
+            on_fallback=b.on_fallback)
+        ul.finish_batch(b.no, {
+            "delivered": stats.delivered, "rejected": stats.rejected,
+            "hours_delta": stats.hours_delta,
+            "auto_fixed": stats.auto_fixed, "sessions": b.sids})
+        if send_telegram and (stats.delivered or stats.rejected):
+            try:
+                telegram.send_message(
+                    cfg, reports.build_batch_message(stats, _pace_now(ul)))
+            except telegram.TelegramError as e:
+                print(f"[batch-msg-undelivered] {e}", file=sys.stderr)
+        if b.slot:
+            flight.release()
+
+    def u_thread() -> None:
+        ul = Ledger(cfg.ledger_path)
+        try:
+            for b in u_resume:
+                u_process(ul, b)
+            while True:
+                b = q_vu.get()
+                if b is None:
+                    break
+                u_process(ul, b)
+        except Exception as e:
+            _alert(cfg, f"upload thread crashed: {type(e).__name__}: {e}",
+                   alerts)
+        finally:
+            ul.close()
+
+    dthr = threading.Thread(target=d_thread, name="hl-D", daemon=True)
+    uthr = threading.Thread(target=u_thread, name="hl-U", daemon=True)
+    dthr.start()
+    uthr.start()
+
+    def v_process(b: _Batch) -> None:
+        t0 = time.monotonic()
+        _validate_phase(cfg, ledger, b.sids, alerts, workers=cfg.workers)
+        kids = _fix_phase(cfg, ledger, b.sids, alerts, workers=cfg.workers)
+        b.sids = b.sids + kids
+        attempted.update(kids)
+        b.val_s = time.monotonic() - t0
+        b.on_fallback = sum(1 for s in b.sids
+                            if _VLM_RUN_STATE["fallback"].get(s))
+        print(f"[val b{b.no}] {len(b.sids)} session(s) "
+              f"{b.val_s / 60:.1f}m")
+        q_vu.put(b)
+
+    try:
+        for b in v_resume:
+            v_process(b)
+        while True:
+            item = q_dv.get()
+            if item is None:
+                break
+            v_process(item)
+            # periodic duties INSIDE the drain loop: a multi-hour backlog
+            # run must not sail past 14:00 IST or leave the nightly GCS
+            # sync mirroring a stale backup (§6)
+            if send_telegram:
+                send_daily_report_if_due(cfg, ledger)
+            ledger.backup_daily(cfg.backups, keep=C.LEDGER_BACKUP_KEEP)
+    finally:
+        stop.set()
+        q_vu.put(None)
+        uthr.join()
+        dthr.join()
+
+
 def run(cfg: C.Config, *, max_batches: int = 50,
         dest_prefix: str = C.VENDOR, send_telegram: bool = True) -> int:
     if not acquire_lock(cfg):
@@ -489,6 +794,7 @@ def run(cfg: C.Config, *, max_batches: int = 50,
         return 0
     caff = None
     alerts: list[str] = []
+    _reset_vlm_run_state()                 # every run restarts at rung 0
     try:
         cfg.ensure_dirs()
         ledger = Ledger(cfg.ledger_path)
@@ -502,6 +808,24 @@ def run(cfg: C.Config, *, max_batches: int = 50,
                     print(f"[integrity] {f}")
         except RuntimeError as e:
             _alert(cfg, f"Drive scan failed: {e}", alerts)
+
+        if C.PIPELINE_OVERLAP:
+            try:
+                caff = subprocess.Popen(["caffeinate", "-i"])
+            except FileNotFoundError:
+                caff = None                # Linux VM: host never sleeps (R8)
+            _overlapped_run(cfg, ledger, alerts, max_batches=max_batches,
+                            dest_prefix=dest_prefix,
+                            send_telegram=send_telegram)
+            held = ledger.counts_by_state().get("HOLD_VLM", 0)
+            if held:
+                _alert(cfg, f"{held} session(s) still HOLD_VLM at end of "
+                            f"run — VLM sweep repeatedly failing (§13)",
+                       alerts)
+            if send_telegram:
+                send_daily_report_if_due(cfg, ledger)
+            ledger.close()
+            return 0
 
         attempted: set[str] = set()
         for _ in range(max_batches):
