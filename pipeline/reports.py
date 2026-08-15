@@ -197,10 +197,15 @@ def build_daily_message(d: DailyStats, pace: PaceStatus | None) -> str:
 # Schema per Adnaan (08-15, via the d3 session; respec same day): one row
 # per (operator, player) spanning both games — three kamla_/ow_ pairs
 # after the identity columns. No game column, no counts, no cumulative.
+# v3 (08-15): + the two total columns. Their names are Adnaan's EXACT
+# strings — "hours" vs "hrs" and "delivered" vs "accepted" deliberately
+# NOT normalized to the neighboring columns (flagged to him by d3; a
+# harmonization later is a one-line change here).
 SHEET_COLS = ["date", "operator", "player_email",
               "kamla_hrs_uploaded", "ow_hrs_uploaded",
               "kamla_accepted_hrs", "ow_accepted_hrs",
-              "kamla_rejection_reasons", "ow_rejection_reasons"]
+              "kamla_rejection_reasons", "ow_rejection_reasons",
+              "total_uploaded_hours", "total_delivered_hours"]
 
 
 def _day_bounds_utc(day_ist: datetime) -> tuple[str, str]:
@@ -305,6 +310,12 @@ def build_sheet_rows(ledger: Ledger, day_ist: datetime,
                 " ".join(ordered_reject_labels(b["kamla_rej"])),
             "ow_rejection_reasons":
                 " ".join(ordered_reject_labels(b["ow_rej"]))}
+        # totals sum the ROUNDED parts: the visible columns must add up
+        # exactly on a payment document (v3, Adnaan 08-15)
+        row["total_uploaded_hours"] = round(
+            row["kamla_hrs_uploaded"] + row["ow_hrs_uploaded"], 2)
+        row["total_delivered_hours"] = round(
+            row["kamla_accepted_hrs"] + row["ow_accepted_hrs"], 2)
         # suppress no-activity rows: nothing uploaded/accepted/rejected in
         # the window (the old sheet listed every player ever seen)
         if any(row[c] > 0.0 for c in
@@ -340,17 +351,22 @@ def write_payment_sheet(cfg: C.Config, ledger: Ledger, day_ist: datetime,
     ops: dict[str, dict] = {}
     for r in rows:
         o = ops.setdefault(r["operator"], {
-            "ku": 0.0, "ou": 0.0, "ka": 0.0, "oa": 0.0})
+            "ku": 0.0, "ou": 0.0, "ka": 0.0, "oa": 0.0,
+            "tu": 0.0, "td": 0.0})
         o["ku"] += r["kamla_hrs_uploaded"]
         o["ou"] += r["ow_hrs_uploaded"]
         o["ka"] += r["kamla_accepted_hrs"]
         o["oa"] += r["ow_accepted_hrs"]
+        o["tu"] += r["total_uploaded_hours"]
+        o["td"] += r["total_delivered_hours"]
     md += ["", "## Per-operator rollup", "",
            "| operator | kamla_hrs_uploaded | ow_hrs_uploaded | "
-           "kamla_accepted_hrs | ow_accepted_hrs |", "|---|---|---|---|---|"]
+           "kamla_accepted_hrs | ow_accepted_hrs | total_uploaded_hours | "
+           "total_delivered_hours |", "|---|---|---|---|---|---|---|"]
     for op, o in sorted(ops.items()):
         md.append(f"| {op} | {o['ku']:.2f} | {o['ou']:.2f} | "
-                  f"{o['ka']:.2f} | {o['oa']:.2f} |")
+                  f"{o['ka']:.2f} | {o['oa']:.2f} | {o['tu']:.2f} | "
+                  f"{o['td']:.2f} |")
 
     lo, hi = bounds or _day_bounds_utc(day_ist)
     rejects = ledger.db.execute(

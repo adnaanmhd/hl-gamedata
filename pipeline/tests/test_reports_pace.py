@@ -244,6 +244,46 @@ def test_sheet_uploaded_hours_parents_only_on_drive_ctime(tmp_path):
     assert sheet[0]["ow_hrs_uploaded"] == 0.0
 
 
+def test_sheet_totals_sum_rounded_parts_across_both_games(tmp_path):
+    """v3 totals: a both-games player's totals equal the sum of the
+    ROUNDED game columns (the visible numbers must add up on a payment
+    document). Synthetic — no real OW data exists yet."""
+    from pipeline.ledger import Ledger
+    led = Ledger(tmp_path / "l.db")
+    specs = [("kamla", "f5", 445.0, 300.0),        # 0.1236h up, 0.0833h acc
+             ("outer_wilds", "f6", 470.0, 500.0)]  # 0.1306h up, 0.1389h acc
+    for game, tag, raw_s, del_s in specs:
+        sid = f"2026-08-15T04-00-0{tag[-1]}Z_{game}_c_{ord(tag[-1]):016x}"
+        led.insert_session(
+            session_id=sid, game=game, operator_email="Op",
+            player_email="both@x.com", drive_path=f"{game}/Op/both@x.com/x",
+            drive_ctime="2026-08-15T04:01:00.000Z", md5_video=tag,
+            bytes_=1, state="DISCOVERED")
+        led.update(sid, duration_raw_s=raw_s)
+        for st in ("INGESTED", "VALIDATING", "READY", "PACKAGED",
+                   "UPLOADED"):
+            led.set_state(sid, st)
+        led.update(sid, duration_delivered_s=del_s,
+                   delivered_at="2026-08-15T05:00:00+00:00")
+        led.set_state(sid, "DELIVERED")
+    sheet = reports.build_sheet_rows(
+        led, datetime.now(C.IST),
+        bounds=("2026-08-15T00:00:00+00:00", "2026-08-16T00:00:00+00:00"))
+    led.close()
+    assert len(sheet) == 1
+    r = sheet[0]
+    # rounded parts: 0.12 + 0.13 = 0.25 (raw sum would round to 0.25 too,
+    # but the CONTRACT is parts-then-total; assert the exact identity)
+    assert r["total_uploaded_hours"] == round(
+        r["kamla_hrs_uploaded"] + r["ow_hrs_uploaded"], 2)
+    assert r["total_delivered_hours"] == round(
+        r["kamla_accepted_hrs"] + r["ow_accepted_hrs"], 2)
+    assert r["kamla_hrs_uploaded"] == 0.12 and r["ow_hrs_uploaded"] == 0.13
+    assert r["total_uploaded_hours"] == 0.25
+    assert r["kamla_accepted_hrs"] == 0.08 and r["ow_accepted_hrs"] == 0.14
+    assert r["total_delivered_hours"] == 0.22
+
+
 def test_sheet_suppresses_no_activity_rows(tmp_path):
     from pipeline.ledger import Ledger
     led = Ledger(tmp_path / "l.db")
