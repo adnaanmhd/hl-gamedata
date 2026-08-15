@@ -50,6 +50,15 @@ VLM_GAME_TRIPWIRE_GATES = False
 TRIPWIRE_MIN_VOTES = 8
 TRIPWIRE_MIN_VOTE_FRAC = 0.90     # of named guesses
 TRIPWIRE_MIN_FRAME_FRAC = 0.50    # of sampled frames
+# Payment-report window offset (Adnaan 08-15, settling restate-vs-offset
+# as OFFSET): the reporting window ends this many hours BEFORE send time
+# so every cohort in it has settled by generation — one authoritative
+# sheet per day, no restating. EMPIRICAL, not a principle: measured
+# upload->final-outcome lag over 25 settled roots was median 1.76 h /
+# p90 2.77 h / worst non-startup 3.39 h; 4.0 clears every observed case
+# with margin. Re-measure and retune when worker count or batch size
+# changes. Pending cells now signal something genuinely stuck.
+REPORT_OFFSET_H = 4.0
 BATCH_SIZE = 10                   # R5
 FIX_RETRIES = 2                   # R2: 2 fix passes then reject
 RRD_SAMPLE_FRAC = 0.20            # R17: random 20% per game per day

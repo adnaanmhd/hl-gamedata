@@ -606,12 +606,15 @@ def send_daily_report_if_due(cfg: C.Config, ledger: Ledger,
     marker = cfg.reports_dir / day / ".sent"
     if marker.exists():
         return False
-    # the reporting window runs from the PREVIOUS send to now. A fixed
+    # the reporting window ENDS REPORT_OFFSET_H before send time (Adnaan
+    # 08-15: OFFSET over restate) so every cohort in it has settled at
+    # generation, and RUNS FROM the previous window's end. A fixed
     # trailing-24h from a drifting send time leaves gaps (send 14:29 then
     # 14:01 → 28 min of deliveries in no report) or overlaps
     # (review-r3 #24); the persisted anchor makes windows contiguous.
-    # Fallback for the first send ever: trailing 24 h.
-    hi_dt = now_ist.astimezone(timezone.utc)
+    # Fallback for the first send ever: 24 h ending at the offset edge.
+    hi_dt = now_ist.astimezone(timezone.utc) \
+        - timedelta(hours=C.REPORT_OFFSET_H)
     hi = hi_dt.isoformat(timespec="seconds")
     anchor = cfg.reports_dir / ".last_daily_sent"
     lo = (hi_dt - timedelta(hours=24)).isoformat(timespec="seconds")

@@ -142,6 +142,12 @@ def test_daily_window_contiguous_via_persisted_anchor(cfg, ledger,
     assert runmod.send_daily_report_if_due(cfg, ledger, day2) is True
     (lo1, hi1), (lo2, hi2) = sent_bounds
     assert lo2 == hi1                       # contiguous: no gap, no overlap
+    # the window edge sits REPORT_OFFSET_H before send time (Adnaan 08-15)
+    from datetime import datetime as _dt
+    expect_hi1 = (day1.astimezone(runmod.timezone.utc)
+                  - timedelta(hours=C.REPORT_OFFSET_H)
+                  ).isoformat(timespec="seconds")
+    assert hi1 == expect_hi1
 
 
 # ------------------------------- frozen-window gate params (r3 #3)

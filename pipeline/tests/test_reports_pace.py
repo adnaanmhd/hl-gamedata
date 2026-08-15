@@ -329,6 +329,47 @@ def test_sheet_cohort_walks_depth2_tree_split_carries_nothing(tmp_path):
     assert r["total_delivered_hours"] == 0.4
 
 
+def test_offset_window_edge_conservation(tmp_path):
+    """The two properties a reviewer will doubt about the offset window
+    (Adnaan 08-15): an upload just BEFORE the edge whose outcome lands
+    hours later is fully counted in this sheet (the point of the offset),
+    and an upload just AFTER the edge is absent here and present in the
+    NEXT window — hours conserved, never dropped or doubled."""
+    from pipeline.ledger import Ledger
+    led = Ledger(tmp_path / "l.db")
+    edge = "2026-08-15T06:45:22+00:00"
+    next_edge = "2026-08-16T06:45:22+00:00"
+
+    def put(sid, ctime, delivered_at):
+        led.insert_session(
+            session_id=sid, game="kamla", operator_email="Op",
+            player_email="edge@x.com", drive_path="kamla/Op/edge@x.com/x",
+            drive_ctime=ctime, md5_video=sid[-4:], bytes_=1,
+            state="DISCOVERED")
+        led.update(sid, duration_raw_s=3600.0)
+        led.update(sid, duration_delivered_s=3600.0,
+                   delivered_at=delivered_at)
+        led.set_state(sid, "DELIVERED")
+
+    # 10 min before the edge; outcome 2 h AFTER the edge
+    put("2026-08-15T06-35-00Z_kamla_c_00000000000000f8",
+        "2026-08-15T06:35:22.000Z", "2026-08-15T08:45:00+00:00")
+    # 10 min after the edge
+    put("2026-08-15T06-55-00Z_kamla_c_00000000000000f9",
+        "2026-08-15T06:55:22.000Z", "2026-08-15T09:00:00+00:00")
+    win1 = reports.build_sheet_rows(
+        led, datetime.now(C.IST),
+        bounds=("2026-08-14T06:45:22+00:00", edge))
+    win2 = reports.build_sheet_rows(
+        led, datetime.now(C.IST), bounds=(edge, next_edge))
+    led.close()
+    assert len(win1) == 1 and win1[0]["kamla_accepted_hrs"] == 1.0
+    assert len(win2) == 1 and win2[0]["kamla_accepted_hrs"] == 1.0
+    # conservation: 2.0 h total across the two windows, no double count
+    assert win1[0]["total_delivered_hours"] + \
+        win2[0]["total_delivered_hours"] == 2.0
+
+
 def test_sheet_suppresses_no_activity_rows(tmp_path):
     from pipeline.ledger import Ledger
     led = Ledger(tmp_path / "l.db")
