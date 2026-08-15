@@ -206,6 +206,28 @@ def scan(cfg: C.Config, ledger: Ledger,
             # copies must go through INT_DUP_CROSS, not slip past it)
             if existing["drive_path"] and \
                     existing["drive_path"] != ds.drive_path:
+                if existing["state"] == "QUARANTINED":
+                    # the id was first seen at a MALFORMED path (bad depth/
+                    # player folder) and quarantined; the operator has now
+                    # fixed the tree and the same session parses clean at
+                    # its proper path. Blocking it forever punishes the
+                    # correction (review-r3 #7) — re-register.
+                    ledger.update(ds.session_id,
+                                  drive_path=ds.drive_path,
+                                  drive_ctime=ds.ctime, md5_video=vmd5,
+                                  bytes=total_bytes,
+                                  operator_email=ds.operator_email,
+                                  player_email=ds.player_email,
+                                  game=ds.game)
+                    ledger.set_state(
+                        ds.session_id, "DISCOVERED",
+                        f"re-registered: quarantined path healed to "
+                        f"{ds.drive_path}")
+                    res.integrity_flags.append(
+                        f"{ds.session_id}: quarantined path healed — "
+                        f"re-registered at {ds.drive_path}")
+                    res.discovered.append(ds.session_id)
+                    continue
                 res.integrity_flags.append(
                     f"session-id collision: {ds.drive_path} reuses "
                     f"{ds.session_id} already registered at "
@@ -214,7 +236,7 @@ def scan(cfg: C.Config, ledger: Ledger,
                        if vmd5 and vmd5 == existing["md5_video"] else ""))
                 continue
             if vmd5 and existing["md5_video"] and vmd5 != existing["md5_video"]:
-                if existing["state"] == "REJECTED":
+                if existing["state"] in ("REJECTED", "QUARANTINED"):
                     # the replacement video must pass the SAME dedupe bar as
                     # a fresh upload — else a rejected slot becomes a side
                     # door for someone else's already-delivered bytes
@@ -233,28 +255,41 @@ def scan(cfg: C.Config, ledger: Ledger,
                                      new_bytes=total_bytes,
                                      new_ctime=ds.ctime,
                                      dossier_root=cfg.dossiers)
+                    # a stale work dir from an unfinalized reject would
+                    # merge old payload files into the fresh download
+                    # (review-r3 #6)
+                    shutil.rmtree(cfg.work / ds.session_id,
+                                  ignore_errors=True)
+                    shutil.rmtree(cfg.work / f"{ds.session_id}-analysis",
+                                  ignore_errors=True)
                     res.superseded.append(ds.session_id)
                     res.discovered.append(ds.session_id)
                 else:
                     res.integrity_flags.append(
                         f"{ds.session_id}: re-upload with different md5 while "
                         f"state={existing['state']} — not superseding "
-                        f"(supersede applies after a reject only)")
-            elif ds.payload == "zip" and existing["state"] == "REJECTED" \
+                        f"(supersede applies after a reject/quarantine only)")
+            elif ds.payload == "zip" \
+                    and existing["state"] in ("REJECTED", "QUARANTINED") \
                     and (total_bytes != (existing["bytes"] or 0)
                          or (ds.ctime or "") >
                          (existing["drive_ctime"] or "")):
                 # zip payloads carry no Drive-side video md5, which made
                 # the md5-based supersede unreachable — a corrected
                 # re-upload after a reject was silently ignored forever
-                # (review-r2 #9). Changed bytes or a newer createdTime is
-                # the re-upload signal; the download-time dedupe re-checks
-                # the fresh md5 against everyone else, so the review-2 #1
-                # side-door stays closed.
+                # (review-r2 #9; QUARANTINED slots included, review-r3
+                # #17 — a bad-archive quarantine is exactly what a
+                # re-upload corrects). Changed bytes or a newer
+                # createdTime is the re-upload signal; the download-time
+                # dedupe re-checks the fresh md5 against everyone else,
+                # so the review-2 #1 side-door stays closed.
                 ledger.supersede(ds.session_id, new_md5="",
                                  new_bytes=total_bytes,
                                  new_ctime=ds.ctime,
                                  dossier_root=cfg.dossiers)
+                shutil.rmtree(cfg.work / ds.session_id, ignore_errors=True)
+                shutil.rmtree(cfg.work / f"{ds.session_id}-analysis",
+                              ignore_errors=True)
                 res.superseded.append(ds.session_id)
                 res.discovered.append(ds.session_id)
             continue
@@ -433,11 +468,18 @@ def _unzip_payload(work_dir: Path) -> None:
         # possibly a multi-part upload still missing parts — retryable
         raise DownloadError(f"unreadable zip payload: {e}",
                             kind="zip_incomplete") from e
-    except (NotImplementedError, RuntimeError, OSError) as e:
-        # Deflate64 (Windows Explorer >2 GB zips raise NotImplementedError),
-        # encrypted members (RuntimeError), disk errors: retrying can never
-        # succeed, and before this carried a kind it escaped the caller's
-        # except entirely and killed the D thread every run (review-r2 #0)
+    except OSError as e:
+        # host-level errors are TRANSIENT (disk full, I/O hiccup) — a
+        # quarantine here would make a full disk permanently kill good
+        # sessions (review-r3 #44)
+        raise DownloadError(
+            f"zip extract failed ({type(e).__name__}: {e}) — host-level, "
+            f"retrying", kind="transient") from e
+    except (NotImplementedError, RuntimeError) as e:
+        # Deflate64 (Windows Explorer >2 GB zips raise NotImplementedError)
+        # and encrypted members (RuntimeError): retrying can never succeed,
+        # and before this carried a kind it escaped the caller's except
+        # entirely and killed the D thread every run (review-r2 #0)
         raise DownloadError(
             f"unusable zip archive ({type(e).__name__}): {e}",
             kind="quarantine") from e
@@ -567,6 +609,7 @@ def download(cfg: C.Config, ledger: Ledger, session_id: str) -> str:
                 r for r in dupes
                 if r["state"] in ("DISCOVERED", "INCOMPLETE")
                 and (r["drive_ctime"] or "9") > (row["drive_ctime"] or "9")]
+            from . import deliver as _deliver     # lazy: no import cycle
             if not shipped and len(rejectable_losers) == len(dupes):
                 for r in rejectable_losers:
                     ledger.set_reasons(r["session_id"], [
@@ -579,17 +622,27 @@ def download(cfg: C.Config, ledger: Ledger, session_id: str) -> str:
                         r["session_id"], "REJECTED",
                         f"cross-identity duplicate — later upload; "
                         f"earlier copy {session_id} accepted")
+                    # dossier + coaching like every other reject
+                    # (review-r3 #29)
+                    _deliver.finalize_rejected(cfg, ledger,
+                                               r["session_id"])
                 # this copy is the keeper: fall through to INGESTED
             else:
+                keeper = dupes[0]["session_id"]
+                f3_dev = (" — F3 deviation: this copy has the earlier "
+                          "createdTime but the other is already in flight"
+                          if (row["drive_ctime"] or "9") <
+                          (dupes[0]["drive_ctime"] or "9") else "")
                 ledger.set_reasons(session_id, [
                     {"code": "INT_DUP_CROSS", "blocking": True,
                      "fixable": False, "params": {},
-                     "evidence": f"video md5 identical to "
-                                 f"{dupes[0]['session_id']} (zip payload)"}],
-                    3)
+                     "evidence": f"video md5 identical to {keeper} "
+                                 f"(zip payload){f3_dev}"}], 3)
                 ledger.set_state(session_id, "REJECTED",
-                                 "cross-identity duplicate (zip payload)")
+                                 f"cross-identity duplicate (zip payload)"
+                                 f"{f3_dev}")
                 shutil.rmtree(dst, ignore_errors=True)
+                _deliver.finalize_rejected(cfg, ledger, session_id)
                 return "duplicate"
 
     dur = _probe_duration(dst / "video.mp4")

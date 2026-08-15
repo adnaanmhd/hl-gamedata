@@ -315,11 +315,19 @@ def _map_windows(rep: dict, aux: dict, reasons: list[dict],
         cut0, cut1 = min(w0, w["t0"]), max(w1, w["t1"])
         if span <= C.KEEP_GATE_MAX_S and span <= C.KEEP_GATE_MAX_FRAC * dur:
             if action_frames:
+                # gate the FULL flagged window [cut0, cut1], not just the
+                # refined span: action_frames was counted over the whole
+                # VLM window, and gating a narrower span left counted
+                # actions un-blanked — the reason re-fired until the fix
+                # budget wrongly rejected the session (review-r3 #3).
+                # Same doctrine as the cut path: cover everything the
+                # trigger measured.
                 reasons.append(_reason(
                     "INP_FROZEN_ACTIONS", True, True,
-                    {"t0": w0, "t1": w1},
+                    {"t0": cut0, "t1": cut1},
                     f"{desc}: {action_frames} action frames inside a kept "
-                    f"<= {C.KEEP_GATE_MAX_S:.0f}s frozen window"))
+                    f"<= {C.KEEP_GATE_MAX_S:.0f}s frozen window "
+                    f"(gating full window {cut0}-{cut1}s)"))
             else:
                 advisories.append(
                     f"{desc}: {span:.1f}s frozen blip kept (no inputs "
@@ -796,8 +804,9 @@ def _locked_report_update(report_path: Path, name: str,
             existing = {}
         existing[name] = record
         # atomic replace: qa's unlocked readers must never see a torn
-        # file (review-r2 #42)
-        tmp = report_path.with_suffix(".json.tmp")
+        # file (review-r2 #42); pid-unique tmp so two writers that ever
+        # slip past the lock cannot collide on one tmp name (review-r3 #45)
+        tmp = report_path.with_suffix(f".json.tmp{os.getpid()}")
         tmp.write_text(json.dumps(existing, indent=2))
         os.replace(tmp, report_path)
     finally:
@@ -837,10 +846,10 @@ def _build_aux(work_dir: Path, rep: dict, gem, *, gemini_key: str,
     aux: dict = {"vlm_extra_failed": False}
     video = work_dir / "video.mp4"
     try:
-        ts_ms, active, _has_action, tamper = _read_rows(
+        ts_ms, active, has_action, tamper = _read_rows(
             work_dir / "frames.csv")
     except Exception as e:
-        ts_ms, active, tamper = [], [], None
+        ts_ms, active, has_action, tamper = [], [], [], None
         aux.setdefault("notes", []).append(f"frames.csv unreadable for "
                                            f"aux checks: {e}")
     if tamper:
@@ -954,14 +963,30 @@ def _build_aux(work_dir: Path, rep: dict, gem, *, gemini_key: str,
                 by_t = {s["t"]: s for s in labels}
                 for (a, b), mid in zip(statics, mids):
                     lab = by_t.get(round(mid, 2), {})
+                    if not lab:
+                        # the VLM reply omitted this frame: measured
+                        # stillness found it, nobody looked at it — F5
+                        # says that must never pass SILENTLY
+                        # (review-r3 #9/#23); surfaced as an advisory
+                        aux.setdefault("notes", []).append(
+                            f"static window {a:.1f}-{b:.1f}s got no VLM "
+                            f"verdict — confirm on filmstrip (F5)")
+                        continue
                     if lab.get("label") in ("menu", "loading", "pause",
                                             "scoreboard", "cutscene",
                                             "other_non_gameplay") and \
                             lab.get("conf") in ("high", "medium"):
                         lo = tl.frame_at(a)
                         hi = tl.frame_at(b)
-                        af = sum(1 for i in range(lo, min(hi, len(active)))
-                                 if i < len(active) and active[i])
+                        # has_action (input_actions), NOT `active`:
+                        # FIX_GATE_WINDOW blanks only keys+actions, so a
+                        # motion-inclusive count could never be cleared by
+                        # its own fix — the reason re-fired until the fix
+                        # budget wrongly rejected the session
+                        # (review-r3 #2)
+                        af = sum(1 for i in range(lo, min(hi,
+                                                          len(has_action)))
+                                 if i < len(has_action) and has_action[i])
                         extra_windows.append(
                             {"t0": a, "t1": b, "label": lab["label"],
                              "action_frames": af})

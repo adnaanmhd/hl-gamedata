@@ -329,7 +329,9 @@ slack to Aug 16 morning):
    `ExecStart=<home>/.local/bin/uv run --with numpy --with opencv-python-headless
    --with rerun-sdk python -m pipeline run` (absolute uv path — systemd has no user PATH),
    journald + `~/hl-pipeline/logs/`. `hl-pipeline.timer`: `OnCalendar=*:0/30`,
-   `Persistent=true`. `hl-backup.service`/`.timer` (03:00 local = IST): `rclone sync` of
+   `Persistent=true`. `hl-backup.service`/`.timer` (03:00 local = IST): **`rclone copy`**
+   (amended by review-r1 #5 — NEVER `sync`: a sync from a fresh/empty dir after a VM recreate
+   would DELETE the DR copies it exists to keep) of
    `backups/`, `dossiers/`, `reports/` → `gcs-backup:`; on failure an inline alert —
    `uv run python -c "from pipeline import config, telegram;
    telegram.send_message(config.load(), '⚠️ GCS backup failed')"` — because `telegram.py` has

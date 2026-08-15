@@ -89,7 +89,7 @@ def stage_session(cfg: C.Config, session_id: str, game: str, *,
     sampled = rrd_sampled(session_id, game, date)
     if sampled:
         rrdmod.write_script(stage_dir)
-        rrdmod.generate(stage_dir)
+        rrdmod.generate(stage_dir, timeout_s=1800)
     return stage_dir, sampled
 
 
@@ -166,7 +166,7 @@ def deliver_session(cfg: C.Config, ledger: Ledger, session_id: str, *,
         want = bool(row["rrd_sampled"])
         if want and not sampled:
             rrdmod.write_script(stage_dir)
-            rrdmod.generate(stage_dir)
+            rrdmod.generate(stage_dir, timeout_s=1800)
         sampled = want
     elif not sampled:
         # spec §1.4 floor: the deterministic 20% draw can undershoot on
@@ -183,7 +183,7 @@ def deliver_session(cfg: C.Config, ledger: Ledger, session_id: str, *,
         if counts["s"] < need:
             sampled = True
             rrdmod.write_script(stage_dir)
-            rrdmod.generate(stage_dir)
+            rrdmod.generate(stage_dir, timeout_s=1800)
     date = stage_dir.parent.parent.name
     ledger.update(session_id, rrd_sampled=int(sampled))
     ok, fails = final_gate(stage_dir, sampled)

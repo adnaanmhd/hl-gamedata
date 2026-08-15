@@ -132,7 +132,8 @@ class Ledger:
         allowed = {"bin", "reasons_json", "fix_attempts",
                    "duration_delivered_s", "duration_raw_s", "rrd_sampled",
                    "delivered_at", "dossier_path", "md5_video", "bytes",
-                   "game", "drive_path", "drive_ctime", "parent_id"}
+                   "game", "drive_path", "drive_ctime", "parent_id",
+                   "operator_email", "player_email"}
         bad = set(fields) - allowed
         assert not bad, f"unknown ledger fields: {bad}"
         sets = ", ".join(f"{k}=?" for k in fields)
@@ -280,17 +281,20 @@ class Ledger:
     # -------------------------------------------------------------- backup
     def backup_daily(self, backups_dir: Path,
                      keep: int = 14) -> Path | None:
-        """One backup per UTC day; prune to `keep` newest."""
+        """One backup file per UTC day, REFRESHED on every call — a
+        write-once daily file left the 03:00 IST GCS sync mirroring a copy
+        up to ~21.5 h stale (review-r3 #36); prune to `keep` newest."""
         backups_dir.mkdir(parents=True, exist_ok=True)
         today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
         dst = backups_dir / f"ledger-{today}.db"
-        if dst.exists():
-            return None
-        # sqlite3 backup API — safe against a live WAL db
-        bck = sqlite3.connect(dst)
+        # sqlite3 backup API — safe against a live WAL db; write to a tmp
+        # then replace so a kill mid-backup can't leave a torn DR copy
+        tmp = backups_dir / f".ledger-{today}.db.tmp"
+        bck = sqlite3.connect(tmp)
         with bck:
             self.db.backup(bck)
         bck.close()
+        tmp.replace(dst)
         old = sorted(backups_dir.glob("ledger-*.db"))
         for f in old[:-keep]:
             f.unlink()

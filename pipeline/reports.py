@@ -301,12 +301,17 @@ def write_payment_sheet(cfg: C.Config, ledger: Ledger, day_ist: datetime,
     if rejects:
         for r in rejects:
             try:
-                codes = [x["code"] for x in
-                         json.loads(r["reasons_json"] or "[]")
-                         if x.get("blocking")]
+                # unfixable-only like every other reject surface (5th site,
+                # d3 08-15), deduped first-seen; RAW CODES on purpose —
+                # this is the ops-facing detail, not a player surface
+                codes = list(dict.fromkeys(
+                    x["code"] for x in
+                    json.loads(r["reasons_json"] or "[]")
+                    if x.get("blocking") and not x.get("fixable")))
             except json.JSONDecodeError:
                 codes = []
-            md.append(f"- `{r['session_id']}`: {', '.join(codes) or '—'} "
+            md.append(f"- `{r['session_id']}`: "
+                      f"{', '.join(codes) or FIX_FAILED_MARKER} "
                       f"(evidence: {r['dossier_path'] or 'dossier pending'})")
     else:
         md.append("- none")

@@ -172,13 +172,14 @@ def test_zip_reupload_after_reject_supersedes(cfg, ledger):
 
 # ------------------------------- mid-split crash recovery from disk (#7)
 
-def test_mid_split_crash_recovers_uninserted_segment_dirs(cfg, ledger):
-    """Kill between child inserts: segment dirs on disk without ledger rows
-    must be recovered into the split, not silently dropped."""
+def test_mid_split_crash_recovers_manifest_complete_split(cfg, ledger):
+    """Kill between child inserts AFTER a complete cut (manifest present,
+    all segments on disk/rowed): recovery adopts the split, inserting the
+    rows the kill orphaned."""
     _seed(ledger, SID, state="FIX_QUEUED")
     ledger.set_state(SID, "FIXING", "attempt 1")
     (cfg.work / SID).mkdir(parents=True)
-    # child 1 got its row; child 2 only its dir
+    # child 1 got its row; child 2 only its dir; manifest lists both
     ledger.insert_session(
         session_id=f"{SID}-p1", game="kamla", operator_email="Op",
         player_email="p@x.com", drive_path="kamla/Op/p@x.com/x",
@@ -187,6 +188,9 @@ def test_mid_split_crash_recovers_uninserted_segment_dirs(cfg, ledger):
     p2 = cfg.work / f"{SID}-p2"
     p2.mkdir(parents=True)
     (p2 / "session.json").write_text(json.dumps({"duration_seconds": 88.0}))
+    (cfg.work / f"{SID}.split-manifest.json").write_text(json.dumps(
+        {"parent": SID, "segments": [f"{SID}-p1", f"{SID}-p2"],
+         "dropped": 0}))
     sink = set()
     kids = runmod._fix_phase(cfg, ledger, [SID], [], workers=1,
                              children_sink=sink)
@@ -196,6 +200,27 @@ def test_mid_split_crash_recovers_uninserted_segment_dirs(cfg, ledger):
     assert set(kids) >= {f"{SID}-p1", f"{SID}-p2"}
     assert sink >= {f"{SID}-p1", f"{SID}-p2"}
     assert len(kids) == len(set(kids))                # no double-register
+    assert not (cfg.work / f"{SID}.split-manifest.json").exists()
+
+
+def test_mid_split_crash_without_manifest_wipes_partials_and_revalidates(
+        cfg, ledger):
+    """Kill MID-CUT (no manifest): a partial segment set must never
+    complete as a SPLIT subset — rowless partial dirs are wiped and the
+    parent re-derives via REVALIDATING (review-r3 #1/#5)."""
+    _seed(ledger, SID, state="FIX_QUEUED")
+    ledger.set_state(SID, "FIXING", "attempt 1")
+    (cfg.work / SID).mkdir(parents=True)
+    p1 = cfg.work / f"{SID}-p1"                       # half-written cut
+    p1.mkdir(parents=True)
+    (p1 / "video.mp4").write_bytes(b"partial")
+    kids = runmod._fix_phase(cfg, ledger, [SID], [], workers=1,
+                             children_sink=set())
+    assert ledger.get(SID)["state"] in ("REVALIDATING", "REJECTED",
+                                        "FIX_QUEUED")
+    assert ledger.get(SID)["state"] != "SPLIT"        # never a bogus split
+    assert not p1.exists()                            # partial wiped
+    assert f"{SID}-p1" not in kids
 
 
 # ------------------------------------------------- sweeps (#8, #22)
@@ -260,44 +285,56 @@ def test_telegram_rejection_redacts_token_before_truncation(cfg,
         def __enter__(self): return self
         def __exit__(self, *a): return False
         def read(self): return b""
-    long_pad = "x" * 190
+    # pad sized so the token STRADDLES the 200-char truncation boundary:
+    # truncate-then-redact keeps a partial token ("123456:SEC…") that the
+    # redact can no longer match — the original leak (r2 #28). The prior
+    # version of this test buried the token past the boundary and passed
+    # against the broken code too (review-r3 #39).
+    pad = "x" * 160
     monkeypatch.setattr(telegram.json, "load",
                         lambda r: {"ok": False,
-                                   "description": long_pad +
+                                   "description": pad +
                                    "123456:SECRETTOKENVALUE"})
     monkeypatch.setattr(telegram.urllib.request, "urlopen",
                         lambda req, timeout=0: FakeResp())
     with pytest.raises(telegram.TelegramError) as ei:
         telegram.send_message(cfg, "hi")
-    assert "SECRETTOKENVALUE" not in str(ei.value)
+    msg = str(ei.value)
+    assert "SECRETTOKENVALUE" not in msg
+    assert "123456:" not in msg          # no partial-token fragment either
 
 
 # ------------------------------------------------- rrd pinning (#12)
 
 def test_rrd_sampled_pinned_on_resume_past_ready(cfg, ledger, monkeypatch):
-    """A PACKAGED resume honors the recorded rrd_sampled=1 even when the
-    fresh draw + floor would say False — the rrd pair may already sit on
-    Drive II."""
+    """A PACKAGED resume honors the RECORDED sampling decision. Tested in
+    the want=0 direction — recorded 0, fresh draw says True — because in
+    the want=1 direction the §1.4 floor branch of the UNfixed code also
+    regenerates, masking the fix (review-r3 #40)."""
     _seed(ledger, SID, state="INGESTED")
     ledger.set_state(SID, "READY")
     ledger.set_state(SID, "PACKAGED")
-    ledger.update(SID, rrd_sampled=1)
+    ledger.update(SID, rrd_sampled=0)
     stage = cfg.stage / C.VENDOR / "08-15-2026" / "kamla" / SID
     stage.mkdir(parents=True)
     regen = []
+    gate_sampled = []
     monkeypatch.setattr(deliver, "stage_session",
                         lambda cfg_, sid, game, dest_prefix=C.VENDOR:
-                        (stage, False))
+                        (stage, True))            # fresh draw: sample!
     monkeypatch.setattr(deliver.rrdmod, "write_script",
                         lambda d: regen.append("script"))
     monkeypatch.setattr(deliver.rrdmod, "generate",
-                        lambda d: regen.append("rrd"))
-    monkeypatch.setattr(deliver, "final_gate",
-                        lambda stage_dir, sampled: (False, ["FAIL: stop"]))
+                        lambda d, **kw: regen.append("rrd"))
+    def gate(stage_dir, sampled):
+        gate_sampled.append(sampled)
+        return False, ["FAIL: stop"]
+    monkeypatch.setattr(deliver, "final_gate", gate)
     out = deliver.deliver_session(cfg, ledger, SID)
-    assert out.status == "failed_gate"                # stops after pinning
-    assert regen == ["script", "rrd"]                 # honored the record
-    assert ledger.get(SID)["rrd_sampled"] == 1
+    assert out.status == "failed_gate"            # stops after pinning
+    assert regen == []                            # record 0 honored: no rrd
+    assert gate_sampled == [False]                # gate saw the record
+    assert ledger.get(SID)["rrd_sampled"] == 0
 
 
 # ---------------------------------- semaphore balance under crashes (#44)

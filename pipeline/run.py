@@ -50,6 +50,22 @@ def _reset_vlm_run_state() -> None:
 
 # ------------------------------------------------------------------ lock
 
+def _pid_is_pipeline(pid: int) -> bool:
+    """Is `pid` alive AND actually a pipeline run? os.kill(pid,0) alone
+    treats a RECYCLED pid as a live run and skips every tick forever
+    (review-r3 #26). On Linux /proc gives the cmdline; elsewhere fall
+    back to liveness only."""
+    try:
+        os.kill(pid, 0)
+    except (ProcessLookupError, PermissionError):
+        return False
+    try:
+        cmdline = Path(f"/proc/{pid}/cmdline").read_bytes()
+    except OSError:
+        return True                      # no /proc (macOS): liveness only
+    return b"pipeline" in cmdline or b"pytest" in cmdline
+
+
 def acquire_lock(cfg: C.Config) -> bool:
     for _ in range(2):
         try:
@@ -59,21 +75,23 @@ def acquire_lock(cfg: C.Config) -> bool:
         except FileExistsError:
             try:
                 pid = int((cfg.lock_dir / "pid").read_text())
-                os.kill(pid, 0)
-                return False                      # live run holds it
-            except (ValueError, FileNotFoundError):
-                # the winner may be between mkdir and pid-write — give it
-                # a beat before declaring the lock stale
-                time.sleep(1.0)
-                try:
-                    pid = int((cfg.lock_dir / "pid").read_text())
-                    os.kill(pid, 0)
-                    return False
-                except (ValueError, FileNotFoundError, ProcessLookupError,
-                        PermissionError):
-                    shutil.rmtree(cfg.lock_dir, ignore_errors=True)
-            except (ProcessLookupError, PermissionError):
+                if _pid_is_pipeline(pid):
+                    return False              # live run holds it
                 shutil.rmtree(cfg.lock_dir, ignore_errors=True)   # stale
+            except (ValueError, FileNotFoundError):
+                # pid file missing/garbled. rmtree-after-grace could steal
+                # a JUST-mkdir'd winner's lock and yield two concurrent
+                # runs (review-r3 #4) — only reclaim when the lock dir is
+                # old enough that no live winner can be mid-write; else
+                # yield and let the next tick decide.
+                try:
+                    age = time.time() - cfg.lock_dir.stat().st_mtime
+                except OSError:
+                    age = 0.0
+                if age > 2 * 3600:
+                    shutil.rmtree(cfg.lock_dir, ignore_errors=True)
+                else:
+                    return False
     return False
 
 
@@ -266,6 +284,63 @@ def _validate_phase(cfg, ledger, sids, alerts, *, workers: int) -> None:
                                       if x["blocking"]))
 
 
+def _recover_split(cfg, ledger, sid: str, row) -> tuple[bool, list[str]]:
+    """Mid-fix crash triage for a FIXING parent (review-r3 #1/#5): the
+    cutter's manifest marks a COMPLETE cut. Adopt the split ONLY when the
+    manifest exists and every listed segment has a work dir or ledger row
+    — inserting rows for manifest-listed dirs the kill orphaned. Anything
+    else (no manifest = killed mid-cut; missing segments; stray non-
+    manifest dirs) is wiped and the parent re-derives via REVALIDATING.
+    Returns (complete, kid_ids)."""
+    manifest_path = cfg.work / f"{sid}.split-manifest.json"
+    have_rows = {k["session_id"] for k in ledger.db.execute(
+        "SELECT session_id FROM sessions WHERE parent_id=?",
+        (sid,)).fetchall()}
+    manifest_ids: list[str] = []
+    if manifest_path.exists():
+        try:
+            manifest_ids = list(json.loads(
+                manifest_path.read_text()).get("segments") or [])
+        except (OSError, json.JSONDecodeError):
+            manifest_ids = []
+    complete = bool(manifest_ids) and all(
+        (cfg.work / seg_id).is_dir() or seg_id in have_rows
+        for seg_id in manifest_ids)
+    if not complete:
+        # wipe rowless partials so a LATER crash can't adopt them; rowed
+        # children are real work and stay
+        for seg_dir in cfg.work.glob(f"{sid}-p[0-9]*"):
+            if seg_dir.is_dir() and not seg_dir.name.endswith("-analysis") \
+                    and seg_dir.name not in have_rows:
+                shutil.rmtree(seg_dir, ignore_errors=True)
+        manifest_path.unlink(missing_ok=True)
+        # if some children already have rows, the earlier attempt got far
+        # enough that they are valid segments — but the parent must NOT
+        # complete as SPLIT on a subset; REVALIDATING re-derives the plan
+        return False, sorted(have_rows)
+    for seg_id in manifest_ids:
+        if seg_id in have_rows:
+            continue
+        dur = None
+        try:
+            dur = float(json.loads(
+                (cfg.work / seg_id / "session.json").read_text()
+            ).get("duration_seconds") or 0) or None
+        except (OSError, json.JSONDecodeError, ValueError):
+            pass
+        ledger.insert_session(
+            session_id=seg_id, game=row["game"],
+            operator_email=row["operator_email"],
+            player_email=row["player_email"],
+            drive_path=row["drive_path"], drive_ctime=row["drive_ctime"],
+            md5_video="", bytes_=0, state="INGESTED", parent_id=sid,
+            detail="segment recovered after mid-split crash (manifest)")
+        if dur:
+            ledger.update(seg_id, duration_raw_s=dur)
+    manifest_path.unlink(missing_ok=True)
+    return True, sorted(set(manifest_ids) | have_rows)
+
+
 def _fix_phase(cfg, ledger, sids, alerts, *, workers: int,
                children_sink=None) -> list[str]:
     """Fix FIX_QUEUED sessions (≤2 attempts each, R2); returns new child
@@ -286,39 +361,10 @@ def _fix_phase(cfg, ledger, sids, alerts, *, workers: int,
         for sid in todo:
             row = ledger.get(sid)
             if row["state"] == "FIXING":
-                kid_ids = [k["session_id"] for k in ledger.db.execute(
-                    "SELECT session_id FROM sessions WHERE parent_id=?",
-                    (sid,)).fetchall()]
-                # the kill can land BETWEEN child inserts — segment dirs
-                # already cut to disk but without ledger rows would be
-                # silently dropped from the split (review-r2 #7/#18):
-                # recover them from the work root by name
-                for seg_dir in sorted(cfg.work.glob(f"{sid}-p[0-9]*")):
-                    seg_id = seg_dir.name
-                    if not seg_dir.is_dir() or seg_id.endswith("-analysis") \
-                            or ledger.get(seg_id) is not None:
-                        continue
-                    dur = None
-                    try:
-                        dur = float(json.loads(
-                            (seg_dir / "session.json").read_text()
-                        ).get("duration_seconds") or 0) or None
-                    except (OSError, json.JSONDecodeError, ValueError):
-                        pass
-                    ledger.insert_session(
-                        session_id=seg_id, game=row["game"],
-                        operator_email=row["operator_email"],
-                        player_email=row["player_email"],
-                        drive_path=row["drive_path"],
-                        drive_ctime=row["drive_ctime"],
-                        md5_video="", bytes_=0, state="INGESTED",
-                        parent_id=sid,
-                        detail="segment recovered after mid-split crash")
-                    if dur:
-                        ledger.update(seg_id, duration_raw_s=dur)
-                    kid_ids.append(seg_id)
-                if kid_ids:
-                    # crash landed after child creation but before the
+                done, kid_ids = _recover_split(cfg, ledger, sid, row)
+                if done:
+                    # crash landed after the COMPLETE cut (manifest
+                    # present, every segment accounted for) but before the
                     # parent's SPLIT transition: re-validating the parent
                     # could re-verdict it deliverable and ship the whole
                     # video ON TOP of its segments (review-r1 #4) —
@@ -413,6 +459,8 @@ def _fix_phase(cfg, ledger, sids, alerts, *, workers: int,
                                     f"{len(out['children']['dropped'])}"
                                     if out["children"]["dropped"] else ""))
                 shutil.rmtree(work, ignore_errors=True)
+                (cfg.work / f"{sid}.split-manifest.json").unlink(
+                    missing_ok=True)
                 continue
             ledger.set_state(sid, "REVALIDATING", "fixes applied")
         # re-validate everything the fixes touched (full Phase II re-run);
@@ -556,12 +604,23 @@ def send_daily_report_if_due(cfg: C.Config, ledger: Ledger,
     marker = cfg.reports_dir / day / ".sent"
     if marker.exists():
         return False
-    # the reporting window is the TRAILING 24h ending at send time — a
-    # calendar-day window sent at 14:00 would permanently drop everything
-    # delivered 14:00-24:00 from every report (review finding #15)
+    # the reporting window runs from the PREVIOUS send to now. A fixed
+    # trailing-24h from a drifting send time leaves gaps (send 14:29 then
+    # 14:01 → 28 min of deliveries in no report) or overlaps
+    # (review-r3 #24); the persisted anchor makes windows contiguous.
+    # Fallback for the first send ever: trailing 24 h.
     hi_dt = now_ist.astimezone(timezone.utc)
-    lo = (hi_dt - timedelta(hours=24)).isoformat(timespec="seconds")
     hi = hi_dt.isoformat(timespec="seconds")
+    anchor = cfg.reports_dir / ".last_daily_sent"
+    lo = (hi_dt - timedelta(hours=24)).isoformat(timespec="seconds")
+    try:
+        stored = anchor.read_text().strip()
+        # sanity: never widen beyond 48 h (host clock jumps, long outage)
+        floor_ = (hi_dt - timedelta(hours=48)).isoformat(timespec="seconds")
+        if floor_ <= stored < hi:
+            lo = stored
+    except (OSError, ValueError):
+        pass
     row = ledger.db.execute(
         "SELECT COUNT(*) n, COALESCE(SUM(duration_delivered_s),0) s "
         "FROM sessions WHERE state='DELIVERED' AND delivered_at>=? AND "
@@ -618,6 +677,7 @@ def send_daily_report_if_due(cfg: C.Config, ledger: Ledger,
     # (review-r1 #20/#26); the sheet also sits on disk for the GCS sync
     marker.parent.mkdir(parents=True, exist_ok=True)
     marker.touch()
+    anchor.write_text(hi)          # next report's window starts here (#24)
     try:
         telegram.send_document(cfg, csv_path, caption="payment sheet")
     except telegram.TelegramError as e:
@@ -654,11 +714,15 @@ def _batch_fallback_count(cfg: C.Config, sids: list[str]) -> int:
 def _finalize_orphan_rejects(cfg: C.Config, ledger: Ledger) -> None:
     """REJECTED sessions whose run died before U's finalize pass kept their
     work dirs forever and never got a coaching dossier (review-r2 #8/#23).
-    finalize_rejected is idempotent, so sweeping by leftover work dir is
-    safe."""
+    Triggers on a leftover work dir, a leftover -analysis dir (a crash
+    between finalize's two rmtrees leaks it, review-r3 #46), OR a missing
+    dossier_path (rejects that never had a work dir would otherwise never
+    get their coaching dossier, review-r3 #27). Idempotent."""
     for r in ledger.by_state("REJECTED"):
         sid = r["session_id"]
-        if (cfg.work / sid).exists():
+        if (cfg.work / sid).exists() \
+                or (cfg.work / f"{sid}-analysis").exists() \
+                or not r["dossier_path"]:
             try:
                 deliver.finalize_rejected(cfg, ledger, sid)
             except Exception as e:
@@ -701,7 +765,17 @@ def _partition_resume(ledger: Ledger) -> tuple[list[_Batch], list[_Batch],
         except json.JSONDecodeError:
             sids = []
         for s in sids:
-            if s in state and s not in assigned:
+            if s in assigned:
+                continue
+            if s in state:
+                assigned[s] = b["batch_no"]
+                groups.setdefault(b["batch_no"], []).append(s)
+            elif ledger.get(s) is not None:
+                # terminal members (e.g. already DELIVERED before the
+                # kill) stay in the batch's membership: dropping them
+                # under-reported the closing batch message and shrank
+                # summary_json on finish (review-r3 #43/#25); every phase
+                # is state-guarded, so carrying them is free
                 assigned[s] = b["batch_no"]
                 groups.setdefault(b["batch_no"], []).append(s)
     for s, p in parent.items():
@@ -720,7 +794,7 @@ def _partition_resume(ledger: Ledger) -> tuple[list[_Batch], list[_Batch],
     for no in sorted(groups):
         b = _Batch(no=no, sids=groups[no],
                    t0_utc=datetime.now(timezone.utc))
-        sts = {state[s] for s in b.sids}
+        sts = {state[s] for s in b.sids if s in state}
         if "DOWNLOADING" in sts:
             d_q.append(b)
         elif sts & v_states:
@@ -934,10 +1008,19 @@ def _overlapped_run(cfg: C.Config, ledger: Ledger, alerts: list[str], *,
                     _release(b)
         except Exception as e:
             # only the Ledger constructor can reach here (per-batch guards
-            # above): release nothing was taken, alert, and let the finally
-            # close what exists — the run's shutdown drain frees the queue
-            _alert(cfg, f"upload thread failed to start: "
-                        f"{type(e).__name__}: {e}", alerts)
+            # above). A dead U must NOT stop draining q_vu: V keeps
+            # feeding slotted batches, and with 3 in flight their leaked
+            # slots would wedge D in acquire while V waits on q_dv —
+            # deadlock with the run lock held (review-r3 #0). Keep
+            # consuming and releasing until the poison pill; sessions
+            # keep their states and deliver next run.
+            _alert(cfg, f"upload thread failed to start — batches will "
+                        f"resume next run: {type(e).__name__}: {e}", alerts)
+            while True:
+                b = q_vu.get()
+                if b is None:
+                    break
+                _release(b)
         finally:
             if ul is not None:
                 ul.close()
@@ -1070,6 +1153,13 @@ def _sweep_terminal_work(cfg: C.Config, ledger: Ledger) -> None:
     deliberately excluded: finalize_rejected owns that wipe."""
     if cfg.work.exists():
         for p in cfg.work.iterdir():
+            if p.name.endswith(".split-manifest.json"):
+                # stray manifest whose parent already went terminal
+                parent = ledger.get(p.name[:-len(".split-manifest.json")])
+                if parent and parent["state"] in ("SPLIT", "REJECTED",
+                                                  "DELIVERED"):
+                    p.unlink(missing_ok=True)
+                continue
             if not p.is_dir():
                 continue
             sid = p.name[:-len("-analysis")] \

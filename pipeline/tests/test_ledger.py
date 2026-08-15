@@ -96,8 +96,21 @@ def test_incomplete_lifecycle(ledger):
     assert ledger.incomplete_list() == []
 
 
-def test_backup_once_per_day(ledger, cfg):
+def test_backup_refreshes_todays_file(ledger, cfg):
+    """One file per UTC day, REFRESHED each call (review-r3 #36) — the GCS
+    sync must never mirror a stale snapshot; prune keeps newest."""
     p1 = ledger.backup_daily(cfg.backups)
-    p2 = ledger.backup_daily(cfg.backups)
     assert p1 is not None and p1.exists()
-    assert p2 is None
+    ledger.insert_session(
+        session_id="fresh", game="kamla", operator_email="o",
+        player_email="p@x.com", drive_path="kamla/o/p/fresh",
+        drive_ctime="2026", md5_video="f", bytes_=1, state="DISCOVERED")
+    p2 = ledger.backup_daily(cfg.backups)
+    assert p2 is not None and p2 == p1        # same file, refreshed
+    import sqlite3 as _s
+    db = _s.connect(p2)
+    n = db.execute("SELECT COUNT(*) FROM sessions "
+                   "WHERE session_id='fresh'").fetchone()[0]
+    db.close()
+    assert n == 1                              # today's copy is current
+    assert not list(cfg.backups.glob(".ledger-*.tmp"))

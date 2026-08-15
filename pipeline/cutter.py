@@ -91,6 +91,35 @@ def cut_segments(session_dir: Path, keep: list[tuple[float, float]],
 
     segments = []
     dropped = []
+    created_dirs: list[Path] = []
+    try:
+        _cut_loop(session_dir, keep, out_root, sid, s, created, src_video,
+                  src_pts, kf_rel, first_abs, header, rows, segments,
+                  dropped, created_dirs)
+    except BaseException:
+        # NEVER leave partial segment dirs behind: a stale {sid}-pN dir
+        # from a failed attempt would be adopted as a completed split by
+        # the mid-fix crash recovery (review-r3 #1) — clean at the source
+        for d in created_dirs:
+            shutil.rmtree(d, ignore_errors=True)
+        raise
+    # the manifest marks the cut COMPLETE: recovery adopts a split only
+    # when the manifest exists and every listed segment dir is present;
+    # a kill mid-cut leaves no manifest, so partials are wiped instead of
+    # shipped as a bogus subset (review-r3 #1/#5)
+    manifest = out_root / f"{sid}.split-manifest.json"
+    tmp = manifest.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps(
+        {"parent": sid, "segments": [g["id"] for g in segments],
+         "dropped": len(dropped)}, indent=2))
+    tmp.replace(manifest)
+    return {"segments": segments, "dropped": dropped}
+
+
+def _cut_loop(session_dir: Path, keep, out_root: Path, sid: str, s: dict,
+              created, src_video: Path, src_pts, kf_rel, first_abs,
+              header, rows, segments, dropped,
+              created_dirs: list[Path]) -> None:
     n = 0
     for (t0, t1) in keep:
         n += 1
@@ -109,6 +138,7 @@ def cut_segments(session_dir: Path, keep: list[tuple[float, float]],
             continue
         out_dir = out_root / seg_id
         out_dir.mkdir(parents=True, exist_ok=True)
+        created_dirs.append(out_dir)
         subprocess.run(
             ["ffmpeg", "-y", "-v", "error",
              "-ss", f"{start + first_abs:.6f}", "-to",
@@ -162,7 +192,6 @@ def cut_segments(session_dir: Path, keep: list[tuple[float, float]],
                          "t0": round(start, 3), "t1": round(t1, 3),
                          "duration_s": round(info.duration_s, 3),
                          "frames": m})
-    return {"segments": segments, "dropped": dropped}
 
 
 def _first_pts_abs(video: Path) -> float:

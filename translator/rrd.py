@@ -71,12 +71,17 @@ def write_script(session_dir: Path) -> Path:
     return p
 
 
-def generate(session_dir: Path, *, python: str | None = None) -> Path:
-    """Write rrd_creation.py and run it to produce session.rrd."""
+def generate(session_dir: Path, *, python: str | None = None,
+             timeout_s: float | None = None) -> Path:
+    """Write rrd_creation.py and run it to produce session.rrd.
+
+    `timeout_s` bounds the subprocess (None = unbounded, the historical
+    behavior) — the pipeline passes a cap so a hung rrd render can't
+    stall its upload thread forever."""
     session_dir = Path(session_dir)
     script = write_script(session_dir)
     subprocess.run(
         [python or sys.executable, str(script), "--session-dir", str(session_dir)],
-        check=True,
+        check=True, timeout=timeout_s,
     )
     return session_dir / "session.rrd"

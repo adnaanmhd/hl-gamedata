@@ -340,9 +340,12 @@ def _propagate_shift_record(parent: Path, children: list[Path]) -> None:
     entry = report.get(parent.name)
     if not entry:
         return
+    # locked + atomic like every other writer of this SHARED file — up to
+    # 8 validation workers race it (review-r3 #8)
+    from .validate import _locked_report_update
     for child in children:
-        report.setdefault(child.name, dict(entry))
-    report_path.write_text(json.dumps(report, indent=2))
+        if child.name not in report:
+            _locked_report_update(report_path, child.name, dict(entry))
 
 
 def _read_csv(work: Path) -> tuple[list[str], list[list[str]]]:
@@ -404,13 +407,10 @@ def fix_translate_raw(work: Path) -> str:
     entry = rep.get(json.loads((work / "session.json").read_text())
                     .get("session_id")) or rep.get(src.name)
     if entry:
-        report_path = work.parent / "translation_report.json"
-        try:
-            merged = json.loads(report_path.read_text())
-        except (FileNotFoundError, json.JSONDecodeError):
-            merged = {}
-        merged[work.name] = entry
-        report_path.write_text(json.dumps(merged, indent=2))
+        # locked + atomic (review-r3 #8)
+        from .validate import _locked_report_update
+        _locked_report_update(work.parent / "translation_report.json",
+                              work.name, entry)
     shutil.rmtree(out, ignore_errors=True)
     return f"translated raw bundle: {res['data_quality']}"
 
@@ -505,13 +505,11 @@ def retranslate_from_sidecars(work: Path, *,
     _write_csv(work, V2_FRAME_COLS, v2rows)
     fix_sessionjson_recompute(work, slug)
 
-    report_path = work.parent / "translation_report.json"
-    try:
-        report = json.loads(report_path.read_text())
-    except (FileNotFoundError, json.JSONDecodeError):
-        report = {}
-    report[work.name] = {"shift_us": shift_us, "retranslated": True}
-    report_path.write_text(json.dumps(report, indent=2))
+    # locked + atomic (review-r3 #8)
+    from .validate import _locked_report_update
+    _locked_report_update(work.parent / "translation_report.json",
+                          work.name,
+                          {"shift_us": shift_us, "retranslated": True})
     return f"re-translated from sidecars ({stats.n_frames} frames; {note}; " \
            f"stripped {sum(strip.values())} unbound key presses)"
 
