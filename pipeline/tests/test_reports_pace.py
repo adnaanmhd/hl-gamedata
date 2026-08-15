@@ -238,9 +238,7 @@ def test_sheet_uploaded_hours_parents_only_on_drive_ctime(tmp_path):
     assert len(sheet) == 1
     assert sheet[0]["kamla_hrs_uploaded"] == 1.5   # 1.0 parent + 0.5 blank
     assert sheet[0]["ow_hrs_uploaded"] == 0.0
-    # cohort pending: both DISCOVERED roots (1.0 + 0.5) + INGESTED child
-    # (0.5) are still in flight
-    assert sheet[0]["kamla_pending_hrs"] == 2.0
+    assert "kamla_pending_hrs" not in sheet[0]     # column removed (08-15)
 
 
 def test_sheet_totals_sum_rounded_parts_across_both_games(tmp_path):
@@ -281,6 +279,67 @@ def test_sheet_totals_sum_rounded_parts_across_both_games(tmp_path):
     assert r["total_uploaded_hours"] == 0.25
     assert r["kamla_accepted_hrs"] == 0.08 and r["ow_accepted_hrs"] == 0.14
     assert r["total_delivered_hours"] == 0.22
+
+
+def test_stalled_cohort_logs_and_understates_attributably(tmp_path,
+                                                          capsys):
+    """Pending columns are gone (Adnaan 08-15) but a stalled cohort must
+    never go silent: no pending key in the row, a loud stderr log, and
+    accepted hours short by exactly the stalled amount — attributable,
+    not mysterious."""
+    from pipeline.ledger import Ledger
+    led = Ledger(tmp_path / "l.db")
+    root = "2026-08-15T07-00-00Z_kamla_c_00000000000000fa"
+    led.insert_session(
+        session_id=root, game="kamla", operator_email="Op",
+        player_email="stall@x.com", drive_path="kamla/Op/stall@x.com/x",
+        drive_ctime="2026-08-15T07:01:00.000Z", md5_video="st", bytes_=1,
+        state="DISCOVERED")
+    led.update(root, duration_raw_s=3600.0)
+    led.set_state(root, "INGESTED")
+    led.set_state(root, "HOLD_VLM", "sweep stuck")     # stalled past offset
+    sheet = reports.build_sheet_rows(
+        led, datetime.now(C.IST),
+        bounds=("2026-08-15T00:00:00+00:00", "2026-08-16T00:00:00+00:00"))
+    led.close()
+    assert len(sheet) == 1
+    assert "kamla_pending_hrs" not in sheet[0]
+    assert sheet[0]["kamla_hrs_uploaded"] == 1.0
+    assert sheet[0]["kamla_accepted_hrs"] == 0.0      # short — but why is
+    err = capsys.readouterr().err                     # ...on the record:
+    assert "PENDING COHORT" in err and "stall@x.com" in err
+    assert "1.00h" in err
+
+
+def test_first_window_seed_is_deterministic(cfg, ledger, monkeypatch):
+    """The one window the contiguity anchor cannot make contiguous is the
+    FIRST one (no previous hi). Its seed must be deterministic: exactly
+    24 h ending at the offset edge (d3 note, 08-15)."""
+    from datetime import timedelta as _td
+    bounds_seen = []
+    real_sheet = reports.write_payment_sheet
+
+    def spy(cfg_, ledger_, day, bounds=None):
+        bounds_seen.append(bounds)
+        return real_sheet(cfg_, ledger_, day, bounds)
+    import pipeline.run as runmod
+    monkeypatch.setattr(reports, "write_payment_sheet", spy)
+    monkeypatch.setattr(runmod.telegram, "send_message",
+                        lambda cfg_, text: None)
+    monkeypatch.setattr(runmod.telegram, "send_document",
+                        lambda cfg_, path, caption="": None)
+    send = datetime.now(C.IST).replace(hour=14, minute=7, second=3,
+                                       microsecond=0)
+    assert runmod.send_daily_report_if_due(cfg, ledger, send) is True
+    (lo, hi), = bounds_seen
+    from datetime import timezone as _tz
+    hi_expect = (send.astimezone(_tz.utc)
+                 - _td(hours=C.REPORT_OFFSET_H)).isoformat(
+        timespec="seconds")
+    assert hi == hi_expect
+    assert lo == (send.astimezone(_tz.utc)
+                  - _td(hours=C.REPORT_OFFSET_H + 24)).isoformat(
+        timespec="seconds")
 
 
 def test_sheet_cohort_walks_depth2_tree_split_carries_nothing(tmp_path):
@@ -324,7 +383,6 @@ def test_sheet_cohort_walks_depth2_tree_split_carries_nothing(tmp_path):
     r = sheet[0]
     assert r["kamla_hrs_uploaded"] == 2.0     # root raw only
     assert r["kamla_accepted_hrs"] == 0.4     # depth-2 grandchild found
-    assert r["kamla_pending_hrs"] == 0.3      # VALIDATING child only
     assert r["kamla_rejection_reasons"] == "black-frozen"
     assert r["total_delivered_hours"] == 0.4
 

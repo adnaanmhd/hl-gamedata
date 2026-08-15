@@ -197,19 +197,22 @@ def build_daily_message(d: DailyStats, pace: PaceStatus | None) -> str:
 # Schema per Adnaan (08-15, via the d3 session; respec same day): one row
 # per (operator, player) spanning both games — three kamla_/ow_ pairs
 # after the identity columns. No game column, no counts, no cumulative.
-# v4 (08-15): COHORT accounting + the pending pair. A player's footage is
-# judged in the window it was UPLOADED in — accepted/pending/rejected are
-# attributed back to the root upload's window regardless of when the
+# v4 (08-15): COHORT accounting. A player's footage is judged in the
+# window it was UPLOADED in — accepted/rejected (and internal pending)
+# are attributed back to the root upload's window regardless of when the
 # outcome happened (delivery-time keying made rows internally
 # incomparable: "1.29 uploaded / 0.44 accepted" read as rejection when it
-# was just the pipeline's 1-2 h latency). Total column names are Adnaan's
-# EXACT strings — "hours" vs "hrs" and "delivered" vs "accepted"
-# deliberately NOT normalized (flagged; one-line change here if he
-# harmonizes).
+# was just the pipeline's 1-2 h latency). The pending PAIR was added and
+# then REMOVED by Adnaan the same day — pending is still computed and a
+# non-zero cohort logs loudly (with the 4 h offset it is zero on every
+# healthy run; a stalled session silently understating accepted hours is
+# exactly the failure this schema chases). Total column names are
+# Adnaan's EXACT strings — "hours" vs "hrs" and "delivered" vs
+# "accepted" deliberately NOT normalized (flagged; one-line change here
+# if he harmonizes).
 SHEET_COLS = ["date", "operator", "player_email",
               "kamla_hrs_uploaded", "ow_hrs_uploaded",
               "kamla_accepted_hrs", "ow_accepted_hrs",
-              "kamla_pending_hrs", "ow_pending_hrs",
               "kamla_rejection_reasons", "ow_rejection_reasons",
               "total_uploaded_hours", "total_delivered_hours"]
 
@@ -331,8 +334,6 @@ def build_sheet_rows(ledger: Ledger, day_ist: datetime,
             "ow_hrs_uploaded": round(b["ow_hrs_uploaded"], 2),
             "kamla_accepted_hrs": round(b["kamla_accepted_hrs"], 2),
             "ow_accepted_hrs": round(b["ow_accepted_hrs"], 2),
-            "kamla_pending_hrs": round(b["kamla_pending_hrs"], 2),
-            "ow_pending_hrs": round(b["ow_pending_hrs"], 2),
             "kamla_rejection_reasons":
                 " ".join(ordered_reject_labels(b["kamla_rej"])),
             "ow_rejection_reasons":
@@ -343,12 +344,21 @@ def build_sheet_rows(ledger: Ledger, day_ist: datetime,
             row["kamla_hrs_uploaded"] + row["ow_hrs_uploaded"], 2)
         row["total_delivered_hours"] = round(
             row["kamla_accepted_hrs"] + row["ow_accepted_hrs"], 2)
+        # pending has no column (removed by Adnaan 08-15) but must never
+        # go silent: with the 4 h offset a non-zero pending cohort means a
+        # session stalled past settlement and this row's accepted hours
+        # are UNDERSTATED — log makes the shortfall attributable
+        pending = round(b["kamla_pending_hrs"] + b["ow_pending_hrs"], 2)
+        if pending > 0.0:
+            print(f"[sheet] PENDING COHORT: {op}/{player} has "
+                  f"{pending:.2f}h still in flight at generation — "
+                  f"accepted hours understated on this sheet",
+                  file=sys.stderr)
         # suppress no-activity rows (the old sheet listed every player
-        # ever seen); pending counts as activity
+        # ever seen)
         if any(row[c] > 0.0 for c in
                ("kamla_hrs_uploaded", "ow_hrs_uploaded",
-                "kamla_accepted_hrs", "ow_accepted_hrs",
-                "kamla_pending_hrs", "ow_pending_hrs")) \
+                "kamla_accepted_hrs", "ow_accepted_hrs")) \
                 or row["kamla_rejection_reasons"] \
                 or row["ow_rejection_reasons"]:
             out.append(row)
@@ -379,7 +389,6 @@ def write_payment_sheet(cfg: C.Config, ledger: Ledger, day_ist: datetime,
     ops: dict[str, dict] = {}
     num_cols = ("kamla_hrs_uploaded", "ow_hrs_uploaded",
                 "kamla_accepted_hrs", "ow_accepted_hrs",
-                "kamla_pending_hrs", "ow_pending_hrs",
                 "total_uploaded_hours", "total_delivered_hours")
     for r in rows:
         o = ops.setdefault(r["operator"], {c: 0.0 for c in num_cols})
