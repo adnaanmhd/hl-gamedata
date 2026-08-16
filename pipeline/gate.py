@@ -13,12 +13,19 @@ from pathlib import Path
 
 from translator.v2 import V2_FRAME_COLS
 
+from . import config as C
+
 
 def gate_windows(session_dir: Path,
-                 windows: list[tuple[float, float]]) -> dict:
-    """Blank keys+actions for rows with timestamp_ms/1000 in any window.
+                 windows: list[tuple[float, float]],
+                 pad_frames: int = C.GATE_PAD_FRAMES) -> dict:
+    """Blank keys+actions for rows with timestamp_ms/1000 in any window,
+    padded pad_frames beyond each side (Adnaan 08-16: the recheck's
+    scanner re-draws window boundaries +-1 frame, so an exact gate left
+    one action frame outside->inside forever — the fix-failed loop).
 
-    Returns {"gated_frames": n, "windows": [...]} for the fixlog."""
+    Returns {"gated_frames": n, "windows": [actually-blanked spans...],
+    "requested": [as-detected...], "pad_frames": p} for the fixlog."""
     session_dir = Path(session_dir)
     path = session_dir / "frames.csv"
     with path.open(newline="") as f:
@@ -30,19 +37,39 @@ def gate_windows(session_dir: Path,
     ki, ai = col["input_keys"], col["input_actions"]
     ti = col["timestamp_ms"]
 
-    gated = 0
-    for r in rows:
+    # pad in ROW units, never seconds: these videos drop 12-20% of frames,
+    # and a dropped frame at a window boundary makes any seconds-based pad
+    # shorter than pad_frames real rows — the loop this pad exists to
+    # close would survive exactly there (review finding, 08-16)
+    blank: set[int] = set()
+    for i, r in enumerate(rows):
         t = int(r[ti]) / 1000.0
         if any(t0 <= t <= t1 for t0, t1 in windows):
-            if r[ki] or r[ai]:
-                gated += 1
-            r[ki] = ""
-            r[ai] = ""
+            for k in range(max(i - pad_frames, 0),
+                           min(i + pad_frames + 1, len(rows))):
+                blank.add(k)
+    gated = 0
+    for i in blank:
+        r = rows[i]
+        if r[ki] or r[ai]:
+            gated += 1
+        r[ki] = ""
+        r[ai] = ""
     tmp = session_dir / "frames.csv.tmp"
     with tmp.open("w", newline="") as f:
         w = csv.writer(f)
         w.writerow(header)
         w.writerows(rows)
     tmp.replace(path)                       # atomic (§13)
+    # fixlog gets the actually-blanked spans (contiguous index runs)
+    spans = []
+    for i in sorted(blank):
+        t = int(rows[i][ti]) / 1000.0
+        if spans and i == spans[-1][2] + 1:
+            spans[-1][1], spans[-1][2] = t, i
+        else:
+            spans.append([t, t, i])
     return {"gated_frames": gated,
-            "windows": [[round(a, 3), round(b, 3)] for a, b in windows]}
+            "windows": [[round(a, 3), round(b, 3)] for a, b, _ in spans],
+            "requested": [[round(a, 3), round(b, 3)] for a, b in windows],
+            "pad_frames": pad_frames}

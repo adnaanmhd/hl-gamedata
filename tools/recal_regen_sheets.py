@@ -1,23 +1,35 @@
 #!/usr/bin/env python3
-"""Step-6 payment-sheet regeneration under the post-rebuild verdicts
-(REVALIDATION_KICKOFF_PROMPT step 6). Runs ON THE VM with
-PYTHONPATH=~/hl-gamedata, ONLY after every non-QUARANTINED/DUPLICATE root
-is terminal (DELIVERED/REJECTED/SPLIT with terminal children) — the
-caller verifies that first.
+"""Step-6 payment-sheet regeneration — v2 after the 08-16 deep review
+(the regen cluster: empty-SUPERSEDES re-run blocker, anchor rewind,
+global abort gate, cohort-blind reject detail, marker mtime evidence).
 
-Original window boundaries of record (recovered 08-16, sources: GCS
-backup of reports/.last_daily_sent + live anchor, cross-checked against
-.sent marker mtimes):
-  08-15 sheet: (2026-08-14T06:45:22+00:00, 2026-08-15T06:45:22+00:00]
-  08-16 sheet: (2026-08-15T06:45:22+00:00, 2026-08-16T05:32:50+00:00]
+Design:
+- PREVIEW (default, no --send): computes both days, writes preview-*.csv/
+  .md beside the real sheets, prints totals. ZERO side effects — no
+  stamps, no anchor, no markers, no real-file overwrite.
+- SEND (--send), per day in order, with a durable resume record:
+    skip day if reports/<day>/.regen-v2-done exists
+    generate sheet + cohort-keyed reject detail -> real paths
+    write .regen-v2-counted.json (the exact counted sids) BEFORE any
+      side effect; a re-run after a crash reuses it verbatim — the sheet
+      can never be regenerated post-stamp (the empty-sheet blocker)
+    telegram message -> document (abort rc=3 BEFORE stamps on failure;
+      re-run resends — duplicate message is the accepted cost)
+    mark_uploads_reported(sids from the record) -> anchor=hi ->
+      marker touch ONLY if missing (mtime evidence preserved) ->
+      .regen-v2-done
+- Abort gate is COHORT-SCOPED: only non-terminal trees whose TOP-ROOT
+  upload time < hi16 block (162+ post-hi16 ride-alongs are structurally
+  uncountable by these windows and must not block payment).
+- Stray-stamp pre-check: any stamped root not accounted for by our own
+  resume records aborts loudly (a stray daily send would silently empty
+  the superseding sheets).
+- Final invariant: anchor == HI16 once both days are done.
 
-Per day, in chronological order, mirroring the production r5 discipline
-stamps -> anchor -> marker -> send (crash anywhere re-runs to an
-identical-or-smaller sheet, never double-counts):
-  write_payment_sheet(bounds) -> mark_uploads_reported(sids=counted)
-  -> anchor=hi -> marker touch -> Telegram "SUPERSEDES ..." + attachment.
-Sheets overwrite the old files in place (same path = purge of old VM
-copies); GCS mirror re-sync + NOTE_FOR_D3.md happen outside this script.
+Windows of record (recovered 08-16; sources: GCS mirror of the anchor +
+live anchor, cross-checked against .sent mtimes):
+  08-15: (2026-08-14T06:45:22+00:00, 2026-08-15T06:45:22+00:00]
+  08-16: (2026-08-15T06:45:22+00:00, 2026-08-16T05:32:50+00:00]
 """
 import json
 import sys
@@ -33,44 +45,193 @@ WINDOWS = [
     ("2026-08-15", "2026-08-14T06:45:22+00:00", "2026-08-15T06:45:22+00:00"),
     ("2026-08-16", "2026-08-15T06:45:22+00:00", "2026-08-16T05:32:50+00:00"),
 ]
+HI16 = WINDOWS[-1][2]
+TERMINAL = ("DELIVERED", "REJECTED", "SPLIT", "QUARANTINED", "DUPLICATE")
+
+
+def top_root_ctime(ledger, sid, cache):
+    """Upload time of the top-level recording a row belongs to."""
+    seen = []
+    for _ in range(10):
+        if sid in cache:
+            break
+        row = ledger.get(sid)
+        if row is None:
+            cache[sid] = None
+            break
+        if not row["parent_id"]:
+            cache[sid] = reports._parse_ts(row["drive_ctime"])
+            break
+        seen.append(sid)
+        sid = row["parent_id"]
+    for s in seen:
+        cache[s] = cache.get(sid)
+    return cache.get(sid)
+
+
+def cohort_reject_detail(ledger, lo_dt, hi_dt, cache):
+    """Rejected rows of trees whose ROOT uploaded in [lo, hi) — the
+    cohort view the regenerated sheet's columns already use. The stock
+    section windows on REJECTED-transition time, which is rebuild-time
+    for every row now (verified) and would print '- none'."""
+    lines = []
+    for r in ledger.db.execute(
+            "SELECT session_id, reasons_json, dossier_path FROM sessions "
+            "WHERE state='REJECTED' ORDER BY session_id"):
+        ct = top_root_ctime(ledger, r["session_id"], cache)
+        if ct is None or not (lo_dt <= ct < hi_dt):
+            continue
+        try:
+            reasons = json.loads(r["reasons_json"] or "[]")
+        except json.JSONDecodeError:
+            reasons = []
+        blocking = [x for x in reasons if x.get("blocking")]
+        unfix = [x["code"] for x in blocking if not x.get("fixable")]
+        label = " + ".join(dict.fromkeys(unfix)) if unfix else "fix-failed"
+        ev = (blocking[0].get("evidence", "")[:90] if blocking else "")
+        lines.append(f"- `{r['session_id']}`: {label}"
+                     + (f" — {ev}" if ev else "")
+                     + (f" · dossier: {r['dossier_path']}"
+                        if r["dossier_path"] else ""))
+    return lines or ["- none in this upload cohort"]
+
+
+def rewrite_reject_section(md_path: Path, lines: list[str]) -> None:
+    text = md_path.read_text()
+    head = "## Reject detail"
+    i = text.find(head)
+    if i < 0:
+        md_path.write_text(text + f"\n{head}\n\n" + "\n".join(lines) + "\n")
+        return
+    j = text.find("\n## ", i + len(head))
+    tail = text[j:] if j >= 0 else "\n"
+    body = (text[:i] + head + "\n\n(cohort view: rejected rows of "
+            "recordings UPLOADED in this window — transition-time view is "
+            "meaningless post-rebuild)\n\n" + "\n".join(lines) + "\n" + tail)
+    md_path.write_text(body)
 
 
 def main() -> int:
     send = "--send" in sys.argv[1:]
     cfg = C.load()
-    ledger = Ledger(cfg.ledger_path)
-    nonterminal = ledger.db.execute(
-        "SELECT COUNT(*) n FROM sessions WHERE state NOT IN "
-        "('DELIVERED','REJECTED','SPLIT','QUARANTINED','DUPLICATE')"
-    ).fetchone()["n"]
-    if nonterminal:
-        print(f"ABORT: {nonterminal} session(s) not terminal — "
-              f"run the driver to completion first")
+    if cfg.lock_dir.exists():
+        print(f"ABORT: {cfg.lock_dir} exists — pipeline not paused")
         return 2
+    ledger = Ledger(cfg.ledger_path)
+    cache: dict = {}
+    hi16_dt = reports._parse_ts(HI16)
+
+    # cohort-scoped terminality gate
+    blockers = []
+    ride_alongs = 0
+    for r in ledger.db.execute(
+            "SELECT session_id, state FROM sessions WHERE state NOT IN "
+            "(?,?,?,?,?)", TERMINAL):
+        ct = top_root_ctime(ledger, r["session_id"], cache)
+        if ct is not None and ct < hi16_dt:
+            blockers.append((r["session_id"], r["state"]))
+        else:
+            ride_alongs += 1
+    if blockers:
+        print("ABORT: cohort rows not terminal (run the driver until "
+              "these land):")
+        for sid, st in blockers[:20]:
+            print(f"  {st:<12} {sid}")
+        return 2
+    if ride_alongs:
+        print(f"note: {ride_alongs} non-terminal ride-along row(s) with "
+              f"upload >= hi16 — structurally outside both windows, "
+              f"ignored")
+
+    # stray-stamp pre-check
+    recorded: set = set()
+    for day, _, _ in WINDOWS:
+        p = cfg.reports_dir / day / ".regen-v2-counted.json"
+        if p.exists():
+            recorded |= set(json.loads(p.read_text()))
+    stray = [r["session_id"] for r in ledger.db.execute(
+        "SELECT session_id FROM sessions WHERE parent_id IS NULL AND "
+        "uploaded_reported_at IS NOT NULL")
+        if r["session_id"] not in recorded]
+    if stray:
+        print(f"ABORT: {len(stray)} root(s) already stamped outside our "
+              f"resume records (a stray daily send?): {stray[:10]}")
+        return 2
+
     anchor = cfg.reports_dir / ".last_daily_sent"
     out = []
     for day, lo, hi in WINDOWS:
+        day_dir = cfg.reports_dir / day
+        done = day_dir / ".regen-v2-done"
+        counted_file = day_dir / ".regen-v2-counted.json"
+        if send and done.exists():
+            out.append({"day": day, "skipped": "already done"})
+            continue
         day_dt = datetime.strptime(day, "%Y-%m-%d").replace(tzinfo=C.IST)
-        counted: list[str] = []
-        csv_path, md_path = reports.write_payment_sheet(
-            cfg, ledger, day_dt, bounds=(lo, hi), counted_out=counted)
-        stamped = reports.mark_uploads_reported(ledger, lo, hi,
-                                                sids=counted)
-        anchor.write_text(hi)
-        marker = cfg.reports_dir / day / ".sent"
-        marker.parent.mkdir(parents=True, exist_ok=True)
-        marker.touch()
-        caption = (f"SUPERSEDES {day} sheet — methodology v2 "
-                   f"(black-frozen recalibration). Old sheet is VOID for "
-                   f"payment; pay per this one.")
+        lo_dt, hi_dt = reports._parse_ts(lo), reports._parse_ts(hi)
+
+        if send and counted_file.exists():
+            counted = json.loads(counted_file.read_text())
+            csv_path = day_dir / f"payment-{day}.csv"
+            md_path = day_dir / f"payment-{day}.md"
+            resumed = True
+        else:
+            counted = []
+            csv_path, md_path = reports.write_payment_sheet(
+                cfg, ledger, day_dt, bounds=(lo, hi), counted_out=counted)
+            rewrite_reject_section(
+                md_path, cohort_reject_detail(ledger, lo_dt, hi_dt, cache))
+            resumed = False
+            if not send:
+                pv_csv = day_dir / f"preview-payment-{day}.csv"
+                pv_md = day_dir / f"preview-payment-{day}.md"
+                pv_csv.write_bytes(csv_path.read_bytes())
+                pv_md.write_bytes(md_path.read_bytes())
+                # restore nothing: real files were overwritten pre-stamp,
+                # which is stamp-independent and identical to what --send
+                # would write; only stamps/anchor/markers are side effects
+            else:
+                tmp = counted_file.with_suffix(".tmp")
+                tmp.write_text(json.dumps(counted))
+                tmp.replace(counted_file)
+
         if send:
-            telegram.send_message(cfg, f"📋 {caption}")
-            telegram.send_document(cfg, csv_path, caption=caption)
-        out.append({"day": day, "lo": lo, "hi": hi, "counted": len(counted),
-                    "stamped": stamped, "csv": str(csv_path),
-                    "sent": send})
-    print(json.dumps({"regenerated": out,
-                      "final_anchor": anchor.read_text()}, indent=1))
+            if not counted_file.exists():
+                tmp = counted_file.with_suffix(".tmp")
+                tmp.write_text(json.dumps(counted))
+                tmp.replace(counted_file)
+            caption = (f"SUPERSEDES {day} sheet — methodology v2 "
+                       f"(black-frozen recalibration). Old {day} sheet is "
+                       f"VOID for payment; pay per this sheet.")
+            try:
+                telegram.send_message(cfg, f"📋 {caption}")
+                telegram.send_document(cfg, csv_path, caption=caption)
+            except telegram.TelegramError as e:
+                print(f"ABORT rc=3 before stamping: telegram failed for "
+                      f"{day}: {e} — re-run to resend (sheet + counted "
+                      f"record are durable; duplicate message is the "
+                      f"accepted cost)")
+                return 3
+            stamped = reports.mark_uploads_reported(ledger, lo, hi,
+                                                    sids=counted)
+            anchor.write_text(hi)
+            marker = day_dir / ".sent"
+            if not marker.exists():        # preserve mtime evidence
+                marker.parent.mkdir(parents=True, exist_ok=True)
+                marker.touch()
+            done.write_text(datetime.now(C.IST).isoformat())
+            out.append({"day": day, "lo": lo, "hi": hi,
+                        "counted": len(counted), "stamped": stamped,
+                        "resumed": resumed, "csv": str(csv_path)})
+        else:
+            out.append({"day": day, "lo": lo, "hi": hi,
+                        "counted": len(counted), "preview": True})
+
+    result = {"mode": "send" if send else "preview", "days": out}
+    if send:
+        result["anchor"] = anchor.read_text().strip()
+        result["anchor_ok"] = result["anchor"] == HI16
+    print(json.dumps(result, indent=1))
     return 0
 
 

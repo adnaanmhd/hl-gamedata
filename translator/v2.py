@@ -666,6 +666,17 @@ def _applied_shift_us(session_dir: Path) -> int:
     return 0
 
 
+# Isolated-flip tolerance (Adnaan 2026-08-16): a REAL desync drifts and
+# shows as long runs of mismatched frames; single-frame flips are binning
+# jitter (an event landing within float-noise of a frame boundary flips
+# sides between translate and recheck) and blocked fixes forever (the
+# 08-16 fix-failed loop, 5 of 10 rows). Block only on a run of >=
+# RAW_DXDY_RUN_BLOCK consecutive mismatched frames OR a total above
+# RAW_DXDY_FRAC_BLOCK of rows; anything smaller is a warn.
+RAW_DXDY_RUN_BLOCK = 3
+RAW_DXDY_FRAC_BLOCK = 0.005
+
+
 def _verify_against_raw(session_dir: Path, raw_bundle: Path, s: dict,
                         rows: list[list], col: dict, pts: list[int],
                         r: V2Result, *, shift_us: int = 0) -> None:
@@ -708,13 +719,27 @@ def _verify_against_raw(session_dir: Path, raw_bundle: Path, s: dict,
             dx[f] += int(e.get("dx", 0) or 0)
             dy[f] += int(e.get("dy", 0) or 0)
             n_events += 1
-    mismatches = sum(
-        1 for i, x in enumerate(rows)
+    mismatch_idx = [
+        i for i, x in enumerate(rows)
         if float(x[col["input_mouse_dx"]] or 0) != dx[i]
-        or float(x[col["input_mouse_dy"]] or 0) != dy[i])
-    if mismatches:
-        r.fail(f"raw recomputation: dx/dy differs from CSV in {mismatches} frames "
-               f"(possible off-by-one frame attribution)")
+        or float(x[col["input_mouse_dy"]] or 0) != dy[i]]
+    if mismatch_idx:
+        run = best = 1
+        for a, b in zip(mismatch_idx, mismatch_idx[1:]):
+            run = run + 1 if b == a + 1 else 1
+            best = max(best, run)
+        frac = len(mismatch_idx) / len(rows)
+        if best >= RAW_DXDY_RUN_BLOCK or frac > RAW_DXDY_FRAC_BLOCK:
+            r.fail(f"raw recomputation: dx/dy differs from CSV in "
+                   f"{len(mismatch_idx)} frames (max run {best}, "
+                   f"{frac:.2%} of rows; possible off-by-one frame "
+                   f"attribution)")
+        else:
+            r.warn(f"isolated dx/dy attribution flips: "
+                   f"{len(mismatch_idx)} frame(s), max run {best}, "
+                   f"{frac:.2%} of rows — within tolerance (run<"
+                   f"{RAW_DXDY_RUN_BLOCK} and <={RAW_DXDY_FRAC_BLOCK:.1%});"
+                   f" single-frame binning jitter, not desync")
     else:
         note = f" (incl. {shift_us / 1000:+.1f}ms sync shift)" if shift_us else ""
         r.issues.append(

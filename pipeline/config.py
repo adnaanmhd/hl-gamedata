@@ -48,6 +48,12 @@ STILLNESS_FROZEN_BELOW = 0.40     # window motion / live-gameplay baseline
 # (INP_KEYS_MISSING interplay in validate.py).
 DEAD_BLACK_LUMA_BELOW = 5.0       # a frame is dead-black: mean luma < this
 DEAD_BLACK_REJECT_FRAC = 0.995    # reject when >= this frac of frames dead
+# FIX_GATE_WINDOW blanks this many frames BEYOND the detected window on
+# each side (Adnaan 2026-08-16): scanner re-detection jitter of +-1 frame
+# between fix and recheck resurrected INP_FROZEN_ACTIONS forever (the
+# 08-16 fix-failed loop, 5 of 10 rows) — padding makes the gate cover any
+# re-drawn boundary. Content cost: ~66ms of input blanked beside a pause.
+GATE_PAD_FRAMES = 2
 DROPS_WARN_PCT = 1.0              # irregular intervals: <=1% pass
 DROPS_REJECT_PCT = 5.0            # >5% reject; 1-5% deliver+warn
 LAG_TARGET_MS = 50.0              # controls<->video: <=50 pass

@@ -316,3 +316,70 @@ def test_plan_rows_surgery_precedes_cut():
         game="kamla", has_raw=False)
     ids = [s[0] for s in plan["steps"]]
     assert ids.index("FIX_ROWS_SURGERY") < ids.index("FIX_CUT_SEGMENTS")
+
+
+def test_gate_windows_pads_beyond_detected_window(tmp_path):
+    """Adnaan 08-16: the recheck re-draws static windows +-1 frame, so an
+    exact gate left one action frame just outside->inside forever (the
+    fix-failed loop). The gate now blanks GATE_PAD_FRAMES (2) beyond each
+    side, in the session's own frame units."""
+    import csv as _csv
+    from pipeline import config as C
+    from translator.v2 import V2_FRAME_COLS
+    d = tmp_path
+    with (d / "frames.csv").open("w", newline="") as f:
+        w = _csv.writer(f)
+        w.writerow(V2_FRAME_COLS)
+        for i in range(300):                       # 10s at ~30fps
+            t_ms = round(i * 1000 / 30)
+            row = [""] * len(V2_FRAME_COLS)
+            row[V2_FRAME_COLS.index("frame_id")] = str(i)
+            row[V2_FRAME_COLS.index("timestamp_ms")] = str(t_ms)
+            row[V2_FRAME_COLS.index("input_keys")] = "w"
+            row[V2_FRAME_COLS.index("input_actions")] = "move_up"
+            w.writerow(row)
+    res = gate.gate_windows(d, [(4.0, 5.0)])
+    assert res["requested"] == [[4.0, 5.0]]
+    assert res["pad_frames"] == C.GATE_PAD_FRAMES
+    lo, hi = res["windows"][0]
+    assert lo < 4.0 and hi > 5.0
+    with (d / "frames.csv").open(newline="") as f:
+        rows = list(_csv.DictReader(f))
+    in_win = [i for i, r in enumerate(rows)
+              if 4.0 <= int(r["timestamp_ms"]) / 1000.0 <= 5.0]
+    for i, r in enumerate(rows):
+        if in_win[0] - C.GATE_PAD_FRAMES <= i <= in_win[-1] + \
+                C.GATE_PAD_FRAMES:
+            assert r["input_keys"] == "" and r["input_actions"] == ""
+        else:
+            assert r["input_keys"] == "w"
+
+
+def test_gate_pad_survives_dropped_frame_at_boundary(tmp_path):
+    """Review finding 08-16: a seconds-based pad dies at a dropped-frame
+    boundary (gap 2x median) — the pad is in ROW units, so the 2 rows
+    beyond the window blank even across a 100ms hole."""
+    import csv as _csv
+    from translator.v2 import V2_FRAME_COLS
+    d = tmp_path
+    ts = [round(i * 1000 / 30) for i in range(150)]        # 0..~5s
+    ts = ts[:120] + [t + 100 for t in ts[120:]]            # 100ms hole at 4s
+    with (d / "frames.csv").open("w", newline="") as f:
+        w = _csv.writer(f)
+        w.writerow(V2_FRAME_COLS)
+        for i, t_ms in enumerate(ts):
+            row = [""] * len(V2_FRAME_COLS)
+            row[V2_FRAME_COLS.index("frame_id")] = str(i)
+            row[V2_FRAME_COLS.index("timestamp_ms")] = str(t_ms)
+            row[V2_FRAME_COLS.index("input_keys")] = "w"
+            row[V2_FRAME_COLS.index("input_actions")] = "move_up"
+            w.writerow(row)
+    # window ends exactly at the last row BEFORE the hole
+    end_t = ts[119] / 1000.0
+    gate.gate_windows(d, [(3.0, end_t)])
+    with (d / "frames.csv").open(newline="") as f:
+        rows = list(_csv.DictReader(f))
+    # rows 120 and 121 sit past a 100ms hole yet within 2 ROWS of the
+    # window — both must be blanked
+    assert rows[120]["input_keys"] == "" and rows[121]["input_keys"] == ""
+    assert rows[122]["input_keys"] == "w"
