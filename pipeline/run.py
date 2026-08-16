@@ -1539,7 +1539,15 @@ def main(argv: list[str] | None = None) -> int:
     cmd = argv[0] if argv else "run"
     cfg = C.load()
     if cmd == "run":
-        return run(cfg)
+        # --quiet: rebuild/maintenance runs (08-16 recal rebuild) — no
+        # per-batch toplines, no daily/folder-issues generation (anchor,
+        # markers and stamps untouched); _alert() and backup_daily stay
+        # live. Normal timer units never pass it.
+        quiet = "--quiet" in argv[1:]
+        if quiet:
+            print("[run] --quiet: telegram toplines + daily reports "
+                  "suppressed for this run")
+        return run(cfg, send_telegram=not quiet)
     if cmd == "status":
         ledger = Ledger(cfg.ledger_path)
         print(json.dumps({

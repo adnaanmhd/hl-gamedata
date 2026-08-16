@@ -480,7 +480,8 @@ def map_reasons(rep: dict, aux: dict,
             else:
                 advisories.append(
                     "zero key frames but the video is near-static — "
-                    "keyboard-missing not provable; see black/frozen check")
+                    "keyboard-missing not provable; confirm on filmstrip "
+                    "(the dead-black check no longer measures stillness)")
         qa_motion = any("mouse motion missing" in i
                         for i in rep.get("qa_issues", []))
         if qa_motion or inv.get("motion_frames") == 0:
@@ -516,7 +517,7 @@ def map_reasons(rep: dict, aux: dict,
         reasons.append(_reason(
             "CNT_BLACK_FROZEN", True, False, {},
             aux.get("black_frozen_evidence",
-                    "video mostly black/frozen — borderless-windowed "
+                    "video mostly dead-black — borderless-windowed "
                     "coaching")))
     if aux.get("tamper"):
         reasons.append(_reason("INT_TAMPER", True, False, {},
@@ -871,6 +872,22 @@ def _archive_analysis(work_dir: Path, dossier_dir: Path) -> None:
             shutil.copy2(f, dst / f.name)
 
 
+def _dead_black_check(luma: list[float]) -> tuple[bool, str | None]:
+    """Whole-clip capture-failure gate (recalibrated 2026-08-16, Adnaan):
+    reject only when >= DEAD_BLACK_REJECT_FRAC of frames sit under the
+    DEAD_BLACK_LUMA_BELOW mean-luma bar. Dark-but-live gameplay (Kamla
+    scenes at luma 7-16) must pass — the coaching wording downstream is
+    for true capture failures only."""
+    if not luma:
+        return False, None
+    frac = sum(1 for v in luma
+               if v < C.DEAD_BLACK_LUMA_BELOW) / len(luma)
+    if frac >= C.DEAD_BLACK_REJECT_FRAC:
+        return True, (f"{frac:.0%} of frames are dead-black (mean luma < "
+                      f"{C.DEAD_BLACK_LUMA_BELOW:g})")
+    return False, None
+
+
 def _build_aux(work_dir: Path, rep: dict, gem, *, gemini_key: str,
                gemini_model: str, vlm_expected: bool) -> dict:
     """Scanner timeline + AFK + refined windows + notif/chat confirmation."""
@@ -915,18 +932,14 @@ def _build_aux(work_dir: Path, rep: dict, gem, *, gemini_key: str,
         aux["scanner_stats"] = {"frames": tl.n_frames,
                                 "baseline": round(baseline, 3)}
 
-        # black/frozen whole-clip detection
+        # dead-black whole-clip detection (recalibrated 08-16 — config
+        # DEAD_BLACK_*; the frozen-motion arm is gone: near-static video
+        # stays advisory-only through video_active above)
         if tl.luma:
-            black_frac = sum(1 for v in tl.luma if v < 16) / len(tl.luma)
-            if black_frac > 0.5:
+            dead, ev = _dead_black_check(tl.luma)
+            if dead:
                 aux["black_frozen"] = True
-                aux["black_frozen_evidence"] = (
-                    f"{black_frac:.0%} of frames are near-black")
-            elif baseline < 0.3 and tl.duration_s > 30:
-                aux["black_frozen"] = True
-                aux["black_frozen_evidence"] = (
-                    f"whole-clip motion baseline {baseline:.2f} — screen "
-                    f"essentially frozen")
+                aux["black_frozen_evidence"] = ev
 
         # 1-frame-accurate bounds for the engine's gating windows
         refined: dict = {}

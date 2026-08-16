@@ -387,3 +387,17 @@ def test_zip_download_error_stays_retryable(cfg, ledger, monkeypatch):
     runmod._download_phase(cfg, ledger, [SID1], [])
     assert ledger.get(SID1)["state"] == "DISCOVERED"     # not QUARANTINED
     assert ledger.incomplete_list()
+
+
+def test_main_quiet_flag_suppresses_telegram(monkeypatch):
+    """--quiet (recal rebuild runs, 08-16): main() wires
+    send_telegram=False into run(); the default invocation (what the
+    systemd unit does) keeps it True."""
+    calls = []
+    monkeypatch.setattr(
+        runmod, "run",
+        lambda cfg, send_telegram=True, **kw:
+        calls.append(send_telegram) or 0)
+    assert runmod.main(["run", "--quiet"]) == 0
+    assert runmod.main(["run"]) == 0
+    assert calls == [False, True]

@@ -456,3 +456,101 @@ def test_misfile_reroute_target_is_claimed_not_vlm_guess():
     res = map_reasons(r, aux(), "outer_wilds")      # misfiled folder
     m = next(x for x in res.reasons if x["code"] == "STR_GAME_MISMATCH")
     assert m["params"]["actual"] == "kamla"
+
+
+# --- dead-black recalibration (Adnaan 2026-08-16) ---------------------------
+# Old rule (near-black = luma<16, >50% rejects; plus a baseline<0.3 motion
+# arm) mass-false-positived on Kamla, a dark horror game whose legitimate
+# scenes average luma 7-16 on the scanner downscale. New rule: dead-black =
+# luma < DEAD_BLACK_LUMA_BELOW (5), reject at >= DEAD_BLACK_REJECT_FRAC
+# (50%); the motion arm is deleted.
+
+def test_dead_black_dark_gameplay_passes():
+    """60% of frames at luma 8-15 (torch/smoke Kamla scenes) must PASS —
+    exactly the profile the old <16 rule wrongly rejected."""
+    from pipeline.validate import _dead_black_check
+    luma = [8.0, 11.0, 14.9] * 20 + [100.0] * 40    # 60% in the 8-15 band
+    dead, ev = _dead_black_check(luma)
+    assert not dead and ev is None
+
+
+def test_dead_black_capture_failure_rejects():
+    from pipeline.validate import _dead_black_check
+    dead, ev = _dead_black_check([2.0] * 50 + [100.0] * 50)   # 50% under 5
+    assert dead and "50%" in ev and "dead-black" in ev
+    assert _dead_black_check([0.0] * 100)[0]                  # uniform black
+
+
+def test_dead_black_boundaries_are_strict():
+    from pipeline.validate import _dead_black_check
+    # 49% dead-black: under the >=50% bar
+    assert not _dead_black_check([4.9] * 49 + [100.0] * 51)[0]
+    # luma exactly 5.0 is NOT dead-black (strict <)
+    assert not _dead_black_check([5.0] * 100)[0]
+    assert not _dead_black_check([])[0]
+
+
+def _stub_scanner(monkeypatch, tl):
+    from pipeline import scanner
+    import translator.video as V
+    monkeypatch.setattr(scanner, "available", lambda: True)
+    # stubs mirror the REAL call conventions (scan_video is keyword-only)
+    # so a call-form drift at the sole production site (validate.py, inside
+    # an except-Exception that degrades to "scanner failed") cannot stay
+    # green here while silently dropping the battery in production
+    monkeypatch.setattr(scanner, "scan_video",
+                        lambda video, *, pts_us=None, timeout_s=3600: tl)
+    monkeypatch.setattr(V, "frame_pts", lambda path: None)
+
+
+_CSV = ("frame_id,timestamp_ms,input_keys,input_actions,"
+        "input_mouse_buttons,input_mouse_dx,input_mouse_dy\n"
+        "0,0,W,move_up,,0.0,0.0\n")
+
+
+def test_low_motion_baseline_alone_no_longer_rejects(tmp_path, monkeypatch):
+    """The frozen-motion arm (baseline<0.3 over >30s) is DROPPED: a
+    near-static bright clip must NOT set black_frozen; it still turns
+    video_active off, keeping the INP_KEYS_MISSING interplay (near-static
+    + zero keys stays advisory-only)."""
+    from pipeline import scanner, validate
+    tl = scanner.MotionTimeline(
+        n_frames=100, fps=100 / 60.0, duration_s=60.0,
+        times_s=[i * 0.6 for i in range(100)],
+        diffs=[0.1] * 99, luma=[50.0] * 100)
+    _stub_scanner(monkeypatch, tl)
+    (tmp_path / "frames.csv").write_text(_CSV)
+    a = validate._build_aux(tmp_path, rep(), None, gemini_key="k",
+                            gemini_model="m", vlm_expected=False)
+    assert "black_frozen" not in a
+    assert a["video_active"] is False
+    r = rep()
+    r["inventory"]["key_frames"] = 0
+    res = map_reasons(r, aux(video_active=False, **{
+        k: a[k] for k in ("extra_windows", "afk_windows", "notifs",
+                          "chats")}), "kamla")
+    assert "CNT_BLACK_FROZEN" not in codes(res)
+    assert "INP_KEYS_MISSING" not in codes(res)
+
+
+def test_dead_black_via_build_aux_maps_to_reason(tmp_path, monkeypatch):
+    """End-to-end: a genuinely dead-black timeline sets black_frozen with
+    the measured %, and the mapper turns it into a blocking unfixable
+    CNT_BLACK_FROZEN carrying that evidence."""
+    from pipeline import scanner, validate
+    tl = scanner.MotionTimeline(
+        n_frames=100, fps=100 / 60.0, duration_s=60.0,
+        times_s=[i * 0.6 for i in range(100)],
+        diffs=[8.0] * 99, luma=[1.0] * 60 + [50.0] * 40)
+    _stub_scanner(monkeypatch, tl)
+    (tmp_path / "frames.csv").write_text(_CSV)
+    a = validate._build_aux(tmp_path, rep(), None, gemini_key="k",
+                            gemini_model="m", vlm_expected=False)
+    assert a.get("black_frozen") is True
+    assert "60%" in a["black_frozen_evidence"]
+    res = map_reasons(rep(), aux(
+        black_frozen=True,
+        black_frozen_evidence=a["black_frozen_evidence"]), "kamla")
+    bf = next(x for x in res.reasons if x["code"] == "CNT_BLACK_FROZEN")
+    assert bf["blocking"] and not bf["fixable"] and res.bin == 3
+    assert "dead-black" in bf["evidence"]

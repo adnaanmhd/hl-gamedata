@@ -35,6 +35,16 @@ KEEP_GATE_MAX_S = 2.0             # mid-clip non-gameplay: keep+gate if <= this
 KEEP_GATE_MAX_FRAC = 0.002        # ... AND <= 0.2% of clip; else split
 AFK_MIN_S = 30.0                  # >30s zero input + near-static = AFK
 STILLNESS_FROZEN_BELOW = 0.40     # window motion / live-gameplay baseline
+# Dead-black whole-clip gate — recalibrated 2026-08-16 (Adnaan): Kamla's
+# legitimate dark scenes sit at mean luma 7-16 on the scanner's 160x90
+# gray downscale, so the old near-black(<16, >50%) rule mass-false-
+# positived (all 122 black-frozen ledger rows measured 50-76%, none >=90%);
+# only the true capture-failure signature (~100% dead-black frames) may
+# reject. The frozen-motion arm (baseline<0.3) is dropped outright —
+# near-static video stays advisory-only via video_active (INP_KEYS_MISSING
+# interplay in validate.py).
+DEAD_BLACK_LUMA_BELOW = 5.0       # a frame is dead-black: mean luma < this
+DEAD_BLACK_REJECT_FRAC = 0.50     # reject when >= this frac of frames dead
 DROPS_WARN_PCT = 1.0              # irregular intervals: <=1% pass
 DROPS_REJECT_PCT = 5.0            # >5% reject; 1-5% deliver+warn
 LAG_TARGET_MS = 50.0              # controls<->video: <=50 pass
