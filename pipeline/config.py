@@ -39,12 +39,15 @@ STILLNESS_FROZEN_BELOW = 0.40     # window motion / live-gameplay baseline
 # legitimate dark scenes sit at mean luma 7-16 on the scanner's 160x90
 # gray downscale, so the old near-black(<16, >50%) rule mass-false-
 # positived (all 122 black-frozen ledger rows measured 50-76%, none >=90%);
-# only the true capture-failure signature (~100% dead-black frames) may
-# reject. The frozen-motion arm (baseline<0.3) is dropped outright —
-# near-static video stays advisory-only via video_active (INP_KEYS_MISSING
-# interplay in validate.py).
+# only the true capture-failure signature (uniform dead-black video) may
+# reject. Frac tightened 0.50 -> 0.995 same evening (Adnaan, pre-rebuild
+# relaunch; nothing was judged under 0.50). Partial blackouts are the
+# mid-clip machinery's job (static windows -> VLM -> gate/split), not this
+# whole-clip gate's. The frozen-motion arm (baseline<0.3) is dropped
+# outright — near-static video stays advisory-only via video_active
+# (INP_KEYS_MISSING interplay in validate.py).
 DEAD_BLACK_LUMA_BELOW = 5.0       # a frame is dead-black: mean luma < this
-DEAD_BLACK_REJECT_FRAC = 0.50     # reject when >= this frac of frames dead
+DEAD_BLACK_REJECT_FRAC = 0.995    # reject when >= this frac of frames dead
 DROPS_WARN_PCT = 1.0              # irregular intervals: <=1% pass
 DROPS_REJECT_PCT = 5.0            # >5% reject; 1-5% deliver+warn
 LAG_TARGET_MS = 50.0              # controls<->video: <=50 pass

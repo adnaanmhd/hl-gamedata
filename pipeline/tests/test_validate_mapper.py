@@ -463,7 +463,8 @@ def test_misfile_reroute_target_is_claimed_not_vlm_guess():
 # arm) mass-false-positived on Kamla, a dark horror game whose legitimate
 # scenes average luma 7-16 on the scanner downscale. New rule: dead-black =
 # luma < DEAD_BLACK_LUMA_BELOW (5), reject at >= DEAD_BLACK_REJECT_FRAC
-# (50%); the motion arm is deleted.
+# (99.5% — the uniform-black capture-failure signature; tightened from 50%
+# the same evening, pre-relaunch); the motion arm is deleted.
 
 def test_dead_black_dark_gameplay_passes():
     """60% of frames at luma 8-15 (torch/smoke Kamla scenes) must PASS —
@@ -476,15 +477,18 @@ def test_dead_black_dark_gameplay_passes():
 
 def test_dead_black_capture_failure_rejects():
     from pipeline.validate import _dead_black_check
-    dead, ev = _dead_black_check([2.0] * 50 + [100.0] * 50)   # 50% under 5
-    assert dead and "50%" in ev and "dead-black" in ev
-    assert _dead_black_check([0.0] * 100)[0]                  # uniform black
+    dead, ev = _dead_black_check([1.0] * 199 + [50.0])   # exactly 99.5%
+    assert dead and "99.5%" in ev and "dead-black" in ev
+    assert _dead_black_check([0.0] * 100)[0]             # uniform black
 
 
 def test_dead_black_boundaries_are_strict():
     from pipeline.validate import _dead_black_check
-    # 49% dead-black: under the >=50% bar
-    assert not _dead_black_check([4.9] * 49 + [100.0] * 51)[0]
+    # 99.4% dead-black: under the >=99.5% bar — a partial blackout is the
+    # mid-clip machinery's job, not a whole-clip reject
+    assert not _dead_black_check([1.0] * 994 + [50.0] * 6)[0]
+    # a mostly-dark session (75% under 5) passes the whole-clip gate
+    assert not _dead_black_check([2.0] * 75 + [100.0] * 25)[0]
     # luma exactly 5.0 is NOT dead-black (strict <)
     assert not _dead_black_check([5.0] * 100)[0]
     assert not _dead_black_check([])[0]
@@ -541,13 +545,13 @@ def test_dead_black_via_build_aux_maps_to_reason(tmp_path, monkeypatch):
     tl = scanner.MotionTimeline(
         n_frames=100, fps=100 / 60.0, duration_s=60.0,
         times_s=[i * 0.6 for i in range(100)],
-        diffs=[8.0] * 99, luma=[1.0] * 60 + [50.0] * 40)
+        diffs=[8.0] * 99, luma=[1.0] * 100)
     _stub_scanner(monkeypatch, tl)
     (tmp_path / "frames.csv").write_text(_CSV)
     a = validate._build_aux(tmp_path, rep(), None, gemini_key="k",
                             gemini_model="m", vlm_expected=False)
     assert a.get("black_frozen") is True
-    assert "60%" in a["black_frozen_evidence"]
+    assert "100.0%" in a["black_frozen_evidence"]
     res = map_reasons(rep(), aux(
         black_frozen=True,
         black_frozen_evidence=a["black_frozen_evidence"]), "kamla")

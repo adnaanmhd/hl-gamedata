@@ -873,17 +873,19 @@ def _archive_analysis(work_dir: Path, dossier_dir: Path) -> None:
 
 
 def _dead_black_check(luma: list[float]) -> tuple[bool, str | None]:
-    """Whole-clip capture-failure gate (recalibrated 2026-08-16, Adnaan):
-    reject only when >= DEAD_BLACK_REJECT_FRAC of frames sit under the
-    DEAD_BLACK_LUMA_BELOW mean-luma bar. Dark-but-live gameplay (Kamla
-    scenes at luma 7-16) must pass — the coaching wording downstream is
-    for true capture failures only."""
+    """Whole-clip capture-failure gate (recalibrated 2026-08-16, Adnaan;
+    frac 0.995 same evening): reject only when >= DEAD_BLACK_REJECT_FRAC
+    of frames sit under the DEAD_BLACK_LUMA_BELOW mean-luma bar — the
+    uniform-black signature. Dark-but-live gameplay (Kamla scenes at luma
+    7-16) must pass; partial blackouts belong to the mid-clip window
+    machinery. The coaching wording downstream is for true capture
+    failures only."""
     if not luma:
         return False, None
     frac = sum(1 for v in luma
                if v < C.DEAD_BLACK_LUMA_BELOW) / len(luma)
     if frac >= C.DEAD_BLACK_REJECT_FRAC:
-        return True, (f"{frac:.0%} of frames are dead-black (mean luma < "
+        return True, (f"{frac:.1%} of frames are dead-black (mean luma < "
                       f"{C.DEAD_BLACK_LUMA_BELOW:g})")
     return False, None
 
