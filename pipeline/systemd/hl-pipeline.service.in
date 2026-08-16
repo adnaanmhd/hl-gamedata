@@ -9,7 +9,12 @@ OnFailure=hl-pipeline-alert.service
 Type=oneshot
 User=__USER__
 WorkingDirectory=__HOME__/hl-gamedata
-Environment=HL_PIPELINE_WORKERS=8
+# 10 workers on e2-standard-32 — permanent since 2026-08-16 (Adnaan;
+# supersedes the R22 hold-at-8 and the Q12 16-vCPU shape). Measured:
+# 26.3 min/fh at 16vCPU/8w vs ~15 min/fh at 32vCPU/10w. 10 is the
+# useful max while V feeds one <=10-session batch (plan §15 two-batch
+# feed is the next lever).
+Environment=HL_PIPELINE_WORKERS=10
 # journald must see run output live, not at exit — python block-buffers
 # into the tee pipe otherwise
 Environment=PYTHONUNBUFFERED=1
