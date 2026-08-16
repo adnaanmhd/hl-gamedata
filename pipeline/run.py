@@ -187,7 +187,7 @@ def _download_phase(cfg, ledger, sids, alerts) -> None:
                                  f"zip payload incomplete/unreadable — "
                                  f"retrying next run: {msg}"[:300])
                 ledger.incomplete_seen(row["drive_path"],
-                                       ["zip parts incomplete"])
+                                       [ingest.ZIP_PARTS_MARKER])
             elif kind == "quarantine":
                 # bad checksum, permanently unusable archive, garbage
                 # payload: retrying can never succeed (review-r2 #0/#10)

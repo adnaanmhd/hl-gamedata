@@ -33,6 +33,12 @@ _SESSION_RE = re.compile(
     r"^\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}Z_[a-z0-9_]+_c_[0-9a-f]{16}$")
 _ZIP_PART_RE = re.compile(r"\.zip([.-]?\d{3})?$|\.z\d{2}$", re.IGNORECASE)
 
+# the missing_json a zip-mid-upload incomplete row carries (written by the
+# driver's zip_incomplete handler; scan's resolve deliberately skips rows
+# bearing exactly this, so their first_seen — the F8 >48h escalation clock —
+# survives the folder "listing complete" while parts are still arriving
+ZIP_PARTS_MARKER = "zip parts incomplete"
+
 
 def run_rclone(args: list[str], *, timeout_s: int = 3600
                ) -> subprocess.CompletedProcess:
@@ -214,7 +220,12 @@ def scan(cfg: C.Config, ledger: Ledger,
             ledger.incomplete_seen(ds.drive_path, missing)
             res.incomplete.append((ds.drive_path, missing))
             continue
-        ledger.incomplete_resolved(ds.drive_path)
+        # a zip upload "lists complete" while its parts are still arriving;
+        # only a successful download proves it (download resolves the row).
+        # Deleting here reset first_seen every tick, so the F8 >48h
+        # escalation never fired for stuck zips (Adnaan ruling 08-15)
+        if ledger.incomplete_missing(ds.drive_path) != [ZIP_PARTS_MARKER]:
+            ledger.incomplete_resolved(ds.drive_path)
 
         vmd5 = ds.files.get("video.mp4", {}).get("md5", "")
         total_bytes = sum(v["size"] for v in ds.files.values())
@@ -752,6 +763,13 @@ def download(cfg: C.Config, ledger: Ledger, session_id: str) -> str:
     if missing and kind == "v2":
         # sidecars may be absent post-unzip; completeness rule still applies
         ledger.incomplete_seen(row["drive_path"], missing)
+    else:
+        # a verified, fully-unpacked USABLE download (v2-complete, v1, raw)
+        # settles any incomplete record — including the ZIP_PARTS_MARKER
+        # rows scan deliberately leaves alone; raw/v1 payloads legitimately
+        # lack v2 files (missing != unusable), so keying this on `missing`
+        # would nag forever on zip-wrapped raw bundles
+        ledger.incomplete_resolved(row["drive_path"])
 
     if kind == "v2":
         # Sidecars move to raw/ so the analysis engine sees a clean v2

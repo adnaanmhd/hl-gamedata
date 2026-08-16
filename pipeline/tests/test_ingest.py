@@ -297,3 +297,77 @@ def test_zip_payload_md5_backfilled_and_deduped(cfg, ledger, monkeypatch):
     assert row["state"] == "REJECTED"
     assert row["md5_video"] == md5
     assert "INT_DUP_CROSS" in row["reasons_json"]
+
+
+# ---- zip-stall escalation clock (Adnaan ruling 08-15, post-r5) -----------
+
+_ZPATH1 = f"kamla/op@x.com/p1@x.com/{SID1}"
+
+
+def test_zip_marker_row_survives_scan_with_first_seen_intact(cfg, ledger):
+    """A zip mid-upload folder lists complete every tick; scan must NOT
+    delete its incomplete row — the deletion reset first_seen, so the F8
+    >48h escalation never fired for stuck zips."""
+    ingest.scan(cfg, ledger, entries=make_session_entries())
+    ledger.incomplete_seen(_ZPATH1, [ingest.ZIP_PARTS_MARKER])
+    first = ledger.incomplete_list()[0]["first_seen"]
+    ingest.scan(cfg, ledger, entries=make_session_entries())
+    rows = ledger.incomplete_list()
+    assert len(rows) == 1 and rows[0]["drive_path"] == _ZPATH1
+    assert rows[0]["first_seen"] == first
+
+
+def test_normal_incomplete_row_still_resolves_on_complete_scan(cfg, ledger):
+    """The guard is narrow: ordinary missing-file rows still clear the
+    moment the folder lists complete (pre-ruling behavior preserved)."""
+    ingest.scan(cfg, ledger,
+                entries=make_session_entries(files=["video.mp4",
+                                                    "inputs.jsonl"]))
+    assert len(ledger.incomplete_list()) == 1
+    ingest.scan(cfg, ledger, entries=make_session_entries())
+    assert ledger.incomplete_list() == []
+
+
+def test_zip_incomplete_marks_via_driver_and_success_clears(cfg, ledger,
+                                                            monkeypatch):
+    """End-to-end clock: the driver's zip_incomplete arm writes the marker
+    row (exact marker pinned); a later SUCCESSFUL download — not any
+    scan — resolves it."""
+    import hashlib
+    import subprocess
+    import pytest
+    from pipeline import run as runmod
+    payload = b"zip-then-good-bytes"
+    md5 = hashlib.md5(payload).hexdigest()
+    ingest.scan(cfg, ledger, entries=make_session_entries(md5=md5))
+
+    with pytest.MonkeyPatch.context() as mp:
+        def boom(cfg_, ledger_, sid_):
+            raise ingest.DownloadError("parts missing",
+                                       kind="zip_incomplete")
+        mp.setattr(ingest, "download", boom)
+        runmod._download_phase(cfg, ledger, [SID1], [])
+    assert ledger.incomplete_missing(_ZPATH1) == [ingest.ZIP_PARTS_MARKER]
+    assert ledger.get(SID1)["state"] == "DISCOVERED"
+
+    # marker (and its clock) survive another complete-looking scan
+    ingest.scan(cfg, ledger, entries=make_session_entries(md5=md5))
+    assert ledger.incomplete_missing(_ZPATH1) == [ingest.ZIP_PARTS_MARKER]
+
+    def fake_rclone(args, **kw):
+        dst = None
+        for a in args:
+            if str(cfg.work) in str(a):
+                dst = a
+        d = ingest.Path(dst)
+        d.mkdir(parents=True, exist_ok=True)
+        (d / "video.mp4").write_bytes(payload)
+        (d / "inputs.jsonl").write_text("")
+        (d / "metadata.json").write_text("{}")
+        return subprocess.CompletedProcess(args, 0, "", "")
+
+    monkeypatch.setattr(ingest, "run_rclone", fake_rclone)
+    monkeypatch.setattr(ingest, "_probe_duration", lambda v: 60.0)
+    kind = ingest.download(cfg, ledger, SID1)
+    assert kind == "raw"
+    assert ledger.incomplete_missing(_ZPATH1) is None

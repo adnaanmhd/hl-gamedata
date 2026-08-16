@@ -219,6 +219,18 @@ class Ledger:
                         (drive_path,))
         self.db.commit()
 
+    def incomplete_missing(self, drive_path: str) -> list | None:
+        """missing_json for one incomplete row; None if no row exists."""
+        row = self.db.execute(
+            "SELECT missing_json FROM incomplete WHERE drive_path=?",
+            (drive_path,)).fetchone()
+        if row is None:
+            return None
+        try:
+            return json.loads(row["missing_json"] or "[]")
+        except json.JSONDecodeError:
+            return []
+
     def incomplete_list(self) -> list[sqlite3.Row]:
         return self.db.execute(
             "SELECT * FROM incomplete ORDER BY first_seen").fetchall()
