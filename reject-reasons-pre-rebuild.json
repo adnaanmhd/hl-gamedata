@@ -1,0 +1,98 @@
+{
+ "captured_at_utc": "2026-08-16T12:12:06Z",
+ "purpose": "pre-rebuild rejection-reason baseline for REVALIDATION_KICKOFF_PROMPT.md step 8 (Adnaan reviewed + ordered committed 2026-08-16); authoritative freeze = the step-4 ledger backup",
+ "ledger_state_counts": {
+  "DELIVERED": 233,
+  "DISCOVERED": 1,
+  "INGESTED": 20,
+  "QUARANTINED": 9,
+  "REJECTED": 138,
+  "SPLIT": 137,
+  "VALIDATING": 16
+ },
+ "rejected_rows": 138,
+ "rejected_hours": 26.29,
+ "distinct_recordings": 113,
+ "reasons": {
+  "CNT_BLACK_FROZEN": {
+   "rows": 126,
+   "recordings": 105,
+   "sole_blocking": 23,
+   "hours": 24.13,
+   "blocking": true,
+   "fixable": false
+  },
+  "CNT_MID_NONGAMEPLAY": {
+   "rows": 74,
+   "recordings": 73,
+   "sole_blocking": 0,
+   "hours": 19.88,
+   "blocking": true,
+   "fixable": true
+  },
+  "SYN_TS_NOT_PTS": {
+   "rows": 38,
+   "recordings": 29,
+   "sole_blocking": 3,
+   "hours": 3.3,
+   "blocking": true,
+   "fixable": true
+  },
+  "CNT_EDGE_NONGAMEPLAY": {
+   "rows": 31,
+   "recordings": 30,
+   "sole_blocking": 0,
+   "hours": 5.82,
+   "blocking": true,
+   "fixable": true
+  },
+  "INP_FROZEN_ACTIONS": {
+   "rows": 20,
+   "recordings": 20,
+   "sole_blocking": 5,
+   "hours": 5.58,
+   "blocking": true,
+   "fixable": true
+  },
+  "CNT_AFK": {
+   "rows": 12,
+   "recordings": 12,
+   "sole_blocking": 0,
+   "hours": 4.79,
+   "blocking": true,
+   "fixable": true
+  },
+  "SYN_LAG_CONST": {
+   "rows": 12,
+   "recordings": 10,
+   "sole_blocking": 0,
+   "hours": 3.71,
+   "blocking": true,
+   "fixable": true
+  },
+  "CNT_ACTIONS_FEW": {
+   "rows": 2,
+   "recordings": 2,
+   "sole_blocking": 0,
+   "hours": 0.64,
+   "blocking": true,
+   "fixable": false
+  },
+  "INP_KEYS_MISSING": {
+   "rows": 2,
+   "recordings": 2,
+   "sole_blocking": 0,
+   "hours": 0.64,
+   "blocking": true,
+   "fixable": false
+  },
+  "CNT_SHORT": {
+   "rows": 1,
+   "recordings": 1,
+   "sole_blocking": 0,
+   "hours": 0.02,
+   "blocking": true,
+   "fixable": false
+  }
+ }
+}

@@ -122,8 +122,12 @@ VM `/tmp/bfcheck/*.jpg` + the two downloaded videos in `/tmp/bfcheck/{kumail,tig
    (08-15/08-16 trees) — deletion is the LAST destructive act and only after the new
    tree verifies complete against the ledger.
 8. **Reject-reason table**: exhaustive `reason code × count of sessions` (plus hours)
-   over the post-rebuild ledger, compared side-by-side with the pre-rebuild snapshot
-   (from the step-4 backup). This is a decision input for Adnaan — present, don't act.
+   over the post-rebuild ledger, compared side-by-side with the committed pre-rebuild
+   baseline **`reject-reasons-pre-rebuild.json`** (repo root — the exact table Adnaan
+   reviewed on 08-16: 138 rows / 26.3 h / 113 recordings, CNT_BLACK_FROZEN on 126 rows;
+   cross-check against the step-4 ledger backup if they disagree). The MID/EDGE_
+   NONGAMEPLAY deltas in that diff ARE the dark-frame-cascade measurement. This is a
+   decision input for Adnaan — present, don't act.
 9. **Independent live verifier** (fresh general-purpose agent, never one that wrote or
    reviewed this session's code; verdict relayed VERBATIM; BLOCKED-with-error never
    becomes a pass). Checks: suite both hosts; new-rule unit evidence (the two /tmp/bfcheck
