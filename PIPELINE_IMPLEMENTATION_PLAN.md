@@ -128,7 +128,7 @@ Rows unchanged from v1 except the marked additions/edits.
 | Min delivered clip length | **70 s** (hard; also per split segment) | Client guideline; qa-v2 |
 | Session length guidance | 10–30 min (soft; >30 min accepted with note) | R16 |
 | Distinct actions per session | **≥3** (hard; per split segment too) | R14 |
-| Mid-clip non-gameplay keep-vs-cut | keep+gate if **≤2 s contiguous AND ≤0.2% of clip**; else split; segments <70 s dropped; none survive → reject | Adnaan round-3 |
+| Mid-clip non-gameplay keep-vs-cut | keep+gate if **≤5 s contiguous** (absolute; no fraction-of-clip term); else split; segments <70 s dropped; none survive → reject. Scanner-found static windows use the **same 5 s** bar and may only propose a cut above it — at or below it they are gating-only. | **Adnaan 2026-08-17 (R2+R3) — SUPERSEDES the round-3 rule; see note ¶ below** |
 | AFK window (both games) | **>30 s** zero input + near-static screen (OW: dialogue/map/reading are gameplay; only true AFK) | Adnaan round-3 |
 | Frozen-context confirmation | window mean inter-frame diff **<40%** of that session's live-gameplay baseline; probes strictly inside window span | Sibling measurement |
 | Notifications | edge → trim; **mid-clip → reject** | Adnaan round-3 |
@@ -151,6 +151,71 @@ Rows unchanged from v1 except the marked additions/edits.
 | Incomplete folder escalation | listed every run; highlighted in daily report when **>48 h** old | Fiat F8 |
 | Pace alarm | fires when needed h/day > trailing 24 h average ×1.15, or projected finish > Aug 24 | §11.3 |
 | **Drive upload ceiling** | **750 GB per user (SA) per 24 h ≈ 240 fh/day of deliveries** — external hard cap; alert when a day's uploads pass 600 GB | [web: knowledge.workspace.google.com, 08-14]; §15 |
+
+### ¶ Supersession — mid-clip keep-vs-cut (Adnaan, 2026-08-17)
+
+**This is an explicit supersession, recorded rather than silently edited.**
+
+**What this table said until now:** "keep+gate if **≤2 s contiguous AND ≤0.2%
+of clip**", attributed to *Adnaan round-3*. That attribution was checked and is
+correct — it was Adnaan's own earlier ruling. It was also verified **not** to be
+an Odyssey spec constraint, so nothing external pinned it. Adnaan is therefore
+superseding himself, which is the only reason this row could move.
+
+**Why it moved.** Splitting was self-perpetuating, and the `≤0.2% of clip` term
+was one of the two engines. It is a *ratchet*: the allowance shrinks as the clip
+shortens. A parent averaging 1134 s allowed a 2.3 s blip; the 342 s child carved
+out of that parent allowed only 0.68 s. So a blip the parent had deliberately
+**kept** became a cut-trigger in its own child purely because the child was
+shorter — and each cut made the next one more likely. Ledger evidence (recursive
+CTE over `parent_id`): **320 roots → 600 children → 145 grandchildren**, three
+generations deep, with 109 of the 600 depth-1 children themselves `SPLIT`. The
+rebuild ran ~28 h against a planned 7–8 h at net queue drain ≈ zero: gross settle
+rate ~28 rows/hr, with child rows created almost as fast.
+
+**The three rulings, as implemented:**
+
+- **R1** — scanner-found static windows (`static_windows` → `extra_windows`) may
+  propose `CNT_MID_NONGAMEPLAY` **only above 5 s**. At or below it they are
+  gating-only: still able to raise `INP_FROZEN_ACTIONS` if inputs occurred
+  inside, but they create no child row. This defuses the 40-candidate
+  classification cap, which was the second engine — a capped parent under-scans
+  (median 75 candidates, p90 153, max 875; on a median capped session 35 windows
+  were never examined), so each child, having fewer candidates, falls under the
+  cap and discovers junk the parent's scan never saw, and re-splits. `min_s`
+  **stays 0.8 s** and is now named `SCANNER_STATIC_MIN_S` in `config.py`; the
+  initial instruction to raise it to 5 s is superseded, because this path exists
+  to catch freezes shorter than the VLM sweep's 4 s sampling interval and a 5 s
+  floor would find nothing. The VLM label + confidence filter is **kept** —
+  blanking inputs on a genuinely still moment of real gameplay would destroy
+  real training data.
+- **R2** — `KEEP_GATE_MAX_FRAC` is deleted outright, from both call sites and
+  from `config.py`. The keep test is absolute-only.
+- **R3** — `KEEP_GATE_MAX_S` 2.0 → 5.0. **Scope: `CNT_MID_NONGAMEPLAY` only.**
+  Edge behaviour is untouched: `CNT_EDGE_NONGAMEPLAY` still trims non-gameplay
+  touching clip head or tail **at any length**.
+
+Net keep test: `if span <= 5.0: keep (gate if inputs inside) else: cut`.
+
+**What is deliberately kept.** Cuts above 5 s remain because that is where the
+quality protection lives, and it is separable from the cascade: over the current
+ledger, 95 of 443 scanner-sourced `CNT_MID_NONGAMEPLAY` reasons (21.4%) exceed
+5 s, totalling 578.6 s of confirmed cutscene/loading/pause/menu, longest single
+window 16.0 s. Only 47 scanner windows carried inputs at all, so ~90% would not
+even be gated — without this carve-out that footage would ship with nothing but
+a dossier advisory.
+
+**Consequence to carry, per R4.** These rulings deploy at the flip, never
+mid-run, so the ledger will contain rows judged under two methodologies. That is
+the same accepted situation already in force for the `a4f93de` tolerance
+patches, not a new hazard. It affects the payment sheets and any comparison
+against `reject-reasons-pre-rebuild.json`, which are therefore
+**mixed-methodology and must always be labelled as such — never presented as
+like-for-like.**
+
+Pinned by `pipeline/tests/test_split_cascade_r1r3.py` (9 tests, incl. identical
+span → identical verdict at two clip durations, which is what proves the ratchet
+is gone) plus the two rewritten cases in `test_validate_mapper.py`.
 
 ## 6. Architecture
 

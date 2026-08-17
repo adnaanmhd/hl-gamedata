@@ -203,14 +203,29 @@ def test_small_frozen_window_with_actions_gates():
     assert codes(res) == ["INP_FROZEN_ACTIONS"] and res.bin == 2
 
 
-def test_frozen_window_over_frac_bar_splits():
-    # 2.0s pause in a 348s clip = 0.57% > 0.2% -> split (the real OW case)
+def test_short_frozen_window_gates_instead_of_splitting():
+    # The real OW case: a 2.0s pause in a 348s clip. This SPLIT until
+    # Adnaan's 2026-08-17 R2/R3 rulings — 2.0s was 0.57% of the clip,
+    # over the 0.2% ratchet — and splitting it was exactly the behaviour
+    # that made the cascade self-perpetuating. The ratchet is gone and the
+    # bar is 5s, so the window is kept and its 8 action frames are gated.
+    # Full rationale + the supersession live in config.KEEP_GATE_MAX_S.
     r = rep(duration_s=348.2)
     r["vlm"]["windows"] = [_window(109.5, 111.5, action_frames=8)]
     res = map_reasons(r, aux(), "kamla")
+    assert codes(res) == ["INP_FROZEN_ACTIONS"] and res.bin == 2
+    p = res.reasons[0]["params"]
+    assert p["t0"] == 109.5 and p["t1"] == 111.5
+
+
+def test_long_frozen_window_still_splits():
+    # ...and the cut path is intact above the bar: same clip, 7s pause.
+    r = rep(duration_s=348.2)
+    r["vlm"]["windows"] = [_window(109.5, 116.5, action_frames=8)]
+    res = map_reasons(r, aux(), "kamla")
     assert codes(res) == ["CNT_MID_NONGAMEPLAY"]
     cut = res.reasons[0]["params"]["cut"]
-    assert cut == [109.5, 111.5] and res.reasons[0]["fixable"]
+    assert cut == [109.5, 116.5] and res.reasons[0]["fixable"]
 
 
 def test_overlay_over_live_play_is_advisory():

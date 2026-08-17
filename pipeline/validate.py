@@ -313,7 +313,12 @@ def _map_windows(rep: dict, aux: dict, reasons: list[dict],
         # cut must remove the whole flagged window (VLM bounds included) —
         # fade-in/out residue left at a segment head re-triggers detection
         cut0, cut1 = min(w0, w["t0"]), max(w1, w["t1"])
-        if span <= C.KEEP_GATE_MAX_S and span <= C.KEEP_GATE_MAX_FRAC * dur:
+        # R2 (Adnaan 08-17): ABSOLUTE bar only — the old
+        # `and span <= KEEP_GATE_MAX_FRAC * dur` conjunct is gone. It made
+        # the identical blip keepable in a long parent and cuttable in the
+        # short child cut out of that parent, which is precisely what made
+        # splitting self-perpetuating. Verdicts no longer depend on dur.
+        if span <= C.KEEP_GATE_MAX_S:
             if action_frames:
                 # gate the FULL flagged window [cut0, cut1], not just the
                 # refined span: action_frames was counted over the whole
@@ -337,15 +342,24 @@ def _map_windows(rep: dict, aux: dict, reasons: list[dict],
                 "CNT_MID_NONGAMEPLAY", True, True,
                 {"cut": [cut0, cut1]},
                 f"{desc}: frozen {span:.1f}s "
-                f"({span / dur:.2%} of clip) — over the keep+gate bar "
-                f"({C.KEEP_GATE_MAX_S:.0f}s / "
-                f"{C.KEEP_GATE_MAX_FRAC:.1%}); split"))
+                f"({span / dur:.2%} of clip) — over the "
+                f"{C.KEEP_GATE_MAX_S:.0f}s keep+gate bar; split"))
 
     for xw in aux.get("extra_windows", []):
         span = xw["t1"] - xw["t0"]
         desc = (f"scanner-found static [{xw['label']}] "
                 f"{xw['t0']}-{xw['t1']}s")
-        if span <= C.KEEP_GATE_MAX_S and span <= C.KEEP_GATE_MAX_FRAC * dur:
+        # R1 (Adnaan 08-17): a SCANNER-found window may propose a cut only
+        # when it is longer than KEEP_GATE_MAX_S — the same 5s bar R3 sets
+        # for the VLM path, one threshold and not two. Short windows are
+        # GATING-ONLY: they may still raise INP_FROZEN_ACTIONS if inputs
+        # happened inside, but they never create a child row. That is what
+        # defuses the 40-candidate cap in validate_session(): a capped
+        # parent under-scans, its child (fewer candidates) falls under the
+        # cap and finds junk the parent never examined, and re-splits. With
+        # cuts restricted to >5s that feedback loop cannot run — only ~95
+        # windows ledger-wide (~0.2 per session) clear the bar at all.
+        if span <= C.KEEP_GATE_MAX_S:
             if xw.get("action_frames"):
                 reasons.append(_reason(
                     "INP_FROZEN_ACTIONS", True, True,
@@ -973,7 +987,8 @@ def _build_aux(work_dir: Path, rep: dict, gem, *, gemini_key: str,
         # static candidates the 4s VLM sweep can miss entirely (a 2s pause
         # between samples) — the whole reason the scanner exists (§10.3)
         statics = scanner.static_windows(tl, ratio=C.STILLNESS_FROZEN_BELOW,
-                                         baseline=baseline, min_s=0.8)
+                                         baseline=baseline,
+                                         min_s=C.SCANNER_STATIC_MIN_S)
         statics = [(a, b) for a, b in statics
                    if not _overlaps_engine(a, b)
                    and a > 1.0 and b < tl.duration_s - 1.0]

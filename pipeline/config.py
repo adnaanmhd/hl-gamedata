@@ -31,8 +31,39 @@ REQUIRED_FILES = ("video.mp4", "frames.csv", "session.json",
 MIN_CLIP_S = 70.0                 # hard, also per split segment
 SESSION_SOFT_MAX_S = 30 * 60.0    # >30 min accepted with note (R16)
 MIN_DISTINCT_ACTIONS = 3          # per session AND per split segment (R14)
-KEEP_GATE_MAX_S = 2.0             # mid-clip non-gameplay: keep+gate if <= this
-KEEP_GATE_MAX_FRAC = 0.002        # ... AND <= 0.2% of clip; else split
+# Mid-clip non-gameplay keep-vs-cut bar (Adnaan 2026-08-17, split-cascade
+# rulings R2+R3, relayed via the sister session). The test was
+# `span <= 2.0 AND span <= 0.2% of clip`; the fractional half
+# (KEEP_GATE_MAX_FRAC, now DELETED — R2) was a ratchet that TIGHTENED as
+# clips got shorter: parent avg 1134s allowed 2.3s, child avg 342s allowed
+# 0.68s, so a blip the parent deliberately KEPT became a cut-trigger in its
+# own child purely because the child was shorter. Splitting was therefore
+# self-perpetuating — 320 roots -> 600 children -> 145 grandchildren, with
+# 109 depth-1 children themselves SPLIT, and the rebuild ran ~28h against a
+# planned 7-8h at net queue drain ~= zero. The test is now ABSOLUTE ONLY:
+# span <= this -> keep (gate if inputs inside), else cut.
+# SUPERSESSION: this replaces the "keep+gate if <=2s contiguous AND <=0.2%
+# of clip" ruling recorded in PIPELINE_IMPLEMENTATION_PLAN.md §"round-3"
+# and attributed to Adnaan. That constraint was verified NOT to come from
+# the Odyssey spec, so this is Adnaan superseding his own prior ruling.
+# SCOPE: CNT_MID_NONGAMEPLAY only. Edge trimming (CNT_EDGE_NONGAMEPLAY)
+# is UNCHANGED and still trims non-gameplay touching clip head/tail at any
+# length. R1 reuses this SAME constant as the scanner path's cut bar —
+# one threshold, not two.
+KEEP_GATE_MAX_S = 5.0
+# Scanner static-window minimum length (Adnaan 2026-08-17, ruling R1).
+# Until now this was a bare inline literal in validate.py — the only
+# load-bearing threshold in the pipeline with no provenance: absent from
+# this file, unmentioned in the plan, pinned by no test. It STAYS 0.8; the
+# initial instruction to raise it to 5s is SUPERSEDED. Reason it must stay
+# low: this path exists to catch freezes SHORTER than the VLM sweep's 4s
+# sampling interval, so that inputs occurring inside them can be GATED. A
+# 5s floor would find nothing at all. It is safe at 0.8 because R1 forbids
+# a window this short from proposing a cut (see KEEP_GATE_MAX_S above) —
+# short finds are gating-only and create no child rows, so the 40-candidate
+# cap in validate.py is now a pure cost bound and can no longer drive a
+# cascade.
+SCANNER_STATIC_MIN_S = 0.8
 AFK_MIN_S = 30.0                  # >30s zero input + near-static = AFK
 STILLNESS_FROZEN_BELOW = 0.40     # window motion / live-gameplay baseline
 # Dead-black whole-clip gate — recalibrated 2026-08-16 (Adnaan): Kamla's
