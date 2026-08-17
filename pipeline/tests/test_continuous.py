@@ -27,6 +27,7 @@ import pytest
 from pipeline import config as C
 from pipeline import continuous as cont
 from pipeline import deliver, fix, ingest, reports, telegram
+from pipeline import run as runmod
 from pipeline import vlm as vlmmod
 from pipeline.ledger import Ledger
 from pipeline.tests.conftest import make_session_entries
@@ -928,6 +929,106 @@ def test_qa_v2_ragged_rows_fail_not_crash(tmp_path):
     assert any("ragged" in i for i in res.issues)
 
 
+def test_h_thread_sends_digest_and_honors_daily_interlock(cfg, ledger,
+                                                          monkeypatch):
+    """The H-loop reporting wiring itself (not _send_digest called
+    directly): with send_telegram=True the digest must fire from the
+    thread, and CONT_DAILY_REPORTS=False must suppress the dailies
+    (r-loop 2 — every other driver test runs send_telegram=False)."""
+    monkeypatch.setattr(ingest, "list_drive", lambda _cfg: [])
+    sent = []
+    monkeypatch.setattr(telegram, "send_message",
+                        lambda _c, t: sent.append(t))
+    monkeypatch.setattr(telegram, "send_document", lambda *a, **k: None)
+    daily = []
+    monkeypatch.setattr(runmod, "send_daily_report_if_due",
+                        lambda *a, **k: daily.append("daily"))
+    monkeypatch.setattr(runmod, "send_folder_issues_if_due",
+                        lambda *a, **k: daily.append("issues"))
+    monkeypatch.setattr(C, "CONT_DAILY_REPORTS", False)
+    assert cont.run_continuous(cfg, until_idle=True, send_telegram=True,
+                               install_signals=False, max_wall_s=60) == 0
+    assert any("📡 digest" in t for t in sent)      # heartbeat wired up
+    assert daily == []                              # interlock held
+    # and with the interlock lifted the dailies DO fire from the H loop
+    sent.clear()
+    monkeypatch.setattr(C, "CONT_DAILY_REPORTS", True)
+    (cfg.reports_dir / ".last_digest").unlink(missing_ok=True)
+    assert cont.run_continuous(cfg, until_idle=True, send_telegram=True,
+                               install_signals=False, max_wall_s=60) == 0
+    assert daily == ["daily", "issues"] or daily[:2] == ["daily", "issues"]
+
+
+def test_downloading_resume_beats_media_cap(cfg, ledger, monkeypatch):
+    """r-loop 1 ordering, now pinned: a DOWNLOADING row resumes even when
+    the media cap is full (it is already inside the cap); fresh intake
+    stays blocked."""
+    _seed(ledger, SID1, state="DOWNLOADING")
+    _seed(ledger, SID2, state="DISCOVERED")
+    monkeypatch.setattr(deliver, "disk_free_gb", lambda p: 500)
+    monkeypatch.setattr(C, "CONT_MEDIA_CAP_SESSIONS", 1)   # SID1 fills it
+    drv = cont.ContinuousDriver(cfg, send_telegram=False)
+    assert drv._pick_download(ledger) == SID1              # resume first
+    drv.own.release(SID1)
+    ledger.set_state(SID1, "INGESTED")                     # still 1 local
+    assert drv._pick_download(ledger) is None              # cap blocks new
+
+
+def test_stuck_lines_hold_ages_from_current_stint(cfg, ledger):
+    """_stuck_lines with real rows: aged non-HOLD row listed, DISCOVERED
+    excluded, and a HOLD session aged from its CURRENT stint (r-loop 2) —
+    a lifetime MIN(ts) would over-age the superseded/re-held case."""
+    now = datetime(2026, 8, 18, 12, 0, tzinfo=UTC)
+    drv = cont.ContinuousDriver(cfg,
+                                clocks=cont._Clocks(utcnow=lambda: now))
+
+    def ev(sid, to_state, when):
+        ledger.db.execute(
+            "INSERT INTO events(session_id, ts, from_state, to_state, "
+            "detail) VALUES(?,?,?,?,?)",
+            (sid, when.isoformat(timespec="seconds"), "", to_state, ""))
+        ledger.db.commit()
+
+    # aged FIX_QUEUED -> stuck
+    _seed(ledger, SID1, state="FIX_QUEUED")
+    ledger.db.execute("UPDATE sessions SET updated_at=? WHERE session_id=?",
+                      ((now - timedelta(hours=9)).isoformat(
+                          timespec="seconds"), SID1))
+    # DISCOVERED, equally old -> NOT stuck (cap-throttled intake is normal)
+    _seed(ledger, SID2, state="DISCOVERED")
+    ledger.db.execute("UPDATE sessions SET updated_at=? WHERE session_id=?",
+                      ((now - timedelta(hours=9)).isoformat(
+                          timespec="seconds"), SID2))
+    # HOLD_VLM: held long ago, RECOVERED (superseded), re-held 1 h ago
+    held = "2026-08-14T12-00-00Z_kamla_c_1111111111111111"
+    _seed(ledger, held, state="HOLD_VLM")
+    ev(held, "HOLD_VLM", now - timedelta(hours=40))    # ancient stint
+    ev(held, "DISCOVERED", now - timedelta(hours=2))   # supersede resets
+    ev(held, "HOLD_VLM", now - timedelta(hours=1))     # current stint
+    ledger.db.commit()
+    lines, total = drv._stuck_lines(ledger)
+    joined = " ".join(lines)
+    assert SID1 in joined and SID2 not in joined
+    assert held not in joined          # 1 h current stint < 6 h threshold
+    assert total == 1
+
+
+def test_autoscale_cpu_crit_streak_needs_two_ticks(cfg, monkeypatch):
+    """Tick-level bookkeeping of the two-consecutive-intervals rule
+    (r-loop 2): one crit tick holds, the second steps down."""
+    monkeypatch.setattr(C, "CONT_POOL_MIN", 8)
+    monkeypatch.setattr(C, "CONT_POOL_MAX", 44)
+    now = [70_000.0]
+    drv = cont.ContinuousDriver(cfg, clocks=cont._Clocks(now=lambda: now[0]))
+    drv.gate.set_target(20)
+    drv._counts = {"INGESTED": 0}          # no queue -> no up-step
+    monkeypatch.setattr(cont.ContinuousDriver, "_cpu_pct", lambda self: 99.0)
+    drv._autoscale_tick()
+    assert drv.gate.target == 20           # first crit tick only arms
+    drv._autoscale_tick()
+    assert drv.gate.target == 18           # second consecutive -> -2
+
+
 # ------------------------------------------------------------- CLI smoke
 
 def test_run_continuous_cli_smoke(tmp_path):
@@ -961,15 +1062,24 @@ def test_run_continuous_cli_smoke(tmp_path):
     try:
         for sid in (SID1, SID2):
             row = led.get(sid)
-            # garbage payload -> fixable verdict -> fix attempts burn ->
-            # rejected; any terminal-or-hold state proves the real spawn
-            # worker ran and the driver routed its verdicts
-            assert row["state"] in ("REJECTED", "HOLD_VLM", "QUARANTINED"), \
-                (sid, row["state"], proc.stdout[-2000:])
+            # QUARANTINED is deliberately EXCLUDED: that is exactly what
+            # the driver writes when the spawn worker dies at bootstrap
+            # (BrokenProcessPool -> "validation crashed"), i.e. the very
+            # failure this smoke test exists to catch. Accepting it made
+            # the test green for a completely broken worker (r-loop 2).
+            # A garbage payload must reach a REAL verdict: fixable ->
+            # budget burned -> REJECTED (or HOLD_VLM if a sweep was owed).
+            assert row["state"] in ("REJECTED", "HOLD_VLM"), \
+                (sid, row["state"], proc.stdout[-3000:], proc.stderr[-2000:])
             n = led.db.execute(
                 "SELECT COUNT(*) n FROM events WHERE session_id=?",
                 (sid,)).fetchone()["n"]
             assert n > 1
+            # and no verdict may have come from a dead worker
+            crashed = led.db.execute(
+                "SELECT COUNT(*) n FROM events WHERE session_id=? AND "
+                "detail LIKE '%validation crashed%'", (sid,)).fetchone()["n"]
+            assert crashed == 0, proc.stdout[-3000:]
     finally:
         led.close()
     assert not cfg.lock_dir.exists()

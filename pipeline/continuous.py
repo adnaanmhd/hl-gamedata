@@ -792,6 +792,12 @@ class ContinuousDriver:
         newest-event epoch. Truncate when huge — a momentary window
         undercount beats unbounded growth (writers keep appending via
         O_APPEND, so truncation never corrupts a line)."""
+        # prune FIRST and unconditionally: the early returns below used to
+        # skip it, so a missing/unreadable pressure file froze the last
+        # window's 429 count forever and pinned the pool down (r-loop 2)
+        cutoff = self.clk.now() - C.CONT_BACKPRESSURE_WINDOW_S
+        self._pressure_recent = [t for t in self._pressure_recent
+                                 if t >= cutoff]
         try:
             size = self.pressure_path.stat().st_size
         except OSError:
@@ -816,9 +822,9 @@ class ContinuousDriver:
                 if int(ev.get("status", 0)) == 429:
                     self._pressure_recent.append(ts)
                 self._last_pressure_ep = max(self._last_pressure_ep, ts)
-        cutoff = self.clk.now() - C.CONT_BACKPRESSURE_WINDOW_S
-        self._pressure_recent = [t for t in self._pressure_recent
-                                 if t >= cutoff]
+            # newly-read events can themselves be older than the window
+            self._pressure_recent = [t for t in self._pressure_recent
+                                     if t >= cutoff]
         if size > 10 * 1024 * 1024:
             try:
                 os.truncate(self.pressure_path, 0)
@@ -882,8 +888,13 @@ class ContinuousDriver:
         """Stuck = non-terminal, unchanged > CONT_STUCK_H. DISCOVERED is
         excluded (cap-throttled intake is normal, not stuck — the digest's
         undownloaded count already shows it). HOLD_VLM ages from the FIRST
-        HOLD event: each 30-min retry refreshes updated_at, which would
-        otherwise hide a permanently-held session forever (r-loop 1)."""
+        HOLD event OF THE CURRENT STINT: each 30-min retry refreshes
+        updated_at, which would otherwise hide a permanently-held session
+        forever (r-loop 1) — but a lifetime MIN(ts) over-ages a session
+        that held, recovered, and much later held again, or that was
+        superseded (events survive supersede; r-loop 2). The stint starts
+        at the first HOLD_VLM event after the last event that was neither
+        HOLD_VLM nor VALIDATING (the retry cycle's own two states)."""
         now = self.clk.utcnow()
         cut = (now - timedelta(hours=C.CONT_STUCK_H)).isoformat(
             timespec="seconds")
@@ -894,8 +905,11 @@ class ContinuousDriver:
             "ORDER BY updated_at", (cut,)).fetchall()
         held = led.db.execute(
             "SELECT s.session_id, s.state, "
-            "(SELECT MIN(ts) FROM events e WHERE e.session_id=s.session_id"
-            " AND e.to_state='HOLD_VLM') first_hold "
+            "(SELECT MIN(e.ts) FROM events e "
+            "  WHERE e.session_id=s.session_id AND e.to_state='HOLD_VLM' "
+            "    AND e.ts >= COALESCE((SELECT MAX(e2.ts) FROM events e2 "
+            "        WHERE e2.session_id=s.session_id AND e2.to_state "
+            "        NOT IN ('HOLD_VLM','VALIDATING')), '')) first_hold "
             "FROM sessions s WHERE s.state='HOLD_VLM'").fetchall()
         stuck = [(r["session_id"], r["state"], r["updated_at"])
                  for r in rows]
@@ -989,7 +1003,7 @@ class ContinuousDriver:
                 self._autoscale_tick()
                 self._next_scale = now + C.CONT_AUTOSCALE_INTERVAL_S
             if self.send_telegram:
-                pass  # MUTATION: digest dropped from H loop
+                self._send_digest(led)
                 # CONT_DAILY_REPORTS is the payment-endgame interlock:
                 # with every rebuild-era root unstamped
                 # (recal_rebuild_reset nulled uploaded_reported_at), one
@@ -998,7 +1012,7 @@ class ContinuousDriver:
                 # misattribute the hours and deadlock recal_regen_sheets'
                 # stray-stamp gate (r-loop 1). The flip deploys False;
                 # True again after regen.
-                if not C.CONT_DAILY_REPORTS:   # MUTATION: inverted
+                if C.CONT_DAILY_REPORTS:
                     runmod.send_daily_report_if_due(self.cfg, led)
                     runmod.send_folder_issues_if_due(self.cfg, led)
             if now >= self._next_sweep:
@@ -1174,8 +1188,11 @@ def run_continuous(cfg: C.Config, *, dest_prefix: str = C.VENDOR,
         led.close()
         return 0
     finally:
-        if not clean_stop and drv.threads:
-            # exception path after start(): still attempt a graceful stop
+        if not clean_stop and drv.threads and not drv.stop.is_set():
+            # exception path after start() ONLY: `stop` unset means the
+            # body never reached its own shutdown(). Without that check a
+            # normal-but-unclean stop drained TWICE, back to back, for up
+            # to 2x CONT_DRAIN_GRACE_S (r-loop 2).
             clean_stop = drv.shutdown()
         # never release the lock over live writer threads: leave it stale
         # for pid-based reclaim once this process actually dies

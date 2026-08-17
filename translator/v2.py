@@ -32,6 +32,20 @@ from .keybinds import (AMBIGUOUS_PAIRS, CONTEXT_ALLOWED, KEYBINDS,
                        game_key_from_name)
 from .translate import VENDOR, load_events, resolve_keybind
 
+
+def _utc_aware(ts: str) -> datetime:
+    """Parse an ISO stamp, ASSUMING UTC when it carries no offset.
+    HumynCapture's metadata.json sometimes writes a naive
+    started_at_utc: subtracting it from session.json's always-aware
+    created_at_utc raised TypeError (crashing the raw recheck), and
+    astimezone() on a naive value silently reinterprets it as LOCAL time,
+    skewing created_at by the host's UTC offset (+5:30 here).
+    pipeline/fix.py's `_utc` guards the same two stamps — this is its
+    translator twin (r-loop 2)."""
+    d = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+    return d if d.tzinfo else d.replace(tzinfo=timezone.utc)
+
+
 # --------------------------------------------------------------------------- #
 # v2 constants
 # --------------------------------------------------------------------------- #
@@ -194,7 +208,7 @@ def _v2_rows(rows: list[list], bound: frozenset[str], strip_stats: dict) -> list
 def build_session_json(*, slug: str, session_id: str, meta: dict,
                        info: V.VideoInfo, head_cut_s: float) -> dict:
     started_raw = meta.get("recording", {}).get("started_at_utc")
-    started = datetime.fromisoformat(started_raw.replace("Z", "+00:00"))
+    started = _utc_aware(started_raw)
     created = started + timedelta(seconds=head_cut_s)
     ended = created + timedelta(seconds=info.duration_s)
     system = meta.get("system", {})
@@ -470,13 +484,24 @@ def _check_session_json(s: dict, r: V2Result) -> None:
     if not isinstance(s["localization"], str) \
             or not _LOC_RE.match(s["localization"]):
         r.fail(f"localization not BCP 47 per spec pattern: {s['localization']!r}")
-    if s["platform"] not in _PLATFORMS:
+    # container-type guards: an unhashable (list) platform, a null/number
+    # convention, or a list maps_to raised TypeError and CRASHED the
+    # checker — the session then read as "validation crashed" (quarantine)
+    # instead of an actionable reject (r-loop 2; the r-loop-1 hardening
+    # covered only the numeric fields)
+    if not isinstance(s["platform"], str) or s["platform"] not in _PLATFORMS:
         r.fail(f"platform not in spec enum: {s['platform']!r}")
     conv = s["input_mouse_convention"]
+    if not isinstance(conv, dict):
+        r.fail(f"input_mouse_convention not an object: {conv!r}")
+        return
     need = ["maps_to", "dx_positive", "dx_negative", "dy_positive", "dy_negative"]
     miss = [k for k in need if k not in conv]
     if miss:
         r.fail(f"input_mouse_convention missing: {miss}")
+        return
+    if not isinstance(conv["maps_to"], str):
+        r.fail(f"maps_to not a string: {conv['maps_to']!r}")
         return
     if conv["maps_to"] not in _MAPS_TO:
         r.fail(f"maps_to not in enum: {conv['maps_to']!r}")
@@ -754,9 +779,8 @@ def _verify_against_raw(session_dir: Path, raw_bundle: Path, s: dict,
     misattribution."""
     from bisect import bisect_right
     meta = json.loads((raw_bundle / "metadata.json").read_text())
-    started = datetime.fromisoformat(
-        meta["recording"]["started_at_utc"].replace("Z", "+00:00"))
-    created = datetime.fromisoformat(s["created_at_utc"].replace("Z", "+00:00"))
+    started = _utc_aware(meta["recording"]["started_at_utc"])
+    created = _utc_aware(s["created_at_utc"])
     head_us = (created - started).total_seconds() * 1e6 - shift_us
     end_us = head_us + s["duration_seconds"] * 1e6
     if not pts or len(pts) != len(rows):

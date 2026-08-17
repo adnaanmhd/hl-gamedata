@@ -74,13 +74,27 @@ if [ "${1:-}" = "--enable-timers" ]; then
   systemctl list-timers hl-backup.timer --no-pager
 fi
 if [ "${1:-}" = "--enable-continuous" ]; then
+  # DISARM the batch timer first: after a rollback (which enables it) the
+  # natural roll-forward left BOTH drivers armed, and hl-pipeline.timer's
+  # Persistent=true fires a catch-up tick at boot that wins run.lock —
+  # hl-continuous then crash-loops to its start limit and stays down while
+  # the batch driver silently runs production (r-loop 2)
+  sudo systemctl disable --now hl-pipeline.timer || true
   sudo systemctl enable --now hl-backup.timer hl-continuous.service
   systemctl list-timers hl-backup.timer --no-pager
-  systemctl status hl-continuous.service --no-pager | head -5
+  # `status` returns 3 for a non-active unit and the pipe is SIGPIPE-
+  # fragile: under `set -euo pipefail` that aborted the script BEFORE the
+  # proofs below (r-loop 2). Never let the display command decide the run.
+  systemctl status hl-continuous.service --no-pager 2>&1 | head -5 || true
   # boot-persistence proof: the unit must actually be enabled (an absent
   # [Install] section makes enable a no-op and the driver dies on reboot)
   [ "$(systemctl is-enabled hl-continuous.service)" = "enabled" ] \
     || { echo "FATAL: hl-continuous.service not enabled — check [Install]" >&2; exit 1; }
+  # ... and the batch timer must be OFF, or two drivers are armed
+  batch_state="$(systemctl is-enabled hl-pipeline.timer 2>/dev/null || true)"
+  [ "$batch_state" != "enabled" ] \
+    || { echo "FATAL: hl-pipeline.timer still enabled — two drivers armed" >&2; exit 1; }
+  echo "hl-continuous enabled; hl-pipeline.timer disarmed ($batch_state)"
 fi
 
 # --- acceptance (§7.3) -----------------------------------------------------

@@ -1408,6 +1408,12 @@ def _sweep_terminal_work(cfg: C.Config, ledger: Ledger) -> None:
             row = ledger.get(sid)
             if row and row["state"] in ("DELIVERED", "SPLIT", "DUPLICATE"):
                 shutil.rmtree(p, ignore_errors=True)
+                # the sid's shift record dies with its media: the live
+                # paths drop it after their terminal commit, but a kill
+                # BETWEEN commit and wipe left the entry behind forever
+                # (DELIVERED/SPLIT have no other reclaim path — REJECTED
+                # gets one via finalize_rejected; r-loop 2)
+                deliver._drop_shift_entry(cfg, sid)
     if cfg.stage.exists():
         for pattern in ("*/*/*", "*/*/*/*"):
             for sdir in cfg.stage.glob(pattern):

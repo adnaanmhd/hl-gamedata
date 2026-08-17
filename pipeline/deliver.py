@@ -248,8 +248,21 @@ _COACHING = {
 def finalize_rejected(cfg: C.Config, ledger: Ledger,
                       session_id: str) -> None:
     """Dossier gets the verdict + a coaching note; local media is wiped.
-    The Drive I original stays untouched forever (R6)."""
+    The Drive I original stays untouched forever (R6).
+
+    The state is re-read HERE, not trusted from the caller's snapshot: the
+    continuous driver's hourly orphan sweep iterates a by_state('REJECTED')
+    list while S can supersede a row (REJECTED -> DISCOVERED) and D can
+    already be re-downloading it — wiping then deletes a live download's
+    work dir. The batch driver never had that overlap (scan ran before the
+    threads, sweeps after them), so the missing check was harmless there
+    (r-loop 2)."""
     row = ledger.get(session_id)
+    if row is not None and row["state"] != "REJECTED":
+        print(f"[finalize-skipped] {session_id}: no longer REJECTED "
+              f"(now {row['state']}) — leaving its media alone",
+              file=sys.stderr)
+        return
     dossier = cfg.dossiers / session_id
     dossier.mkdir(parents=True, exist_ok=True)
     try:
