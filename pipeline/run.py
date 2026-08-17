@@ -606,6 +606,18 @@ def _deliver_phase(cfg, ledger, sids, alerts,
         try:
             out = deliver.deliver_session(cfg, ledger, sid,
                                           dest_prefix=dest_prefix)
+        except (OSError, sqlite3.OperationalError,
+                subprocess.TimeoutExpired) as e:
+            # host-level trouble (ENOSPC from the multi-GB stage copy, a
+            # locked/full ledger, an rrd render past its 1800s timeout) is
+            # TRANSIENT and must not be terminal — deliver_session is
+            # state-guarded and resumes. Mirrors the continuous driver's
+            # _deliver_one so the rollback path behaves identically
+            # (r-loop 3).
+            stats["upload_failures"] += 1
+            _alert(cfg, f"delivery deferred for {sid} (transient): "
+                        f"{type(e).__name__}: {e}", alerts)
+            continue
         except Exception as e:
             # staging/rrd/qa crash: quarantining preserves the session for
             # a human instead of re-crashing every launchd tick (review
@@ -745,12 +757,25 @@ def send_daily_report_if_due(cfg: C.Config, ledger: Ledger,
     hi = hi_dt.isoformat(timespec="seconds")
     anchor = cfg.reports_dir / ".last_daily_sent"
     lo = (hi_dt - timedelta(hours=24)).isoformat(timespec="seconds")
+    window_clamped = False
     try:
         stored = anchor.read_text().strip()
         # sanity: never widen beyond 48 h (host clock jumps, long outage)
         floor_ = (hi_dt - timedelta(hours=48)).isoformat(timespec="seconds")
         if floor_ <= stored < hi:
             lo = stored
+        elif stored and stored < floor_:
+            # An anchor older than 48 h is silently replaced by a trailing
+            # 24 h — which is exactly the state the payment endgame leaves
+            # behind: recal_regen_sheets writes the anchor at
+            # 2026-08-16T05:32:50Z and CONT_DAILY_REPORTS stays False until
+            # the regen completes, so if dailies resume more than 48 h later
+            # this message's counters cover 24 h while the SHEET attached to
+            # it still counts the older roots through the late-arrival
+            # guard. The hours are conserved either way, but the headline
+            # and its own attachment disagreed with nothing saying so
+            # (r-loop 3). Say so.
+            window_clamped = True
     except (OSError, ValueError):
         pass
     row = ledger.db.execute(
@@ -806,6 +831,13 @@ def send_daily_report_if_due(cfg: C.Config, ledger: Ledger,
                                                 bounds=(lo, hi),
                                                 counted_out=counted)
     msg = reports.build_daily_message(d, p)
+    if window_clamped:
+        msg += ("\n\n⚠️ Window note: the stored anchor was older than 48 h "
+                "(driver paused — payment endgame), so the counters above "
+                "cover the trailing 24 h only. The ATTACHED SHEET is "
+                "authoritative: it still credits the older cohort through "
+                "the late-arrival guard, so its totals are legitimately "
+                "larger than this headline.")
     try:
         telegram.send_message(cfg, msg)
     except telegram.TelegramError as e:
@@ -1387,6 +1419,20 @@ def _close_stale_batches(ledger: Ledger) -> None:
             "sessions": sids, "closed_by": "stale-batch-sweep"})
 
 
+def _terminal_age_h(row) -> float:
+    """Hours since a ledger row last changed. Returns 0.0 when the stamp is
+    missing or unparseable — an unreadable timestamp must never be what
+    authorises deleting media."""
+    try:
+        ts = datetime.fromisoformat(
+            str(row["updated_at"]).replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        return 0.0
+    if ts.tzinfo is None:
+        ts = ts.replace(tzinfo=timezone.utc)
+    return (datetime.now(timezone.utc) - ts).total_seconds() / 3600.0
+
+
 def _sweep_terminal_work(cfg: C.Config, ledger: Ledger) -> None:
     """A kill between the DELIVERED commit and the local wipe leaks work/,
     -analysis/ and stage dirs forever — resumed runs skip DELIVERED
@@ -1406,6 +1452,17 @@ def _sweep_terminal_work(cfg: C.Config, ledger: Ledger) -> None:
             sid = p.name[:-len("-analysis")] \
                 if p.name.endswith("-analysis") else p.name
             row = ledger.get(sid)
+            if row and row["state"] == "QUARANTINED" \
+                    and _terminal_age_h(row) >= C.CONT_QUARANTINE_RECLAIM_H:
+                # QUARANTINED had NO reclaim arm at all, so its media was
+                # held forever while being invisible to the media cap —
+                # the disk filled and intake stopped with no way back
+                # (r-loop 3). The dossier is the evidence of record and
+                # Drive I keeps the original, so reclaiming the local copy
+                # after a triage window loses nothing recoverable.
+                shutil.rmtree(p, ignore_errors=True)
+                deliver._drop_shift_entry(cfg, sid)
+                continue
             if row and row["state"] in ("DELIVERED", "SPLIT", "DUPLICATE"):
                 shutil.rmtree(p, ignore_errors=True)
                 # the sid's shift record dies with its media: the live
@@ -1421,6 +1478,12 @@ def _sweep_terminal_work(cfg: C.Config, ledger: Ledger) -> None:
                     continue
                 row = ledger.get(sdir.name)
                 if row and row["state"] == "DELIVERED":
+                    shutil.rmtree(sdir, ignore_errors=True)
+                elif row and row["state"] == "QUARANTINED" \
+                        and _terminal_age_h(row) >= \
+                        C.CONT_QUARANTINE_RECLAIM_H:
+                    # a delivery that crashed mid-stage leaks the staged
+                    # copy as well as the work dir (r-loop 3)
                     shutil.rmtree(sdir, ignore_errors=True)
 
 
@@ -1593,12 +1656,38 @@ def main(argv: list[str] | None = None) -> int:
         # the always-on driver (Adnaan rulings 08-17). Lazy import: the
         # dormant batch path must not pay for (or break on) the module.
         from . import continuous
-        dest = next((a.split("=", 1)[1] for a in argv[1:]
-                     if a.startswith("--dest-prefix=")), C.VENDOR)
+        # STRICT parsing. The default destination is the REAL client tree on
+        # Drive II, and the old prefix-match silently fell back to it for any
+        # spelling that was not the exact literal `--dest-prefix=`: a space
+        # instead of `=`, an underscore, a trailing typo. The canary is the
+        # one place an operator hand-types this under flip-time pressure,
+        # and getting it wrong would upload test sessions into the
+        # production client tree — where the canary teardown, which purges
+        # only `_pipeline_test`, would never clean them, and where the real
+        # ledger has no rows for them, so recal_verify_tree would later
+        # brand them unexplained and deletable (r-loop 3).
+        dest = C.VENDOR
+        until_idle = quiet_flag = False
+        for a in argv[1:]:
+            if a.startswith("--dest-prefix="):
+                dest = a.split("=", 1)[1]
+                if not dest.strip():
+                    print("--dest-prefix= requires a non-empty value "
+                          "(empty would deliver to the Drive II ROOT)")
+                    return 2
+            elif a == "--until-idle":
+                until_idle = True
+            elif a == "--quiet":
+                quiet_flag = True
+            else:
+                print(f"unknown argument {a!r} for run-continuous "
+                      f"(--dest-prefix=NAME | --until-idle | --quiet). "
+                      f"Refusing rather than defaulting to the real "
+                      f"delivery prefix {C.VENDOR!r}.")
+                return 2
         return continuous.run_continuous(
-            cfg, dest_prefix=dest,
-            until_idle="--until-idle" in argv[1:],
-            send_telegram="--quiet" not in argv[1:])
+            cfg, dest_prefix=dest, until_idle=until_idle,
+            send_telegram=not quiet_flag)
     if cmd == "status":
         ledger = Ledger(cfg.ledger_path)
         print(json.dumps({

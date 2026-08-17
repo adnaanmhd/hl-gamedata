@@ -27,6 +27,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from . import config as C
+from . import gate as gatemod
 from . import scanner
 from . import vlm as vlmmod
 
@@ -98,6 +99,23 @@ _QA_STR_MAP = [
     ("video duration", "STR_SJ_INVALID", True),
     ("frame_id not zero-based", "STR_ROWS_MISMATCH", True),
     ("!= record_*_px", "STR_SJ_INVALID", True),
+    # r-loop 3: the r-loop-1/2 "FAIL, never crash" hardening introduced FAIL
+    # strings that matched NO needle here, so they fell through to
+    # QA_FAIL_UNMAPPED — which is blocking+UNFIXABLE whenever has_raw is
+    # False (split children always, and any zip carrying only out/). Those
+    # sessions were REJECTED on the spot without a single fix attempt, even
+    # though FIX_SESSIONJSON_REWRITE recomputes precisely the fields the
+    # new FAILs describe. Deliberately NOT mapped, because no fix can clear
+    # them and mapping would burn two attempts and two paid VLM sweeps
+    # before rejecting anyway: ragged/short rows (lost columns),
+    # "session.json unreadable", "is not a JSON object", "frames.csv
+    # unreadable/empty" — for those, QA_FAIL_UNMAPPED's retranslate-when-
+    # sidecars-exist behaviour is already the right answer.
+    ("session.json numeric fields malformed", "STR_SJ_INVALID", True),
+    ("session.json timestamps", "STR_SJ_INVALID", True),
+    ("game_title not a string", "STR_SJ_INVALID", True),
+    ("frame_id column unparseable", "STR_ROWS_MISMATCH", True),
+    ("timestamp_ms column unparseable", "STR_TS_NONMONO", True),
 ]
 
 # qa FAILs handled elsewhere (never through the generic table)
@@ -246,9 +264,33 @@ def _map_game_identity(rep: dict, expected_game: str | None,
             f"verify manually")
 
 
+def _already_gated(t0: float, t1: float, spans: list) -> bool:
+    """True when [t0,t1] sits inside a span FIX_GATE_WINDOW already blanked.
+
+    GATE_PAD_FRAMES (2 rows, ~66 ms) is sized for the scanner re-drawing a
+    boundary by +-1 frame. It is an order of magnitude too small for the
+    VLM path, whose gated span is bounded by midpoints between VLM SAMPLE
+    times: one boundary sample changing label between the fix pass and the
+    recheck moves the bound by ~0.5-1 s, i.e. 15-30 frames. The recheck
+    then recounts action frames over the NEW, wider window, re-raises
+    INP_FROZEN_ACTIONS, spends the second fix attempt re-gating (destroying
+    real gameplay input at the edge), and rejects the session as
+    "fix retries exhausted" on the third pass — a deliverable session lost
+    and an unpaid player, surfaced to ops as a bare "fix-failed" marker
+    (r-loop 3). R3 is what pushes this population through the gate path at
+    all: at the old 2 s bar these windows CUT on pass 1 and never entered
+    the fix/recheck loop.
+
+    So: if the frozen span was already blanked, the reason is SATISFIED.
+    Re-gating a boundary that merely moved would blank neighbouring real
+    gameplay, which is worse than leaving it."""
+    return any(a - 0.001 <= t0 and t1 <= b + 0.001 for a, b in spans)
+
+
 def _map_windows(rep: dict, aux: dict, reasons: list[dict],
                  advisories: list[str]) -> None:
     dur = float(rep.get("duration_s") or 0)
+    gated = aux.get("gated_spans") or []
     windows = list(rep.get("vlm", {}).get("windows", []))
     for w in windows:
         if not w.get("gating"):
@@ -318,8 +360,28 @@ def _map_windows(rep: dict, aux: dict, reasons: list[dict],
         # the identical blip keepable in a long parent and cuttable in the
         # short child cut out of that parent, which is precisely what made
         # splitting self-perpetuating. Verdicts no longer depend on dur.
-        if span <= C.KEEP_GATE_MAX_S:
-            if action_frames:
+        #
+        # BOTH quantities must clear the bar (r-loop 3). `span` is the
+        # REFINED frozen run; `[cut0, cut1]` is the union with the VLM
+        # window and is what actually SHIPS (on a keep) and what gets
+        # BLANKED (on a gate). Testing only the refined run meant a
+        # non-gameplay stretch of ANY length kept, so long as its longest
+        # contiguous still run was under the bar: a 30s cutscene built from
+        # 3-4s held shots separated by hard cuts scored span=4.9 and was
+        # KEPT, shipping 30s of cutscene mid-clip (with action_frames=0 it
+        # produced no reason at all and went straight to READY). At the old
+        # 2.0s bar the same input cut, so raising the bar is what exposed
+        # it. Keeping the decision on a quantity that is not what ships
+        # would also blank up to 30s of real input on the gate path.
+        keep_span = max(span, cut1 - cut0)
+        if keep_span <= C.KEEP_GATE_MAX_S:
+            if action_frames and _already_gated(w0, w1, gated):
+                advisories.append(
+                    f"{desc}: {action_frames} action frame(s) counted, but "
+                    f"the frozen span {w0}-{w1}s was already blanked by an "
+                    f"earlier FIX_GATE_WINDOW — treating as satisfied "
+                    f"rather than re-gating a moved boundary")
+            elif action_frames:
                 # gate the FULL flagged window [cut0, cut1], not just the
                 # refined span: action_frames was counted over the whole
                 # VLM window, and gating a narrower span left counted
@@ -338,11 +400,14 @@ def _map_windows(rep: dict, aux: dict, reasons: list[dict],
                     f"{desc}: {span:.1f}s frozen blip kept (no inputs "
                     f"inside; under the keep+gate bar)")
         else:
+            why = (f"frozen {span:.1f}s" if span >= cut1 - cut0 else
+                   f"frozen {span:.1f}s inside a "
+                   f"{cut1 - cut0:.1f}s non-gameplay window")
             reasons.append(_reason(
                 "CNT_MID_NONGAMEPLAY", True, True,
                 {"cut": [cut0, cut1]},
-                f"{desc}: frozen {span:.1f}s "
-                f"({span / dur:.2%} of clip) — over the "
+                f"{desc}: {why} "
+                f"({(cut1 - cut0) / dur:.2%} of clip) — over the "
                 f"{C.KEEP_GATE_MAX_S:.0f}s keep+gate bar; split"))
 
     for xw in aux.get("extra_windows", []):
@@ -360,7 +425,12 @@ def _map_windows(rep: dict, aux: dict, reasons: list[dict],
         # cuts restricted to >5s that feedback loop cannot run — only ~95
         # windows ledger-wide (~0.2 per session) clear the bar at all.
         if span <= C.KEEP_GATE_MAX_S:
-            if xw.get("action_frames"):
+            if xw.get("action_frames") and _already_gated(xw["t0"], xw["t1"],
+                                                          gated):
+                advisories.append(
+                    f"{desc}: already blanked by an earlier "
+                    f"FIX_GATE_WINDOW — satisfied, not re-gated")
+            elif xw.get("action_frames"):
                 reasons.append(_reason(
                     "INP_FROZEN_ACTIONS", True, True,
                     {"t0": xw["t0"], "t1": xw["t1"]},
@@ -673,13 +743,21 @@ def validate_session(work_dir: Path, dossier_dir: Path, *,
                                   gemini_model or "gemini-3.7-flash")
     raw_dir = work_dir / "raw"
     raw_by_sid = {}
+    seed_notes: list[str] = []
     if (raw_dir / "metadata.json").exists() and \
             (raw_dir / "inputs.jsonl").exists():
         raw_by_sid[work_dir.name] = raw_dir
         try:
             _seed_shift_record(work_dir)
-        except Exception:
-            pass          # inference is best-effort; the recheck decides
+        except Exception as e:
+            # inference is best-effort and the recheck decides — but a
+            # silent failure means qa re-bins at shift 0 and can FAIL sync
+            # on a session that is fine, so leave a trail rather than
+            # swallowing it whole (r-loop 3). aux does not exist yet; the
+            # note is merged in below.
+            seed_notes.append(
+                f"shift-record seeding failed ({type(e).__name__}: {e}) — "
+                f"raw sync verification runs at shift 0")
 
     analysis = eng.analyze(work_dir, raw_by_sid, gem, vlm_interval,
                            refine_step)
@@ -705,6 +783,8 @@ def validate_session(work_dir: Path, dossier_dir: Path, *,
                      vlm_expected=bool(gemini_key) and not skip_vlm)
     aux["has_raw"] = bool(raw_by_sid)
     aux["vlm_required"] = True
+    if seed_notes:
+        aux.setdefault("notes", []).extend(seed_notes)
     # every (key tag, model) that answered — R23 flag trail into the verdict
     aux["models_used"] = vlmmod.session_models()
 
@@ -736,9 +816,18 @@ def _seed_shift_record(work_dir: Path) -> None:
     from translator import video as V
     s = json.loads((work_dir / "session.json").read_text())
     meta = json.loads((raw / "metadata.json").read_text())
-    started = _dt.fromisoformat(
-        meta["recording"]["started_at_utc"].replace("Z", "+00:00"))
-    created = _dt.fromisoformat(s["created_at_utc"].replace("Z", "+00:00"))
+    # naive->UTC, same guard as translator.v2._utc_aware (r-loop 2 added it
+    # in build_session_json and _verify_against_raw; this twin was missed).
+    # A NAIVE started_at_utc — the exact input that guard exists for — made
+    # this subtraction raise TypeError, which the caller's bare
+    # `except Exception: pass` swallowed. The record was then never seeded,
+    # so _applied_shift_us returned 0 and qa re-binned the raw events at
+    # the wrong head offset: a crash was traded for a WRONG verdict that
+    # FAILs sync and burns a fix attempt plus a paid VLM sweep on a session
+    # with nothing wrong with it (r-loop 3).
+    from translator.v2 import _utc_aware
+    started = _utc_aware(meta["recording"]["started_at_utc"])
+    created = _utc_aware(s["created_at_utc"])
     base_head_us = (created - started).total_seconds() * 1e6
     dur_us = float(s["duration_seconds"]) * 1e6
     fps = float(s.get("fps") or 30.0)
@@ -803,11 +892,17 @@ def _locked_report_update(report_path: Path, name: str,
     timeout we write anyway — worst case equals the pre-lock behavior."""
     lock = report_path.parent / (report_path.name + ".lock")
     held = False
-    # patience sized to the LARGEST worker band, not the historical 8: the
-    # continuous driver autoscales up to CONT_POOL_MAX concurrent workers,
-    # and the give-up-and-write-anyway fallback below re-opens the r1 #8
-    # lost update if contention can outlast the wait (0.05 s per try)
-    for _ in range(max(100, 20 * int(getattr(C, "CONT_POOL_MAX", 8)))):
+    # Patience must OUTLAST the staleness threshold (C.REPORT_LOCK_WAIT_S >
+    # C.REPORT_LOCK_STALE_S), or the one case that cannot resolve itself —
+    # a holder that died mid-section — is also the one case the breaker
+    # never gets to handle. The old numbers were inverted: max(5s,
+    # CONT_POOL_MAX seconds) = 44s of patience against a 120s staleness
+    # bar, so every waiter arriving while a dead holder's lock was 0-76s
+    # old exhausted its wait and fell through to the unlocked write,
+    # re-opening the r1 #8 lost update the longer wait was added to close
+    # (r-loop 3).
+    deadline = time.time() + C.REPORT_LOCK_WAIT_S
+    while time.time() < deadline:
         try:
             os.mkdir(lock)
             held = True
@@ -823,7 +918,8 @@ def _locked_report_update(report_path: Path, name: str,
             # Only one renamer ever wins os.rename; losers hit OSError
             # and just retry mkdir.
             try:
-                if time.time() - lock.stat().st_mtime > 120:
+                if time.time() - lock.stat().st_mtime > \
+                        C.REPORT_LOCK_STALE_S:
                     grave = lock.with_name(
                         f"{lock.name}.stale-{os.getpid()}")
                     os.rename(lock, grave)
@@ -911,7 +1007,10 @@ def _dead_black_check(luma: list[float]) -> tuple[bool, str | None]:
 def _build_aux(work_dir: Path, rep: dict, gem, *, gemini_key: str,
                gemini_model: str, vlm_expected: bool) -> dict:
     """Scanner timeline + AFK + refined windows + notif/chat confirmation."""
-    aux: dict = {"vlm_extra_failed": False}
+    # spans a previous FIX_GATE_WINDOW already blanked in THIS session —
+    # read once, consumed by the AFK detector and by _already_gated
+    aux: dict = {"vlm_extra_failed": False,
+                 "gated_spans": gatemod.gated_spans(work_dir)}
     video = work_dir / "video.mp4"
     try:
         ts_ms, active, has_action, tamper = _read_rows(
@@ -934,11 +1033,12 @@ def _build_aux(work_dir: Path, rep: dict, gem, *, gemini_key: str,
             tl = None
             aux.setdefault("notes", []).append(f"scanner failed: {e}")
     if tl is None:
-        # losing the scanner loses the 2s-rule precision, AFK and
+        # losing the scanner loses keep-vs-cut boundary precision, AFK and
         # black-frozen checks — never a silent pass (F5): hold when the
         # session was supposed to get the full battery
         aux.setdefault("notes", []).append(
-            "scanner unavailable — AFK/black-frozen/2s-precision not run")
+            "scanner unavailable — AFK / black-frozen / frozen-window "
+            "boundary precision not run")
         if vlm_expected:
             aux["vlm_extra_failed"] = True
 
@@ -950,7 +1050,25 @@ def _build_aux(work_dir: Path, rep: dict, gem, *, gemini_key: str,
         baseline = tl.baseline(gameplay_ts)
         aux["video_active"] = baseline >= 1.0
         aux["scanner_stats"] = {"frames": tl.n_frames,
-                                "baseline": round(baseline, 3)}
+                                "baseline": round(baseline, 3),
+                                "timing": tl.timing}
+        # A uniform-fps timeline is SYNTHETIC (see scanner.scan_video). Its
+        # window bounds must never become cut points or gate spans: the
+        # cutter maps them onto real PTS, so a 9s freeze detected at a
+        # fabricated 660s removes 9s of genuine gameplay while leaving the
+        # freeze in place — and the child then re-detects it and splits
+        # again, the very cascade R1/R2 were ruled to stop. Scanner
+        # findings degrade to advisory; the VLM/engine path is unaffected
+        # because its window bounds do not come from this timeline
+        # (r-loop 3).
+        synthetic_timing = tl.timing != "real_pts"
+        if synthetic_timing:
+            aux.setdefault("notes", []).append(
+                f"scanner timeline is SYNTHETIC ({tl.timing}: decoded "
+                f"{tl.n_frames} frames but the container's packet count "
+                f"disagreed) — scanner-found windows and AFK spans are "
+                f"advisory only this pass; nothing derived from them may "
+                f"cut or gate")
 
         # dead-black whole-clip detection (recalibrated 08-16 — config
         # DEAD_BLACK_*; the frozen-motion arm is gone: near-static video
@@ -966,6 +1084,8 @@ def _build_aux(work_dir: Path, rep: dict, gem, *, gemini_key: str,
         engine_windows = [w for w in vlm_rep.get("windows", [])
                           if w.get("gating")]
         for w in engine_windows:
+            if synthetic_timing:
+                break        # refined bounds would be fabricated too
             r = scanner.refine_window(tl, w["t0"], w["t1"],
                                       ratio=C.STILLNESS_FROZEN_BELOW,
                                       baseline=baseline)
@@ -992,11 +1112,40 @@ def _build_aux(work_dir: Path, rep: dict, gem, *, gemini_key: str,
         statics = [(a, b) for a, b in statics
                    if not _overlaps_engine(a, b)
                    and a > 1.0 and b < tl.duration_s - 1.0]
+        if synthetic_timing and statics:
+            aux.setdefault("notes", []).append(
+                f"{len(statics)} scanner static window(s) found on the "
+                f"synthetic timeline — reported for the filmstrip, NOT "
+                f"classified or acted on (bounds are not real PTS)")
+            statics = []
 
         # AFK: >30s zero input + near-static (OW dialogue/map/reading are
         # gameplay — VLM label check below removes those)
-        if ts_ms and active:
-            for a, b in scanner.zero_input_runs(ts_ms, active, C.AFK_MIN_S):
+        if ts_ms and active and not synthetic_timing:
+            # An AFK run must be evidence of PLAYER inactivity. Rows this
+            # pipeline blanked with FIX_GATE_WINDOW look identical to an
+            # idle player, so a 3s gate could stitch two real activity
+            # periods into one >=30s "AFK" run that the next pass CUT —
+            # turning R1's 3s gate into a 35s split one attempt later, with
+            # no fix budget left afterwards (r-loop 3). Gated rows are
+            # therefore treated as active here (and ONLY here): we cannot
+            # attribute their emptiness to the player. The tradeoff is
+            # deliberate and one-directional — a genuine AFK overlapping a
+            # gate may be split into sub-30s runs and missed, which costs a
+            # trim, whereas the reverse error destroys real gameplay.
+            gspans = aux["gated_spans"]
+            if gspans:
+                afk_active = [
+                    a or any(t0 <= (t / 1000.0) <= t1 for t0, t1 in gspans)
+                    for a, t in zip(active, ts_ms)]
+                aux.setdefault("notes", []).append(
+                    f"{len(gspans)} previously gated span(s) excluded from "
+                    f"AFK detection (pipeline-blanked rows are not player "
+                    f"inactivity)")
+            else:
+                afk_active = active
+            for a, b in scanner.zero_input_runs(ts_ms, afk_active,
+                                                C.AFK_MIN_S):
                 m = tl.window_motion(a, b)
                 if m is not None and baseline > 0 and \
                         m < C.STILLNESS_FROZEN_BELOW * baseline:
@@ -1049,9 +1198,25 @@ def _build_aux(work_dir: Path, rep: dict, gem, *, gemini_key: str,
                         # its own fix — the reason re-fired until the fix
                         # budget wrongly rejected the session
                         # (review-r3 #2)
-                        af = sum(1 for i in range(lo, min(hi,
-                                                          len(has_action)))
-                                 if i < len(has_action) and has_action[i])
+                        # INCLUSIVE of the end frame, matching the window's
+                        # two other consumers: gate.gate_windows selects
+                        # rows on `t0 <= t <= t1` and the engine's
+                        # rows_in_window uses bisect_right. A half-open
+                        # count missed the frame AT the window end — and
+                        # since static_windows rounds its bounds while
+                        # frame_at bisects the unrounded times, up to two
+                        # trailing frames went uncounted. On the shortest
+                        # admissible window (SCANNER_STATIC_MIN_S = 0.8s,
+                        # ~24 frames) that is ~8%, and the input that ENDS
+                        # a freeze — the click that dismisses the loading
+                        # screen — lands exactly there, so the window was
+                        # reported as "kept (no inputs inside)" and shipped
+                        # an action recorded on a non-gameplay frame
+                        # (r-loop 3).
+                        af = sum(1 for i in range(lo,
+                                                  min(hi + 1,
+                                                      len(has_action)))
+                                 if has_action[i])
                         extra_windows.append(
                             {"t0": a, "t1": b, "label": lab["label"],
                              "action_frames": af})

@@ -414,6 +414,20 @@ def translate_bundle_v2(bundle_dir: Path, out_root: Path, *,
 _TS_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?(Z|[+-]\d{2}:\d{2})$")
 _LOC_RE = re.compile(r"^[a-z]{2,3}(-[A-Z]{2,3})?$")
 _FLOAT_RE = re.compile(r"^-?\d+\.\d+$")
+
+
+def _num_cell(v) -> float:
+    """A frames.csv numeric cell as a float, 0.0 when unparseable.
+
+    The checker already FAILs malformed dx/dy cells ("not float-formatted");
+    the point here is that the DOWNSTREAM measurement must not crash on the
+    same cell and destroy that verdict — a crash reads as "validation
+    crashed" (quarantine, manual queue, media never reclaimed) instead of
+    the fixable reject the FAIL describes (r-loop 3)."""
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        return 0.0
 _PLATFORMS = {"Xbox", "PC", "Switch", "PlayStation", "Mobile-iOS",
               "Mobile-Android", "Steam Deck"}
 _MAPS_TO = {"camera_look_velocity", "camera_pan_velocity", "camera_pan_position",
@@ -491,6 +505,12 @@ def _check_session_json(s: dict, r: V2Result) -> None:
     # covered only the numeric fields)
     if not isinstance(s["platform"], str) or s["platform"] not in _PLATFORMS:
         r.fail(f"platform not in spec enum: {s['platform']!r}")
+    # game_title was checked for presence only, then passed straight into
+    # keybinds' `.lower()` — a list/number/null crashed the checker with no
+    # reason recorded (r-loop 3)
+    if not isinstance(s.get("game_title"), str):
+        r.fail(f"session.json game_title not a string: "
+               f"{s.get('game_title')!r}")
     conv = s["input_mouse_convention"]
     if not isinstance(conv, dict):
         r.fail(f"input_mouse_convention not an object: {conv!r}")
@@ -550,10 +570,24 @@ def check_session_v2(session_dir: Path, raw_bundle: Path | None = None) -> V2Res
                 not isinstance(s.get(k), (int, float)):
             s[k] = 0
 
-    with (session_dir / "frames.csv").open(newline="") as f:
-        reader = csv.reader(f)
-        header = next(reader)
-        rows = list(reader)
+    # the session.json read 20 lines above is guarded and this one was not
+    # (r-loop 3). A frames.csv exported from Excel or a regional tool in
+    # cp1252 — one accented character or smart quote in a key token is
+    # enough — raises UnicodeDecodeError here; rclone copies the bad bytes
+    # faithfully and ingest md5-verifies only video.mp4, so it arrives
+    # intact and crashed the final gate into QUARANTINED instead of
+    # producing the reject a decode FAIL yields.
+    try:
+        with (session_dir / "frames.csv").open(newline="") as f:
+            reader = csv.reader(f)
+            header = next(reader)
+            rows = list(reader)
+    except (UnicodeDecodeError, OSError, csv.Error) as e:
+        r.fail(f"frames.csv unreadable: {type(e).__name__}")
+        return r
+    except StopIteration:
+        r.fail("frames.csv is empty (no header row)")
+        return r
     if header != V2_FRAME_COLS:
         r.fail(f"frames.csv header != v2 schema (got {len(header)} cols, "
                f"want {len(V2_FRAME_COLS)})")
@@ -648,7 +682,15 @@ def check_session_v2(session_dir: Path, raw_bundle: Path | None = None) -> V2Res
     # actions that are alternative meanings of ONE held key — only the action
     # the character is actually performing. Reconstructed from the built-in
     # keybind for the session's game.
-    qa_slug = game_key_from_name(s.get("game_title", ""))
+    # game_title is checked for PRESENCE only, so a non-string value (a
+    # list, a number, null) reached keybinds' `.lower()` and raised
+    # AttributeError with no reason recorded at all — a clean session
+    # became "validation crashed" instead of a typed reject (r-loop 3).
+    # The r-loop-2 container-type guards covered platform and
+    # input_mouse_convention but not this one.
+    qa_slug = game_key_from_name(s.get("game_title", "")
+                                 if isinstance(s.get("game_title"), str)
+                                 else "")
     if qa_slug in KEYBINDS:
         kb = dict(KEYBINDS[qa_slug])
         kb.update(KEYBIND_PATCHES.get(qa_slug, {}))
@@ -713,9 +755,17 @@ def check_session_v2(session_dir: Path, raw_bundle: Path | None = None) -> V2Res
     shift_us = _applied_shift_us(session_dir)
     if sync.available():
         mdx, mdy = sync.motion_track(session_dir / "video.mp4")
+        # SANITIZE first: a non-numeric dx/dy cell is already FAILed above
+        # as "not float-formatted" (bad_float), but the raw cells were then
+        # handed to sync.input_track_from_rows, whose bare float() raised
+        # ValueError and destroyed the verdict — a cell reading `abc`, a
+        # locale comma decimal `1,5` or a stringified None turned an
+        # actionable STR_SENTINELS reject (whose fix exists) into
+        # "validation crashed" -> QUARANTINED, with its media never
+        # reclaimed (r-loop 3).
         adx, ady = sync.input_track_from_rows(
-            [x[col["input_mouse_dx"]] for x in rows],
-            [x[col["input_mouse_dy"]] for x in rows], s)
+            [_num_cell(x[col["input_mouse_dx"]]) for x in rows],
+            [_num_cell(x[col["input_mouse_dy"]]) for x in rows], s)
         est = sync.estimate_lag(mdx, mdy, adx, ady)
         status, msg = sync.verdict(est, s["fps"])
         note = f" [capture clock offset corrected {shift_us / 1000:+.1f}ms " \
@@ -778,11 +828,28 @@ def _verify_against_raw(session_dir: Path, raw_bundle: Path, s: dict,
     applies the same shift so an intentional correction isn't reported as
     misattribution."""
     from bisect import bisect_right
-    meta = json.loads((raw_bundle / "metadata.json").read_text())
-    started = _utc_aware(meta["recording"]["started_at_utc"])
-    created = _utc_aware(s["created_at_utc"])
-    head_us = (created - started).total_seconds() * 1e6 - shift_us
-    end_us = head_us + s["duration_seconds"] * 1e6
+    # DEGRADE, never crash. Every value read here comes from unvalidated,
+    # player-supplied files: ingest moves metadata.json into raw/ without
+    # ever parsing it, and `created_at_utc` is absent precisely when
+    # _check_session_json already FAILed "missing required fields" and
+    # early-returned. Unguarded, a missing key or a truncated sidecar
+    # raised KeyError/JSONDecodeError out of the whole checker, so a
+    # session that was either an actionable fixable reject or a clean PASS
+    # became "validation crashed" -> QUARANTINED and a manual queue
+    # (r-loop 3). This mirrors the guard already used for unreadable PTS
+    # below, and the one pipeline/validate.py:_seed_shift_record has around
+    # the identical dereference.
+    try:
+        meta = json.loads((raw_bundle / "metadata.json").read_text())
+        started = _utc_aware(meta["recording"]["started_at_utc"])
+        created = _utc_aware(s["created_at_utc"])
+        head_us = (created - started).total_seconds() * 1e6 - shift_us
+        end_us = head_us + float(s["duration_seconds"]) * 1e6
+    except (OSError, json.JSONDecodeError, KeyError, TypeError,
+            ValueError, AttributeError) as e:
+        r.warn(f"raw verification skipped: raw metadata/session timestamps "
+               f"unreadable ({type(e).__name__})")
+        return
     if not pts or len(pts) != len(rows):
         r.warn("raw verification skipped: PTS unavailable")
         return

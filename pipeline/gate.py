@@ -9,11 +9,39 @@ complaint targets semantic actions during frozen contexts.
 from __future__ import annotations
 
 import csv
+import json
 from pathlib import Path
 
 from translator.v2 import V2_FRAME_COLS
 
 from . import config as C
+
+# Sidecar recording every span this fix has blanked, in the work dir only —
+# staging copies SPEC_FILES explicitly, so it can never reach a delivery.
+GATED_SIDECAR = ".gated_windows.json"
+
+
+def gated_spans(session_dir: Path) -> list[tuple[float, float]]:
+    """Spans (seconds) previously blanked by FIX_GATE_WINDOW in this session.
+
+    Blanking is indistinguishable from "the player did nothing": the gate
+    clears input_keys/input_actions in place and the next validation pass
+    re-reads that same frames.csv. Nothing recorded which rows WE emptied,
+    so a gate could manufacture the very inactivity the AFK rule then cut
+    on (r-loop 3). This is that record."""
+    p = Path(session_dir) / GATED_SIDECAR
+    try:
+        data = json.loads(p.read_text())
+    except (OSError, json.JSONDecodeError):
+        return []
+    out = []
+    for item in data if isinstance(data, list) else []:
+        try:
+            a, b = float(item[0]), float(item[1])
+        except (TypeError, ValueError, IndexError):
+            continue
+        out.append((a, b))
+    return out
 
 
 def gate_windows(session_dir: Path,
@@ -69,7 +97,18 @@ def gate_windows(session_dir: Path,
             spans[-1][1], spans[-1][2] = t, i
         else:
             spans.append([t, t, i])
+    applied = [[round(a, 3), round(b, 3)] for a, b, _ in spans]
+    # ACCUMULATE across attempts: attempt 2 must still know what attempt 1
+    # blanked, or the AFK detector sees the older gate's rows as player
+    # inactivity on the very next pass.
+    try:
+        side = session_dir / GATED_SIDECAR
+        prev = gated_spans(session_dir)
+        side.write_text(json.dumps(
+            [[round(a, 3), round(b, 3)] for a, b in prev] + applied))
+    except OSError as e:                    # never fail a fix over bookkeeping
+        print(f"[gate-sidecar-failed] {session_dir.name}: {e}")
     return {"gated_frames": gated,
-            "windows": [[round(a, 3), round(b, 3)] for a, b, _ in spans],
+            "windows": applied,
             "requested": [[round(a, 3), round(b, 3)] for a, b in windows],
             "pad_frames": pad_frames}

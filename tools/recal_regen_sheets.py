@@ -32,7 +32,11 @@ live anchor, cross-checked against .sent mtimes):
   08-16: (2026-08-15T06:45:22+00:00, 2026-08-16T05:32:50+00:00]
 """
 import json
+import shutil
+import sqlite3
 import sys
+import tempfile
+from dataclasses import replace
 from datetime import datetime
 from pathlib import Path
 
@@ -193,10 +197,43 @@ def _locked_main(cfg) -> int:
 
     anchor = cfg.reports_dir / ".last_daily_sent"
     out = []
+    # PREVIEW runs against a scratch COPY of the ledger and a scratch
+    # reports dir (r-loop 3). Two defects, one cause — preview skipped the
+    # stamping that --send does BETWEEN the two days:
+    #   1. Day 2 double-counted day 1. With nothing stamped, every root the
+    #      08-15 sheet counted was still `uploaded_reported_at IS NULL` when
+    #      08-16 was built, so it re-entered through the LATE-ARRIVAL guard
+    #      and was counted twice. Verified by simulation: preview gave
+    #      08-16 totals of 3.0 h where --send gives 2.0 h.
+    #   2. write_payment_sheet writes the REAL payment-<day>.csv/.md first
+    #      and only then copied them to preview-*, so a preview overwrote
+    #      the sheets of record (which hl-backup then mirrors to GCS) with
+    #      the inflated numbers, and the old comment claiming the result was
+    #      "identical to what --send would write" was false for day 2.
+    # A scratch ledger lets the preview stamp exactly as --send does, so
+    # the human gate in FLIP_RUNBOOK 7.2 reads the real thing.
+    scratch_dir = None
+    if not send:
+        scratch_dir = Path(tempfile.mkdtemp(prefix="regen-preview-"))
+        shadow_home = scratch_dir / "home"
+        (shadow_home / "reports").mkdir(parents=True, exist_ok=True)
+        src_db = ledger.db
+        dst_path = scratch_dir / "ledger.db"
+        dst = sqlite3.connect(dst_path)
+        with dst:
+            src_db.backup(dst)
+        dst.close()
+        real_cfg, real_ledger = cfg, ledger
+        cfg = replace(cfg, home=shadow_home)
+        ledger = Ledger(dst_path)
+    # markers, resume records and the published preview files always live in
+    # the REAL reports dir; only the generated sheets go to the shadow
+    pub_reports = (real_cfg if not send else cfg).reports_dir
     for day, lo, hi in WINDOWS:
         day_dir = cfg.reports_dir / day
-        done = day_dir / ".regen-v2-done"
-        counted_file = day_dir / ".regen-v2-counted.json"
+        pub_dir = pub_reports / day
+        done = pub_dir / ".regen-v2-done"
+        counted_file = pub_dir / ".regen-v2-counted.json"
         if done.exists():
             # skip in BOTH modes: post-stamp, build_sheet_rows excludes
             # every stamped root, so a "read-only" preview would rewrite
@@ -222,13 +259,20 @@ def _locked_main(cfg) -> int:
                 md_path, cohort_reject_detail(ledger, lo_dt, hi_dt, cache))
             resumed = False
             if not send:
-                pv_csv = day_dir / f"preview-payment-{day}.csv"
-                pv_md = day_dir / f"preview-payment-{day}.md"
+                # publish ONLY the preview twins into the real reports dir;
+                # payment-<day>.csv/.md were written to the shadow and the
+                # sheets of record are untouched
+                pub_dir.mkdir(parents=True, exist_ok=True)
+                pv_csv = pub_dir / f"preview-payment-{day}.csv"
+                pv_md = pub_dir / f"preview-payment-{day}.md"
                 pv_csv.write_bytes(csv_path.read_bytes())
                 pv_md.write_bytes(md_path.read_bytes())
-                # restore nothing: real files were overwritten pre-stamp,
-                # which is stamp-independent and identical to what --send
-                # would write; only stamps/anchor/markers are side effects
+                # stamp the SHADOW ledger exactly as --send stamps the real
+                # one, so the next day's sheet sees this day's roots as
+                # already counted instead of re-counting them as late
+                # arrivals
+                reports.mark_uploads_reported(ledger, lo, hi, sids=counted)
+                csv_path, md_path = pv_csv, pv_md
             else:
                 tmp = counted_file.with_suffix(".tmp")
                 tmp.write_text(json.dumps(counted))
@@ -264,12 +308,20 @@ def _locked_main(cfg) -> int:
                         "resumed": resumed, "csv": str(csv_path)})
         else:
             out.append({"day": day, "lo": lo, "hi": hi,
-                        "counted": len(counted), "preview": True})
+                        "counted": len(counted), "preview": True,
+                        "csv": str(csv_path)})
 
     result = {"mode": "send" if send else "preview", "days": out}
     if send:
         result["anchor"] = anchor.read_text().strip()
         result["anchor_ok"] = result["anchor"] == HI16
+    else:
+        ledger.close()
+        cfg, ledger = real_cfg, real_ledger
+        shutil.rmtree(scratch_dir, ignore_errors=True)
+        result["note"] = ("preview built against a scratch ledger copy with "
+                          "inter-day stamping applied — the sheets of record "
+                          "were NOT written; read preview-payment-*.csv/.md")
     print(json.dumps(result, indent=1))
     return 0
 

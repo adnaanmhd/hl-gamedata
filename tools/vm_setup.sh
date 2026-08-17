@@ -80,6 +80,28 @@ if [ "${1:-}" = "--enable-continuous" ]; then
   # hl-continuous then crash-loops to its start limit and stays down while
   # the batch driver silently runs production (r-loop 2)
   sudo systemctl disable --now hl-pipeline.timer || true
+  # `disable --now` on the TIMER stops the timer; it does NOT stop an
+  # hl-pipeline.service instance a previous elapse already started — and
+  # that unit is Type=oneshot with TimeoutStartSec=infinity, so a backlog
+  # run legitimately runs for HOURS holding run.lock. hl-continuous would
+  # then exit 1 five times, burn StartLimitBurst in ~50s, enter `failed`,
+  # and stay down needing a `systemctl reset-failed` that appears nowhere
+  # in FLIP_RUNBOOK — while this script exited 0 saying ENABLED and the
+  # batch driver kept running production. That is the exact end-state the
+  # block above says it exists to prevent (r-loop 3).
+  sudo systemctl stop hl-pipeline.service || true
+  # wait for the lock to actually clear before arming the new driver
+  lock="$HOME/hl-pipeline/run.lock"
+  for _ in $(seq 1 60); do
+    [ -e "$lock" ] || break
+    sleep 1
+  done
+  if [ -e "$lock" ]; then
+    echo "FATAL: $lock still held after 60s — a batch run or a driver is" >&2
+    echo "  still live. Stop it and re-run; arming now would crash-loop" >&2
+    echo "  hl-continuous into its start limit." >&2
+    exit 1
+  fi
   sudo systemctl enable --now hl-backup.timer hl-continuous.service
   systemctl list-timers hl-backup.timer --no-pager
   # `status` returns 3 for a non-active unit and the pipe is SIGPIPE-
@@ -94,7 +116,19 @@ if [ "${1:-}" = "--enable-continuous" ]; then
   batch_state="$(systemctl is-enabled hl-pipeline.timer 2>/dev/null || true)"
   [ "$batch_state" != "enabled" ] \
     || { echo "FATAL: hl-pipeline.timer still enabled — two drivers armed" >&2; exit 1; }
-  echo "hl-continuous enabled; hl-pipeline.timer disarmed ($batch_state)"
+  # is-enabled proves boot persistence, NOT that the thing is running: a
+  # unit sitting in `failed` after burning its start limit still reports
+  # "enabled". Settle, then assert it is genuinely ACTIVE, so a
+  # start-limited driver fails this script instead of passing it (r-loop 3).
+  sleep 3
+  active_state="$(systemctl is-active hl-continuous.service 2>/dev/null || true)"
+  if [ "$active_state" != "active" ]; then
+    echo "FATAL: hl-continuous.service is '$active_state', not active." >&2
+    echo "  journalctl -u hl-continuous -n 50 --no-pager" >&2
+    echo "  If it burned its start limit: systemctl reset-failed hl-continuous.service" >&2
+    exit 1
+  fi
+  echo "hl-continuous enabled AND active; hl-pipeline.timer disarmed ($batch_state)"
 fi
 
 # --- acceptance (§7.3) -----------------------------------------------------

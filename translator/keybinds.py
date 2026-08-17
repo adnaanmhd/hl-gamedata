@@ -117,8 +117,14 @@ AMBIGUOUS_PAIRS: dict[str, tuple[str, str]] = {
 
 
 def _collapse(s: str) -> str:
-    """Lowercase, strip every non-alphanumeric — for fuzzy game-name matching."""
-    return re.sub(r"[^a-z0-9]+", "", (s or "").lower())
+    """Lowercase, strip every non-alphanumeric — for fuzzy game-name matching.
+
+    Defensive about the input type: game_title comes from a player-supplied
+    session.json, and a list/number/null used to raise AttributeError here
+    and crash the qa-v2 checker into a quarantine (r-loop 3)."""
+    if not isinstance(s, str):
+        s = "" if s is None else str(s)
+    return re.sub(r"[^a-z0-9]+", "", s.lower())
 
 
 def game_key_from_name(name: str, exe_name: str | None = None) -> str | None:

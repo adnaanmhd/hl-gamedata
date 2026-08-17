@@ -15,7 +15,7 @@ These tests pin the behaviour, not the constants: they use literal spans and
 durations so that moving a threshold in config.py fails them loudly.
 """
 from pipeline import config as C
-from pipeline import scanner, validate
+from pipeline import fix, scanner, validate
 from pipeline.scanner import MotionTimeline
 
 
@@ -196,3 +196,134 @@ def test_keep_gate_frac_is_gone_from_config():
     """R2 removed the constant itself, not just its use — a stray
     reference must not be able to reintroduce the ratchet silently."""
     assert not hasattr(C, "KEEP_GATE_MAX_FRAC")
+
+
+# ============================================ r-loop 3 consequences of R1-R3
+# The rulings are settled; these pin MECHANICAL consequences they did not
+# consider, all found by the split-cascade review lane.
+
+def test_long_window_with_short_frozen_run_is_cut_not_kept():
+    """r-loop 3: the keep test must consider what actually SHIPS.
+
+    `span` is the refined frozen run; `[cut0, cut1]` is the union with the
+    VLM window and is what is delivered (on a keep) or blanked (on a gate).
+    Testing only the frozen run meant a non-gameplay stretch of ANY length
+    kept so long as its longest still run was under the bar — a 30s cutscene
+    built from 3-4s held shots scored span=4.9 and shipped whole, and with
+    no inputs inside it produced no reason at all and went straight to
+    READY. At the old 2.0s bar the same input cut, so raising the bar is
+    what exposed it."""
+    rep = {"duration_s": 600.0, "vlm": {"windows": [
+        _vlm_window(100.0, 130.0, action_frames=42)]}}
+    aux = {"refined": {(100.0, 130.0): (110.0, 114.9)},
+           "extra_windows": [], "afk_windows": []}
+    reasons, advisories = [], []
+    validate._map_windows(rep, aux, reasons, advisories)
+    codes = [r["code"] for r in reasons]
+    assert codes == ["CNT_MID_NONGAMEPLAY"], (
+        "a 30s cutscene must not be KEPT because its longest frozen run "
+        "happens to be under the bar")
+    assert reasons[0]["params"]["cut"] == [100.0, 130.0]
+
+    # ...and with no inputs it must still not silently ship
+    reasons, advisories = [], []
+    rep["vlm"]["windows"] = [_vlm_window(100.0, 130.0, action_frames=0)]
+    validate._map_windows(rep, aux, reasons, advisories)
+    assert [r["code"] for r in reasons] == ["CNT_MID_NONGAMEPLAY"]
+
+
+def test_short_window_still_keeps_when_both_bounds_clear_the_bar():
+    """The complement: the fix above must not turn every keep into a cut."""
+    rep = {"duration_s": 600.0, "vlm": {"windows": [
+        _vlm_window(100.0, 104.0, action_frames=7)]}}
+    aux = {"refined": {(100.0, 104.0): (101.0, 102.5)},
+           "extra_windows": [], "afk_windows": []}
+    reasons, advisories = [], []
+    validate._map_windows(rep, aux, reasons, advisories)
+    assert [r["code"] for r in reasons] == ["INP_FROZEN_ACTIONS"]
+
+
+def test_previously_gated_window_is_satisfied_not_regated():
+    """GATE_PAD_FRAMES (2 rows, ~66ms) is sized for +-1 frame of scanner
+    jitter, but a VLM window bound is a midpoint between VLM SAMPLES and
+    moves ~0.5-1s (15-30 frames) when one boundary sample changes label
+    between passes. The recheck then recounted actions over the new wider
+    window, re-raised INP_FROZEN_ACTIONS, spent attempt 2 re-gating (blanking
+    real gameplay at the edge) and rejected the session on pass 3."""
+    rep = {"duration_s": 600.0, "vlm": {"windows": [
+        _vlm_window(100.0, 104.0, action_frames=7)]}}
+    aux = {"refined": {(100.0, 104.0): (101.0, 102.5)},
+           "extra_windows": [], "afk_windows": [],
+           "gated_spans": [(100.5, 103.0)]}       # covers the frozen run
+    reasons, advisories = [], []
+    validate._map_windows(rep, aux, reasons, advisories)
+    assert reasons == [], "an already-blanked span must not re-fire"
+    assert any("already blanked" in a for a in advisories)
+
+
+def test_gate_step_runs_after_the_csv_writers():
+    """FIX_KEY_HYGIENE re-resolves input_actions for every row from
+    keys|buttons plus the motion flags, and motion-bound semantics (kamla
+    `look: mouse`) fire from dx/dy alone — which the gate deliberately
+    leaves as captured. Planned BEFORE hygiene, the gate was undone in the
+    same pass that applied it."""
+    plan = fix.plan_fixes(
+        [{"code": "INP_FROZEN_ACTIONS", "blocking": True, "fixable": True,
+          "params": {"t0": 10.0, "t1": 12.0}},
+         {"code": "INP_OSKEYS", "blocking": True, "fixable": True,
+          "params": {"keys": {"cmd": 3}}}],
+        game="kamla", has_raw=False)
+    ids = [f for f, _ in plan["steps"]]
+    assert "FIX_GATE_WINDOW" in ids and "FIX_KEY_HYGIENE" in ids
+    assert ids.index("FIX_GATE_WINDOW") > ids.index("FIX_KEY_HYGIENE"), (
+        "the gate only blanks, so it must run last among the frames.csv "
+        "writers or hygiene repopulates the actions it just cleared")
+
+
+def test_gate_blanked_rows_do_not_manufacture_an_afk_cut():
+    """gate.py blanks keys+actions in place and validate re-reads that same
+    frames.csv, so pipeline-blanked rows are indistinguishable from an idle
+    player. A 3s gate could therefore stitch two real activity periods into
+    one >=30s AFK run that the NEXT pass CUT — turning R1's 3s gate into a
+    35s split one attempt later, with no fix budget left."""
+    ts_ms = [i * 100 for i in range(600)]          # 60s at 10Hz
+    active = [False] * 600
+    for i in range(0, 100):                        # gameplay 0-10s
+        active[i] = True
+    for i in range(200, 230):                      # key burst 20-23s
+        active[i] = True
+    for i in range(450, 600):                      # gameplay 45-60s
+        active[i] = True
+    # pre-gate: the burst breaks the run, so no >=30s idle span exists
+    assert scanner.zero_input_runs(ts_ms, active, C.AFK_MIN_S) == []
+    # the gate blanks exactly the burst R1 routes to gating
+    gated = [(20.0, 23.0)]
+    afk_active = [a or any(t0 <= (t / 1000.0) <= t1 for t0, t1 in gated)
+                  for a, t in zip(active, ts_ms)]
+    assert scanner.zero_input_runs(ts_ms, afk_active, C.AFK_MIN_S) == [], (
+        "rows the pipeline itself blanked must not read as player "
+        "inactivity")
+    # ...and without the mask the manufactured AFK run reappears
+    blanked = list(active)
+    for i in range(200, 230):
+        blanked[i] = False
+    assert scanner.zero_input_runs(ts_ms, blanked, C.AFK_MIN_S) != []
+
+
+def test_synthetic_timeline_is_declared_and_acts_on_nothing():
+    """scan_video falls back to a uniform grid when the decoded frame count
+    disagrees with the packet count. These captures drop 12-20% of frames,
+    so wherever drops cluster that grid is seconds off — and its bounds were
+    fed to the cutter as real-PTS cut points, removing genuine gameplay
+    while leaving the freeze in place (which the child then re-split on)."""
+    diffs = [5.0] * 30 + [0.2] * 20 + [5.0] * 30
+    times = [i * 0.1 for i in range(len(diffs) + 1)]
+    real = MotionTimeline(n_frames=len(diffs) + 1, fps=10.0,
+                          duration_s=times[-1] + 0.1, times_s=times,
+                          diffs=diffs, luma=[100.0] * (len(diffs) + 1))
+    assert real.timing == "real_pts"        # default must stay honest
+    synth = MotionTimeline(n_frames=len(diffs) + 1, fps=10.0,
+                           duration_s=times[-1] + 0.1, times_s=times,
+                           diffs=diffs, luma=[100.0] * (len(diffs) + 1),
+                           timing="uniform_fps")
+    assert synth.timing != "real_pts"

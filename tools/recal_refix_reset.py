@@ -37,6 +37,31 @@ REMOTE = "drive-deliver:"
 DELIVERED_ISH = ("PACKAGED", "UPLOADED", "DELIVERED")
 
 
+def discard_split_artifacts(work: Path, sid: str) -> None:
+    """Remove a sid's split manifest and rowless segment dirs.
+
+    Per-sid teardown wiped `work/<sid>` and `work/<sid>-analysis` but left
+    `work/<sid>.split-manifest.json` and the `work/<sid>-p<N>` segment dirs
+    a kill-mid-cut leaves behind (r-loop 3). Because the rows are DELETEd
+    immediately after, `run._sweep_terminal_work` can never reclaim them
+    either — both its work-dir and its manifest branches look the sid up in
+    the ledger and skip when it is gone. Segment videos are hundreds of MB
+    and would sit in work/ permanently, counting against the 100 GB
+    low-water that pauses ALL intake. Worse, cutter segment ids are
+    deterministic (`<sid>-p<n>`), so a re-split under R1-R3 recreates the
+    same names and a stale manifest could be adopted as a COMPLETED cut
+    over half-written segments — the rescinded-manifest class review-r4
+    #5/#19 closed everywhere else.
+
+    The `-p<digits>` test is deliberate: it must not eat an unrelated
+    directory that merely starts with the same prefix.
+    """
+    (work / f"{sid}.split-manifest.json").unlink(missing_ok=True)
+    for seg in work.glob(f"{sid}-p*"):
+        if seg.is_dir() and seg.name[len(sid) + 2:].isdigit():
+            shutil.rmtree(seg, ignore_errors=True)
+
+
 def top_root(ledger: Ledger, sid: str) -> str:
     for _ in range(10):
         row = ledger.get(sid)
@@ -191,6 +216,7 @@ def _locked_main(cfg, args) -> int:
                         shutil.move(str(f), dst / f.name)
             shutil.rmtree(cfg.work / sid, ignore_errors=True)
             shutil.rmtree(cfg.work / f"{sid}-analysis", ignore_errors=True)
+            discard_split_artifacts(cfg.work, sid)
             report = cfg.work / "translation_report.json"
             if report.exists():
                 _locked_report_remove(report, sid)

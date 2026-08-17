@@ -155,18 +155,27 @@ def test_daily_window_contiguous_via_persisted_anchor(cfg, ledger,
 def test_engine_window_gate_params_cover_full_vlm_window():
     """INP_FROZEN_ACTIONS must gate the FULL flagged window — the span its
     trigger counted actions over — not just the refined frozen span."""
+    # The window must be one that KEEPS, so there is a gate to inspect.
+    # r-loop 3 made the keep test consider the FULL window and not just the
+    # refined run (a 30s cutscene whose longest still run was 4.9s used to
+    # keep and ship), so the original 6.0s fixture now cuts by design —
+    # covered in test_split_cascade_r1r3. The invariant under test here is
+    # unchanged: when a window IS kept, the gate must span everything the
+    # action count was measured over, not merely the refined frozen run.
     dur = 1200.0
     rep = {"duration_s": dur, "vlm": {"windows": [{
-        "t0": 100.0, "t1": 106.0, "gating": True, "tier": "high",
+        "t0": 100.0, "t1": 104.0, "gating": True, "tier": "high",
         "labels": ["loading"], "stillness_ratio": 0.1,
         "inputs": {"action_frames": 7}}]}}
-    aux = {"refined": {(100.0, 106.0): (102.0, 103.5)}}
+    aux = {"refined": {(100.0, 104.0): (102.0, 103.5)}}
     reasons, advisories = [], []
     validate._map_windows(rep, aux, reasons, advisories)
     frozen = [r for r in reasons if r["code"] == "INP_FROZEN_ACTIONS"]
     assert len(frozen) == 1
     p = frozen[0]["params"]
-    assert p["t0"] <= 100.0 and p["t1"] >= 106.0       # full window gated
+    assert p["t0"] <= 100.0 and p["t1"] >= 104.0       # full window gated
+    # and the refined run alone would have been a strictly narrower gate
+    assert p["t1"] - p["t0"] > 103.5 - 102.0
 
 
 # ------------------------------ dedupe loser finalize + F3 note (r3 #29)

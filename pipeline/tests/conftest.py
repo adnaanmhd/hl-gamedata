@@ -1,3 +1,4 @@
+import faulthandler
 import sys
 from pathlib import Path
 
@@ -6,9 +7,48 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from pipeline import config as C          # noqa: E402
+from pipeline import ingest as _ingest    # noqa: E402
 from pipeline import run as _runmod       # noqa: E402
 from pipeline import vlm as _vlmmod       # noqa: E402
 from pipeline.ledger import Ledger        # noqa: E402
+
+
+# Hard per-test deadline. The driver tests run real threads against fake
+# clocks, so a regression can spin a loop with no exit and HANG pytest
+# rather than fail it — indefinitely, in CI and in the flip's "full suite
+# green" pre-arm gate (r-loop 3). There is no pytest.ini/pyproject in this
+# repo and no pytest-timeout dependency; faulthandler is stdlib and turns a
+# hang into a dumped traceback pointing at the stuck thread. Generous
+# enough that no honest test approaches it (the whole suite is ~50s).
+_TEST_TIMEOUT_S = 300
+
+
+@pytest.fixture(autouse=True)
+def _hang_guard():
+    faulthandler.dump_traceback_later(_TEST_TIMEOUT_S, exit=True)
+    try:
+        yield
+    finally:
+        faulthandler.cancel_dump_traceback_later()
+
+
+@pytest.fixture(autouse=True)
+def _no_real_drive(monkeypatch):
+    """No test may list the REAL Drive I.
+
+    `ingest.list_drive` shells out to a full recursive `rclone lsjson -R`
+    against the live collection tree. Any driver test that forgot to fake it
+    silently did that on every suite run — slow, non-hermetic, and dependent
+    on production state (r-loop 3 found the suite doing exactly this). It is
+    read-only, so nothing was damaged, but a test must never depend on it.
+    Tests that need a listing patch this themselves and win, because their
+    monkeypatch is applied after this fixture."""
+    def _refuse(_cfg):
+        raise AssertionError(
+            "test called ingest.list_drive — patch it "
+            "(monkeypatch.setattr(ingest, 'list_drive', lambda _cfg: [])) "
+            "instead of listing the real Drive I")
+    monkeypatch.setattr(_ingest, "list_drive", _refuse)
 
 
 @pytest.fixture(autouse=True)

@@ -28,6 +28,7 @@ import os
 import shutil
 import signal
 import sqlite3
+import subprocess
 import sys
 import threading
 import time
@@ -44,7 +45,13 @@ from . import run as runmod
 # session cap (ruling 2) counts these from the ledger, so it is resume-exact.
 LOCAL_STATES = ("DOWNLOADING", "INGESTED", "VALIDATING", "FIX_QUEUED",
                 "FIXING", "REVALIDATING", "READY", "PACKAGED", "UPLOADED",
-                "HOLD_VLM")
+                "HOLD_VLM",
+                # QUARANTINED holds real media until the sweep reclaims it
+                # at CONT_QUARANTINE_RECLAIM_H. Leaving it out let ~90 GB of
+                # quarantined video sit unseen by the cap, so intake tripped
+                # the disk low-water instead — a stop with no path back,
+                # since no sweep touched those dirs either (r-loop 3).
+                "QUARANTINED")
 # V-domain states for queue-depth (autoscale input): work the pool has or
 # will have. HOLD_VLM is excluded — held sessions wait on a clock, not a slot.
 V_DEPTH_STATES = ("INGESTED", "VALIDATING", "FIX_QUEUED", "FIXING",
@@ -251,6 +258,9 @@ class ContinuousDriver:
         self._cpu_prev: tuple[int, int] | None = None
         self._cpu_crit_prev = False
         self._counts: dict[str, int] = {}         # H-thread state snapshot
+        # last digest window END held in memory, so a failed anchor WRITE
+        # after a successful send cannot re-send every tick (r-loop 3)
+        self._digest_anchor_mem: str | None = None
         self._scan_passes = 0                     # successful scans
         self._scan_attempts = 0                   # incl. failed scans
         self.threads: list[threading.Thread] = []
@@ -289,8 +299,21 @@ class ContinuousDriver:
             # Drive was checked" (r-loop 2). Attempts bound the loop;
             # passes stay honest.
             self._scan_attempts += 1
+            # Fetch OUTSIDE the mutex, adjudicate INSIDE it. The listing is
+            # a full recursive `rclone lsjson -R --hash` of Drive I with a
+            # 3600s ceiling, and holding intake_lock across it blocked
+            # _pick_download — which waits on the same lock with no timeout
+            # — for that entire share of every 5-minute poll, throttling the
+            # single-worker intake lane on a deadline-bound program. A slow
+            # or rate-limited Drive could stall D for a full hour with no
+            # signal, and a SIGTERM during a scan left D parked in an
+            # uninterruptible acquire so it could not honour `stop`
+            # (r-loop 3). Nothing about the listing needs the lock: the
+            # cross-dup un-pick race the lock exists for is decided from
+            # ledger reads that all happen after the listing returns.
+            entries = ingest.list_drive(self.cfg)
             with self.intake_lock:
-                res = ingest.scan(self.cfg, led)
+                res = ingest.scan(self.cfg, led, entries)
             for path, why in res.quarantined:
                 print(f"[quarantined] {path}: {why}")
             for f in res.integrity_flags:
@@ -308,7 +331,17 @@ class ContinuousDriver:
     # ------------------------------------------------------- D: download
     def _local_count(self, led: Ledger) -> int:
         counts = led.counts_by_state()
-        return sum(counts.get(s, 0) for s in LOCAL_STATES)
+        n = sum(counts.get(s, 0) for s in LOCAL_STATES
+                if s != "QUARANTINED")
+        # QUARANTINED holds media only until the hourly sweep reclaims it at
+        # CONT_QUARANTINE_RECLAIM_H. Counting the raw state total would
+        # ratchet the cap shut permanently, since the row stays QUARANTINED
+        # forever after its media is gone — so count only the rows whose
+        # media the sweep has not yet taken, using the same age test.
+        for r in led.by_state("QUARANTINED"):
+            if runmod._terminal_age_h(r) < C.CONT_QUARANTINE_RECLAIM_H:
+                n += 1
+        return n
 
     def _pick_download(self, led: Ledger) -> str | None:
         if deliver.disk_free_gb(self.cfg.home) < C.DISK_LOW_WATER_GB:
@@ -462,6 +495,17 @@ class ContinuousDriver:
             try:
                 sid = self._pick_v(led)
                 if sid is None:
+                    # release BEFORE the idle wait: the _lane_loop refactor
+                    # moved the release into the finally, so the dispatcher
+                    # sat on a gate slot for the whole 2s wait and — since
+                    # the lane re-enters immediately — held one slot
+                    # continuously whenever nothing was pickable. gate.active
+                    # then over-reported by one, inflating the digest's
+                    # pool_active and suppressing legitimate autoscale
+                    # up-steps, whose rule is `queue_depth > active`
+                    # (r-loop 3).
+                    self.gate.release()
+                    handed_off = True          # slot already returned
                     self.stop.wait(C.CONT_DISPATCH_IDLE_S)
                     return
                 self.runner_pool.submit(self._session_runner, sid)
@@ -566,6 +610,27 @@ class ContinuousDriver:
                         max_workers=1, mp_context=ctx) as ex:
                     res = list(ex.map(_WORKER_FN, [job]))[0]
             except concurrent.futures.process.BrokenProcessPool:
+                # A broken pool during SHUTDOWN is not a crash. systemd's
+                # default KillMode=control-group SIGTERMs every pid in the
+                # unit cgroup, and a spawn child is a fresh interpreter
+                # with the DEFAULT SIGTERM disposition (our handler is not
+                # inherited), so `systemctl stop` kills every in-flight
+                # validation worker. Treating that as a native crash wrote
+                # QUARANTINED — a TERMINAL state with no automatic
+                # re-entry — for every session being validated, making a
+                # GRACEFUL stop strictly worse than kill -9 (r-loop 3
+                # blocker). The unit now sets KillMode=mixed so children
+                # are not signalled at all; this is the belt.
+                # The brief wait closes the ordering race: systemd signals
+                # the whole cgroup at once, so the child can die and the
+                # pool break BEFORE our own SIGTERM handler has run.
+                if not self.stop.is_set():
+                    self.stop.wait(2.0)
+                if self.stop.is_set():
+                    # leave the row VALIDATING: it resumes on restart
+                    # exactly like kill -9, which is the path the design
+                    # was hardened for.
+                    return None
                 res = {"sid": sid,
                        "error": "validation worker died (native crash "
                                 "decoding this session)"}
@@ -724,7 +789,29 @@ class ContinuousDriver:
         try:
             out = deliver.deliver_session(self.cfg, led, sid,
                                           dest_prefix=self.dest_prefix)
+        except (OSError, sqlite3.OperationalError,
+                subprocess.TimeoutExpired) as e:
+            # HOST-level trouble is transient — do NOT quarantine. The
+            # download lane was given exactly this treatment (review-r4
+            # #3/#17) while delivery kept a bare `except Exception` that
+            # routed everything to a terminal state. That mattered because
+            # F7 deliberately keeps U running when the disk is low
+            # ("pausing delivery would starve the reclaim path"), so an
+            # ENOSPC from stage_session's multi-GB copy converted the whole
+            # READY/PACKAGED/UPLOADED backlog to QUARANTINED within
+            # minutes, each one leaking its work dir and making the disk
+            # worse (r-loop 3). deliver_session is state-guarded and
+            # resumes, so leaving the state untouched is correct.
+            self.cool.set(sid, C.CONT_UPLOAD_RETRY_MIN * 60)
+            self.alerts.alert(f"delivery deferred for {sid} (transient): "
+                              f"{type(e).__name__}: {e}")
+            return
         except Exception as e:
+            if self.stop.is_set():
+                # shutdown SIGKILLed an rrd/ffmpeg child out from under us
+                # (see _validate_one): resume from the ledger, do not
+                # brand a healthy session terminal.
+                return
             led.set_state(sid, "QUARANTINED",
                           f"delivery crashed: {type(e).__name__}: "
                           f"{e}"[:300])
@@ -862,6 +949,16 @@ class ContinuousDriver:
         try:
             lo = anchor.read_text().strip()
         except OSError:
+            lo = ""
+        # In-memory anchor: if the anchor WRITE failed after a successful
+        # send (disk full, reports_dir read-only), the next 20s tick would
+        # re-read the stale file, still see the interval elapsed, and send
+        # again — 180 digests an hour, forever, precisely during the
+        # incident when Telegram is the operator's only view (r-loop 3).
+        # "Sent but not recorded" must stay at MOST one duplicate.
+        if self._digest_anchor_mem and self._digest_anchor_mem > lo:
+            lo = self._digest_anchor_mem
+        if not lo:
             lo = (hi_dt - timedelta(
                 hours=C.CONT_DIGEST_INTERVAL_H)).isoformat(timespec="seconds")
             return lo, hi                        # first digest: send now
@@ -916,6 +1013,13 @@ class ContinuousDriver:
         for r in held:
             if r["first_hold"] and r["first_hold"] < cut:
                 stuck.append((r["session_id"], "HOLD_VLM", r["first_hold"]))
+        # re-sort the MERGED list: HOLD rows are appended after the
+        # already-age-sorted query rows, so without this the digest's
+        # `stuck[:5]` showed HOLD sessions only when fewer than five other
+        # rows were stuck — a 40h-held session stayed invisible behind five
+        # 7h ones, which is exactly what the HOLD-aging fix existed to
+        # surface (r-loop 3)
+        stuck.sort(key=lambda t: t[2] or "")
         out = []
         for sid, state, since in stuck[:5]:
             try:
@@ -987,8 +1091,45 @@ class ContinuousDriver:
         except telegram.TelegramError as e:
             print(f"[digest-undelivered] {e}", file=sys.stderr)
             return                    # anchor unwritten -> retried next tick
-        # anchor AFTER send: a kill duplicates a digest, never loses one
-        (self.cfg.reports_dir / ".last_digest").write_text(hi)
+        # anchor AFTER send: a kill duplicates a digest, never loses one.
+        # Written atomically, and a failed write falls back to an in-memory
+        # anchor so the send cannot repeat every 20s (see _digest_window).
+        self._digest_anchor_mem = hi
+        p = self.cfg.reports_dir / ".last_digest"
+        try:
+            tmp = p.with_name(p.name + ".tmp")
+            tmp.write_text(hi)
+            os.replace(tmp, p)
+        except OSError as e:
+            self.alerts.alert(
+                f"digest anchor unwritable ({type(e).__name__}: {e}) — "
+                f"holding the window in memory; digests continue but a "
+                f"restart will re-send one")
+
+    def _cap_pressure_alert(self, led: Ledger) -> None:
+        """Restore the batch driver's HOLD warning for a forever-process.
+
+        run.py alerted `N session(s) still HOLD_VLM at end of run` — a
+        continuous driver has no end of run, so that signal vanished. It
+        matters because HOLD_VLM is the only capped state with no
+        terminating transition: it re-enters itself every 30 min by ruling.
+        A Gemini outage therefore fills all 40 local slots with held
+        sessions, `_pick_download` stops intake entirely, and the driver
+        looks healthy — the digest just prints `HOLD 40` among other
+        numbers (r-loop 3)."""
+        n = self._local_count(led)
+        if n < C.CONT_MEDIA_CAP_SESSIONS:
+            return
+        counts = self._counts or led.counts_by_state()
+        held = counts.get("HOLD_VLM", 0)
+        dom, dom_n = max(((s, counts.get(s, 0)) for s in LOCAL_STATES),
+                         key=lambda kv: kv[1])
+        extra = (f" — {held} of them HOLD_VLM, which never exits on its own "
+                 f"(check the VLM key/quota)") if held * 2 >= n else ""
+        self.alerts.alert(
+            f"media cap reached: {n}/{C.CONT_MEDIA_CAP_SESSIONS} local "
+            f"sessions, so NEW downloads are paused (mostly {dom}: "
+            f"{dom_n}){extra}")
 
     def _housekeeping_thread(self) -> None:
         # cadence state lives on self: the body is re-entered per tick and
@@ -996,14 +1137,32 @@ class ContinuousDriver:
         self._next_scale = 0.0
         self._next_sweep = 0.0
 
+        def _duty(label: str, fn) -> None:
+            """Run one housekeeping duty in isolation.
+
+            The block used to be seven unguarded statements with the cadence
+            stamp at the END, so the FIRST one that raised (backup_daily on
+            a full disk is the obvious candidate) skipped every later duty
+            for the life of the process AND left `_next_sweep` unadvanced —
+            turning an hourly block into a 20-second retry loop that wrote a
+            full ledger copy each time onto the already-full disk. The
+            reclaim sweeps are the only thing that frees work dirs, so the
+            failure silently disabled disk recovery while the digest kept
+            reporting a healthy driver (r-loop 3)."""
+            try:
+                fn()
+            except Exception as e:
+                self.alerts.alert(f"housekeeping duty '{label}' failed: "
+                                  f"{type(e).__name__}: {e}")
+
         def body(led: Ledger) -> None:
             now = self.clk.mono()
             self._counts = led.counts_by_state()
             if now >= self._next_scale:
-                self._autoscale_tick()
                 self._next_scale = now + C.CONT_AUTOSCALE_INTERVAL_S
+                _duty("autoscale", self._autoscale_tick)
             if self.send_telegram:
-                self._send_digest(led)
+                _duty("digest", lambda: self._send_digest(led))
                 # CONT_DAILY_REPORTS is the payment-endgame interlock:
                 # with every rebuild-era root unstamped
                 # (recal_rebuild_reset nulled uploaded_reported_at), one
@@ -1013,18 +1172,30 @@ class ContinuousDriver:
                 # stray-stamp gate (r-loop 1). The flip deploys False;
                 # True again after regen.
                 if C.CONT_DAILY_REPORTS:
-                    runmod.send_daily_report_if_due(self.cfg, led)
-                    runmod.send_folder_issues_if_due(self.cfg, led)
+                    _duty("daily payment report",
+                          lambda: runmod.send_daily_report_if_due(
+                              self.cfg, led))
+                    _duty("folder-issues report",
+                          lambda: runmod.send_folder_issues_if_due(
+                              self.cfg, led))
             if now >= self._next_sweep:
-                led.backup_daily(self.cfg.backups,
-                                 keep=C.LEDGER_BACKUP_KEEP)
-                runmod._finalize_orphan_rejects(self.cfg, led)
-                runmod._sweep_terminal_work(self.cfg, led)
+                # advance the cadence FIRST: a duty that raises must not be
+                # able to convert an hourly block into a 20s retry loop
+                self._next_sweep = now + 3600
+                _duty("ledger backup",
+                      lambda: led.backup_daily(self.cfg.backups,
+                                               keep=C.LEDGER_BACKUP_KEEP))
+                _duty("orphan-reject finalize",
+                      lambda: runmod._finalize_orphan_rejects(self.cfg, led))
+                _duty("terminal-work sweep",
+                      lambda: runmod._sweep_terminal_work(self.cfg, led))
                 # fresh dedup list per sweep: the ceiling alert re-fires
                 # hourly while the condition persists — run._alert's
                 # per-list dedup only spans this call
-                runmod._upload_ceiling_alert(self.cfg, led, [])
-                self._next_sweep = now + 3600
+                _duty("upload-ceiling alert",
+                      lambda: runmod._upload_ceiling_alert(self.cfg, led, []))
+                _duty("cap-pressure alert",
+                      lambda: self._cap_pressure_alert(led))
             self.stop.wait(20)
         self._lane_loop("housekeeping", body, idle_s=20)
 

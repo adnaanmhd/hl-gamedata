@@ -209,9 +209,9 @@ def plan_fixes(reasons: list[dict], *, game: str, has_raw: bool) -> dict:
         return {"steps": steps, "unfixable": sorted(set(unfixable))}
     if gate_windows:
         # gate.py asserts a v2 header — structural surgery first
-        # (review-r4 #23)
+        # (review-r4 #23). The gate STEP itself is appended after the csv
+        # writers below; this only orders the structural repairs ahead of it.
         _pre_cut_csv_fixes()
-        steps.append(("FIX_GATE_WINDOW", {"windows": sorted(gate_windows)}))
     # hygiene before context (canonical CONTEXT/HYGIENE slot); seen is
     # seeded with the pre-gate/-retrim emissions so the csv loop below
     # cannot plan them a second time (review-r4 #23)
@@ -238,6 +238,23 @@ def plan_fixes(reasons: list[dict], *, game: str, has_raw: bool) -> dict:
         if (fid, json.dumps(p)) not in seen:
             seen.add((fid, json.dumps(p)))
             steps.append((fid, p))
+    # FIX_GATE_WINDOW goes LAST among the frames.csv writers (r-loop 3).
+    # It only BLANKS input_keys/input_actions, so it is safe last — while
+    # every step above re-derives those same columns and silently undid it:
+    # fix_key_hygiene re-resolves actions for every row from keys|buttons
+    # plus the motion flags, and resolve_actions fires motion-bound
+    # semantics (kamla `look: mouse`) from dx/dy alone, which the gate
+    # deliberately leaves as captured. So a gated window came back with
+    # input_actions='look' on every frame that still had mouse motion, in
+    # the SAME pass that gated it; revalidation re-raised
+    # INP_FROZEN_ACTIONS, attempt 2 was spent re-gating, and any other
+    # surviving reason then rejected a deliverable session. Verified by
+    # running gate_windows + fix_key_hygiene on a synthetic v2 frames.csv:
+    # 20/20 gated rows came back with actions repopulated.
+    # FIX_ACTIONS_CONTEXT and FIX_LAGSHIFT_CSV rewrite/displace the same
+    # columns and are ordered above for the same reason.
+    if gate_windows:
+        steps.append(("FIX_GATE_WINDOW", {"windows": sorted(gate_windows)}))
     if steps:
         steps.append(("FIX_SESSIONJSON_RECOMPUTE", {}))
     return {"steps": steps, "unfixable": sorted(set(unfixable))}

@@ -273,15 +273,28 @@ def test_fix_reentry_immediate_same_run(cfg, ledger, monkeypatch):
 
 def test_gate_fail_handback_same_run(cfg, ledger, monkeypatch):
     _seed(ledger, SID1, state="READY")
+    # ONE attempt already spent. Design §5 (and run.py's batch twin) make a
+    # failed-gate requeue cost NO fix budget, which is what bounds the
+    # deliver->gate-fail->fix ping-pong at exactly FIX_RETRIES. The test
+    # used to fake _fix_one wholesale and assert only the final state, so
+    # adding an increment to the failed_gate branch left the suite green —
+    # while in production it would push a session with attempts=1 straight
+    # to "fix retries exhausted" without ever attempting the fix the gate
+    # failure named (r-loop 3).
+    ledger.update(SID1, fix_attempts=1)
     (cfg.work / SID1).mkdir(parents=True)
     monkeypatch.setattr(ingest, "list_drive", lambda _cfg: [])
     _script_validate(monkeypatch, {SID1: ["READY"]})
     fixed = []
+    attempts_at_handback = []
 
     def fake_fix(self, led, sid):
+        # observed BEFORE this fake charges anything: whatever the
+        # hand-back left behind is what the real _fix_one would budget from
+        attempts_at_handback.append(led.get(sid)["fix_attempts"])
         fixed.append(sid)
-        led.update(sid, fix_attempts=1)
-        led.set_state(sid, "FIXING", "attempt 1")
+        led.update(sid, fix_attempts=led.get(sid)["fix_attempts"] + 1)
+        led.set_state(sid, "FIXING", "attempt 2")
         led.set_state(sid, "REVALIDATING", "fixes applied")
         return True
     monkeypatch.setattr(cont.ContinuousDriver, "_fix_one", fake_fix)
@@ -292,6 +305,26 @@ def test_gate_fail_handback_same_run(cfg, ledger, monkeypatch):
     try:
         assert led.get(SID1)["state"] == "DELIVERED"
         assert fixed == [SID1]             # gate-fail went through fix NOW
+        # the hand-back itself charged nothing
+        assert attempts_at_handback == [1]
+    finally:
+        led.close()
+
+
+def test_gate_fail_at_budget_rejects_instead_of_requeueing(cfg, ledger,
+                                                           monkeypatch):
+    """The other half of the same rule: once the budget IS spent, a gate
+    failure is terminal rather than an endless deliver<->fix ping-pong."""
+    _seed(ledger, SID1, state="READY")
+    ledger.update(SID1, fix_attempts=C.FIX_RETRIES)
+    (cfg.work / SID1).mkdir(parents=True)
+    monkeypatch.setattr(ingest, "list_drive", lambda _cfg: [])
+    _script_validate(monkeypatch, {SID1: ["READY"]})
+    _fake_deliver(monkeypatch, outcomes={SID1: ["failed_gate"]})
+    assert _run(cfg) == 0
+    led = Ledger(cfg.ledger_path)
+    try:
+        assert led.get(SID1)["state"] == "REJECTED"
     finally:
         led.close()
 
@@ -359,8 +392,21 @@ def test_hold_vlm_30min_cooldown(cfg, ledger, monkeypatch):
     monkeypatch.setattr(ingest, "list_drive", lambda _cfg: [])
     log = []
     _script_validate(monkeypatch, {SID1: ["HOLD_VLM", "HOLD_VLM"]}, log)
+    # TICKING, not frozen. run_continuous's only non-idle exit is the
+    # wall-clock escape `clk.mono() - t0 > max_wall_s`, so a frozen mono
+    # evaluates `0.0 > 60` forever and disables it. Any future regression
+    # that keeps a HOLD session continuously eligible would then spin the
+    # run loop with no exit at all — hanging the entire pytest process
+    # rather than failing, including in the flip's "full suite green"
+    # pre-arm gate (r-loop 3). 0.01s per call is far too slow to expire the
+    # 30-min cooldown this test is about, but guarantees the 60s wall guard
+    # fires on a runaway loop.
     mono = [1000.0]
-    clocks = cont._Clocks(mono=lambda: mono[0])
+
+    def _mono():
+        mono[0] += 0.01
+        return mono[0]
+    clocks = cont._Clocks(mono=_mono)
     # IN-RUN cooldown: after the HOLD verdict the session is not re-picked
     # (idle exit with exactly ONE validation despite HOLD_VLM sitting there)
     assert _run(cfg, clocks=clocks) == 0
@@ -604,6 +650,37 @@ def test_lock_released_after_run(cfg, monkeypatch):
     assert not cfg.lock_dir.exists()
 
 
+def test_unclean_stop_keeps_lock_and_blocks_a_second_driver(cfg, monkeypatch):
+    """r-loop-1 invariant, previously UNPINNED: when shutdown() reports
+    unclean, threads or session runners may still be committing ledger
+    writes, so the run lock must survive for pid-reclaim. The whole rule
+    lived in one `if clean_stop:` gate that no test touched — replacing it
+    with an unconditional release_lock() left the entire suite green, while
+    in production systemd's Restart=always would start a second driver 10s
+    later and both would write the same ledger (r-loop 3)."""
+    monkeypatch.setattr(ingest, "list_drive", lambda _cfg: [])
+    # the drain-grace path itself is covered by
+    # test_shutdown_unclean_while_runner_active; what is under test here is
+    # what the CALLER does with an unclean verdict.
+    # The fake still performs the REAL shutdown and only lies about the
+    # verdict: returning False without setting `stop` would leave every
+    # lane thread running as a daemon past the end of the test, and once
+    # monkeypatch restored the real ingest.list_drive that orphaned scan
+    # thread went and listed the production Drive.
+    real_shutdown = cont.ContinuousDriver.shutdown
+
+    def unclean(self):
+        real_shutdown(self)
+        return False
+    monkeypatch.setattr(cont.ContinuousDriver, "shutdown", unclean)
+    assert _run(cfg) == 0
+    assert cfg.lock_dir.exists(), "unclean stop must KEEP the run lock"
+    # and the kept lock genuinely refuses a second driver
+    assert cont.run_continuous(cfg, install_signals=False) == 1
+    from pipeline import run as runmod
+    runmod.release_lock(cfg)
+
+
 # ------------------------------------------------- r-loop 1 coverage adds
 
 def test_downloading_row_resumes(cfg, ledger, monkeypatch):
@@ -804,6 +881,10 @@ def test_scan_lane_survives_and_counts_only_successes(cfg, monkeypatch):
         if calls["n"] == 1:
             raise RuntimeError("rclone rc=1")
         return ingest.ScanResult([], [], [], [], [], [], [], [])
+    # the S lane now fetches the listing OUTSIDE intake_lock and passes it
+    # in (r-loop 3), so list_drive is the seam that must be faked here too —
+    # otherwise this test would make a real recursive Drive listing
+    monkeypatch.setattr(ingest, "list_drive", lambda _cfg: [])
     monkeypatch.setattr(ingest, "scan", flaky_scan)
     alerts = []
     monkeypatch.setattr(cont.AlertBook, "alert",
@@ -816,6 +897,7 @@ def test_scan_lane_survives_and_counts_only_successes(cfg, monkeypatch):
 def test_idle_needs_attempt_and_warns_on_zero_successes(cfg, monkeypatch):
     def dead_scan(_cfg, _led, entries=None):
         raise RuntimeError("no rclone")
+    monkeypatch.setattr(ingest, "list_drive", lambda _cfg: [])
     monkeypatch.setattr(ingest, "scan", dead_scan)
     alerts = []
     monkeypatch.setattr(cont.AlertBook, "alert",
@@ -902,9 +984,34 @@ def test_daily_reports_interlock_blocks_every_caller(cfg, ledger,
     at_2pm = datetime(2026, 8, 18, 14, 30, tzinfo=C.IST)
     monkeypatch.setattr(C, "CONT_DAILY_REPORTS", False)
     assert runmod.send_daily_report_if_due(cfg, ledger, at_2pm) is False
-    assert runmod.send_folder_issues_if_due(cfg, ledger, at_2pm) is False
     assert sent == []
     assert not (cfg.reports_dir / "2026-08-18" / ".sent").exists()
+
+    # The folder-issues half was VACUOUS (r-loop 3): that function returns
+    # False whenever the day's `.sent` marker is absent, which it always was
+    # here because the payment half above returned False first. Deleting the
+    # interlock guard left this assertion — and the whole suite — green.
+    # Satisfy the .sent precondition so ONLY the interlock can be what
+    # blocks it. This is the real flip sequence: the 14:00 payment report
+    # already went out, then CONT_DAILY_REPORTS is set False.
+    day = cfg.reports_dir / "2026-08-18"
+    day.mkdir(parents=True, exist_ok=True)
+    (day / ".sent").touch()
+    assert runmod.send_folder_issues_if_due(cfg, ledger, at_2pm) is False
+    assert sent == []
+    assert not (day / ".issues-sent").exists()
+
+    # ...and with the interlock lifted the same call DOES send, so the
+    # assertion above is proving the guard and not the precondition.
+    # Needs something outstanding: an empty snapshot deliberately sends
+    # nothing (an empty forward is noise) though it still marks the day.
+    ledger.incomplete_seen("kamla/op@x.com/p1@x.com/halfupload",
+                           ["video.mp4"])
+    monkeypatch.setattr(C, "CONT_DAILY_REPORTS", True)
+    assert runmod.send_folder_issues_if_due(cfg, ledger, at_2pm) is True
+    assert (day / ".issues-sent").exists()
+    assert sent and any("halfupload" in t or "incomplete" in t.lower()
+                        for t in sent)
 
 
 def test_qa_v2_ragged_rows_fail_not_crash(tmp_path):

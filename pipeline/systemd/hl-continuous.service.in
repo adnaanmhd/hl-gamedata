@@ -20,6 +20,22 @@ RestartSec=10
 # graceful drain window on stop; after it SIGKILL is safe by design
 # (kill at any instant resumes exactly from the ledger)
 TimeoutStopSec=900
+# Signal ONLY the main process on stop. systemd's default
+# (KillMode=control-group) SIGTERMs every pid in the cgroup, which includes
+# each session runner's spawn validation worker and any ffmpeg/ffprobe child
+# of a fix step. Spawn children are fresh interpreters that do NOT inherit
+# the driver's SIGTERM handler, so they died instantly and the parent read
+# the resulting BrokenProcessPool as a native crash -> QUARANTINED (a
+# terminal state with no automatic re-entry) for every in-flight session.
+# `systemctl stop` was therefore strictly WORSE than kill -9, which the
+# design is explicitly hardened for (r-loop 3 blocker).
+# Safe because SIGTERM still reaches python: VERIFIED that `uv run` forwards
+# SIGTERM to its child on both hosts (Mac homebrew uv; VM uv 0.12.5) — the
+# probe installed a handler in the child, SIGTERMed the uv wrapper, and the
+# child's handler ran. TimeoutStopSec (900) exceeds CONT_DRAIN_GRACE_S (600),
+# so the drain completes before systemd escalates to SIGKILL, which at that
+# point kills the whole cgroup and is safe by the resume-from-ledger design.
+KillMode=mixed
 # journald-only: the batch unit's tee-to-$(date)-file freezes the filename
 # at process start, which is wrong for an always-on service. uv by absolute
 # path (systemd has no user PATH); deps PINNED to the suite-green versions

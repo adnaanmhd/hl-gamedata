@@ -192,6 +192,26 @@ CONT_RUNNER_CRASH_RETRY_MIN = 5.0  # session-runner crash cooldown
 CONT_DAILY_REPORTS = True
 CONT_DISPATCH_IDLE_S = 2.0        # dispatcher poll when nothing eligible
 CONT_DRAIN_GRACE_S = 600          # SIGTERM: wait this long for runners
+# QUARANTINED is the one terminal state with no wipe: deliver_session and
+# finalize_rejected own the DELIVERED/REJECTED wipes and the hourly sweep
+# covers SPLIT/DUPLICATE, so quarantined media was held forever AND was
+# invisible to the ~40-session cap. Twenty 3 GB sessions = ~90 GB the cap
+# could not see, so intake stopped on the disk low-water instead, with no
+# path back (r-loop 3). The media is now counted against the cap and
+# reclaimed after this many hours — the DOSSIER is the evidence of record,
+# and Drive I still holds the original (R6 read-only forever), so the local
+# copy is re-downloadable, not unique.
+CONT_QUARANTINE_RECLAIM_H = 48
+# Shared translation_report.json lock (validate._locked_report_update).
+# INVARIANT: WAIT > STALE. Up to CONT_POOL_MAX workers race this file and a
+# waiter that runs out of patience writes UNLOCKED, which is the r1 #8 lost
+# update. Patience used to be max(5s, CONT_POOL_MAX seconds) = 44s against a
+# 120s staleness threshold, so for a DEAD holder — the one case that cannot
+# resolve itself — every waiter gave up before the breaker could ever fire
+# (r-loop 3). The guarded section is milliseconds, so 20s is already a very
+# generous "this holder is dead" bar and 30s of patience always outlasts it.
+REPORT_LOCK_STALE_S = 20.0
+REPORT_LOCK_WAIT_S = 30.0
 
 # Ledger states (§6 state machine)
 STATES = (

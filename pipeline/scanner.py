@@ -1,6 +1,6 @@
 """Frame-diff candidate finder (plan §10.3).
 
-Exists because the §5 2-second keep-vs-cut rule is finer than any VLM
+Exists because the §5 keep-vs-cut rule is finer than any VLM
 sampling cadence: 1-frame-accurate window boundaries come from here, the VLM
 classifies what the scanner finds, and the <40% stillness gate decides.
 
@@ -45,6 +45,13 @@ class MotionTimeline:
     times_s: list[float]        # per-frame time (real PTS when readable)
     diffs: list[float]          # len n-1: |frame[i+1] - frame[i]| mean
     luma: list[float]           # len n: mean luma per frame
+    # "real_pts" | "uniform_fps". The uniform grid is a FABRICATION used
+    # when the decoded frame count disagrees with ffprobe's packet count.
+    # It must be declared, because these captures drop 12-20% of frames, so
+    # wherever drops cluster a uniform grid is seconds away from the truth —
+    # and every consumer of times_s (window bounds -> cuts, gates, AFK
+    # spans, frame_at -> CSV row indices) treats it as real (r-loop 3).
+    timing: str = "real_pts"
 
     def frame_at(self, t_s: float) -> int:
         i = bisect_right(self.times_s, t_s) - 1
@@ -136,16 +143,24 @@ def scan_video(video: Path, *, pts_us: list[int] | None = None,
             p.wait()
             raise
     n = len(luma)
+    timing = "real_pts"
     if pts_us and len(pts_us) == n:
         times = [t / 1e6 for t in pts_us]
         duration = times[-1] + (times[-1] - times[-2] if n > 1 else 0.0)
     else:
-        # fall back to the container's average rate
+        # fall back to the container's average rate — a SYNTHETIC grid, so
+        # say so. cutter.cut_segments hard-fails on this same comparison
+        # ("segment PTS unreadable") and the translator records
+        # `frame_timing: uniform_fps`; the scanner alone used to degrade
+        # silently, so window bounds derived from a fabricated timeline
+        # were fed to the cutter as real-PTS cut points (r-loop 3).
+        timing = "uniform_fps"
         duration = _probe_duration(video) or (n / 30.0)
         times = [i * duration / n for i in range(n)] if n else []
     fps = n / duration if duration else 0.0
     return MotionTimeline(n_frames=n, fps=fps, duration_s=duration,
-                          times_s=times, diffs=diffs, luma=luma)
+                          times_s=times, diffs=diffs, luma=luma,
+                          timing=timing)
 
 
 def _probe_duration(video: Path) -> float | None:
