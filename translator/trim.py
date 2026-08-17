@@ -74,7 +74,12 @@ def trim(src: Path, out_path: Path, *, info: V.VideoInfo | None = None,
         "-movflags", "+faststart",
         str(out_path),
     ]
-    subprocess.run(cmd, check=True)
+    # timeout like every other ffmpeg/ffprobe call in the package: this one
+    # is reachable from the ARR_RAW_ONLY fix path, which runs in the
+    # continuous driver's session-runner THREAD (not the bounded validation
+    # subprocess), so a wedged ffmpeg would pin a runner slot forever
+    # (r-loop 2 — the §12 sweep missed trim.py)
+    subprocess.run(cmd, check=True, timeout=1800)
     # Re-probe the real trimmed duration (keyframe snap may differ slightly).
     out_info = V.probe(out_path)
     return TrimResult(out_path, head_cut, end_cut, out_info.duration_s, warnings)

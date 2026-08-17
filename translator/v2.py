@@ -535,6 +535,19 @@ def check_session_v2(session_dir: Path, raw_bundle: Path | None = None) -> V2Res
         return r
     col = {c: i for i, c in enumerate(V2_FRAME_COLS)}
 
+    # row SHAPE before any fixed-index read: the camera-null scan and the
+    # input-rules loop below index columns 2-35 directly, so one short or
+    # ragged row raised IndexError and the checker crashed instead of
+    # FAILing — the session then read as "validation crashed" (quarantine)
+    # rather than an actionable reject (r-loop 2; the r-loop-1 hardening
+    # normalized numerics only, never row shape)
+    ragged = [i for i, x in enumerate(rows) if len(x) != len(V2_FRAME_COLS)]
+    if ragged:
+        r.fail(f"frames.csv has {len(ragged)} short/ragged row(s) "
+               f"(first at row {ragged[0]}: {len(rows[ragged[0]])} of "
+               f"{len(V2_FRAME_COLS)} columns)")
+        return r
+
     # structure
     if len(rows) != s.get("frame_count"):
         r.fail(f"row count {len(rows)} != session.json frame_count {s.get('frame_count')}")

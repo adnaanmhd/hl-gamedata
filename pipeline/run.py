@@ -53,10 +53,16 @@ def _reset_vlm_run_state() -> None:
 # ------------------------------------------------------------------ lock
 
 def _pid_is_pipeline(pid: int) -> bool:
-    """Is `pid` alive AND actually a pipeline run? os.kill(pid,0) alone
-    treats a RECYCLED pid as a live run and skips every tick forever
+    """Is `pid` alive AND actually a lock-legitimate process? os.kill(pid,0)
+    alone treats a RECYCLED pid as a live run and skips every tick forever
     (review-r3 #26). On Linux /proc gives the cmdline; elsewhere fall
-    back to liveness only."""
+    back to liveness only.
+
+    `recal_` counts too: the flip tools acquire this same lock (r-loop 1),
+    but they run as `python tools/recal_*.py`, whose cmdline carries
+    neither "pipeline" nor "pytest" — so a starting driver judged a LIVE
+    tool's lock stale and reclaimed it, leaving the mutex one-way
+    (r-loop 2 blocker)."""
     try:
         os.kill(pid, 0)
     except (ProcessLookupError, PermissionError):
@@ -65,7 +71,8 @@ def _pid_is_pipeline(pid: int) -> bool:
         cmdline = Path(f"/proc/{pid}/cmdline").read_bytes()
     except OSError:
         return True                      # no /proc (macOS): liveness only
-    return b"pipeline" in cmdline or b"pytest" in cmdline
+    return (b"pipeline" in cmdline or b"pytest" in cmdline
+            or b"recal_" in cmdline)
 
 
 def _reclaim_stale_lock(cfg: C.Config) -> None:
@@ -111,6 +118,18 @@ def acquire_lock(cfg: C.Config) -> bool:
 
 
 def release_lock(cfg: C.Config) -> None:
+    """Remove the lock ONLY while we still hold it. Without the pid check a
+    process whose lock was reclaimed (or replaced by a newer holder) would
+    rmtree the NEW holder's lock on its way out, disarming the mutex
+    entirely (r-loop 2)."""
+    try:
+        holder = int((cfg.lock_dir / "pid").read_text())
+    except (OSError, ValueError):
+        holder = os.getpid()          # unreadable: fall back to old behavior
+    if holder != os.getpid():
+        print(f"[lock] not releasing — held by pid {holder}, not us",
+              file=sys.stderr)
+        return
     shutil.rmtree(cfg.lock_dir, ignore_errors=True)
 
 
@@ -697,6 +716,16 @@ def _pace_now(ledger: Ledger) -> pace.PaceStatus:
 
 def send_daily_report_if_due(cfg: C.Config, ledger: Ledger,
                              now_ist: datetime | None = None) -> bool:
+    # payment-endgame interlock, enforced HERE so it binds every caller —
+    # the continuous driver, the dormant batch driver reached by a
+    # rollback (its unit passes no --quiet), and the manual daily-report
+    # command alike. Guarding only the continuous call site left the
+    # rollback path free to stamp the unstamped rebuild cohort into one
+    # day's sheet and deadlock the regen (r-loop 2 blocker).
+    if not C.CONT_DAILY_REPORTS:
+        print("[daily] suppressed — CONT_DAILY_REPORTS=False "
+              "(payment-endgame interlock)", file=sys.stderr)
+        return False
     now_ist = now_ist or datetime.now(C.IST)
     if now_ist.hour < C.DAILY_REPORT_HOUR_IST:
         return False
@@ -820,6 +849,8 @@ def send_folder_issues_if_due(cfg: C.Config, ledger: Ledger,
     same trigger hour, own marker, SEPARATE message + CSV so chase-work
     forwards without the payment sheet. An empty snapshot sends nothing
     (an empty forward is noise) but still writes the marker."""
+    if not C.CONT_DAILY_REPORTS:
+        return False                  # rides the payment interlock (r-loop 2)
     now_ist = now_ist or datetime.now(C.IST)
     if now_ist.hour < C.DAILY_REPORT_HOUR_IST:
         return False

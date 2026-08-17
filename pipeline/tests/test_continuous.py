@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import os
+import sqlite3
 import subprocess
 import sys
 import threading
@@ -787,6 +788,144 @@ def test_shutdown_unclean_while_runner_active(cfg, monkeypatch):
     assert drv.shutdown() is False
     drv2 = cont.ContinuousDriver(cfg, send_telegram=False)
     assert drv2.shutdown() is True                 # no runners -> clean
+
+
+# ------------------------------------------------- r-loop 2 coverage adds
+
+def test_scan_lane_survives_and_counts_only_successes(cfg, monkeypatch):
+    """S goes through _lane_loop now: a failing scan alerts, the lane
+    lives on, attempts count (so bounded runs terminate) but passes do
+    not (so a failed scan never reads as 'the Drive was checked')."""
+    calls = {"n": 0}
+
+    def flaky_scan(_cfg, _led, entries=None):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise RuntimeError("rclone rc=1")
+        return ingest.ScanResult([], [], [], [], [], [], [], [])
+    monkeypatch.setattr(ingest, "scan", flaky_scan)
+    alerts = []
+    monkeypatch.setattr(cont.AlertBook, "alert",
+                        lambda self, t: alerts.append(t))
+    assert _run(cfg) == 0
+    assert calls["n"] >= 2                       # lane survived the failure
+    assert any("scan lane iteration failed" in a for a in alerts)
+
+
+def test_idle_needs_attempt_and_warns_on_zero_successes(cfg, monkeypatch):
+    def dead_scan(_cfg, _led, entries=None):
+        raise RuntimeError("no rclone")
+    monkeypatch.setattr(ingest, "scan", dead_scan)
+    alerts = []
+    monkeypatch.setattr(cont.AlertBook, "alert",
+                        lambda self, t: alerts.append(t))
+    # terminates despite zero successful scans (would hang if idle() gated
+    # on successes) and says so loudly
+    assert cont.run_continuous(cfg, until_idle=True, send_telegram=True,
+                               install_signals=False, max_wall_s=60) == 0
+    assert any("without a single successful drive scan" in a.lower()
+               for a in alerts)
+
+
+def test_housekeeping_lane_survives_iteration_exception(cfg, monkeypatch):
+    monkeypatch.setattr(ingest, "list_drive", lambda _cfg: [])
+    boom = {"n": 0}
+    real_counts = Ledger.counts_by_state
+
+    def flaky_counts(self):
+        # only the H lane's first tick fails (the startup call and the
+        # other lanes must stay real)
+        if threading.current_thread().name == "hl-H":
+            boom["n"] += 1
+            if boom["n"] == 1:
+                raise sqlite3.OperationalError("database is locked")
+        return real_counts(self)
+    monkeypatch.setattr(Ledger, "counts_by_state", flaky_counts)
+    alerts = []
+    monkeypatch.setattr(cont.AlertBook, "alert",
+                        lambda self, t: alerts.append(t))
+    assert _run(cfg) == 0
+    assert any("housekeeping lane iteration failed" in a for a in alerts)
+
+
+def test_pick_download_releases_claim_when_commit_fails(cfg, ledger,
+                                                        monkeypatch):
+    _seed(ledger, SID1, state="DISCOVERED")
+    drv = cont.ContinuousDriver(cfg, send_telegram=False)
+    monkeypatch.setattr(deliver, "disk_free_gb", lambda p: 500)
+    real_set_state = Ledger.set_state
+
+    def boom(self, sid, to_state, detail=""):
+        if to_state == "DOWNLOADING":
+            raise sqlite3.OperationalError("database is locked")
+        return real_set_state(self, sid, to_state, detail)
+    monkeypatch.setattr(Ledger, "set_state", boom)
+    with pytest.raises(sqlite3.OperationalError):
+        drv._pick_download(ledger)
+    assert drv.own.snapshot() == set()       # claim released, not leaked
+
+
+def test_release_lock_refuses_when_not_holder(cfg):
+    from pipeline import run as runmod
+    assert runmod.acquire_lock(cfg)
+    (cfg.lock_dir / "pid").write_text(str(os.getpid() + 1))   # someone else
+    runmod.release_lock(cfg)
+    assert cfg.lock_dir.exists()             # not ours -> left alone
+    (cfg.lock_dir / "pid").write_text(str(os.getpid()))
+    runmod.release_lock(cfg)
+    assert not cfg.lock_dir.exists()
+
+
+def test_pid_is_pipeline_accepts_recal_tools(monkeypatch):
+    from pipeline import run as runmod
+    monkeypatch.setattr(runmod.os, "kill", lambda *a: None)
+
+    class FakePath:
+        def __init__(self, blob): self.blob = blob
+        def read_bytes(self): return self.blob
+    for blob, want in ((b"python\x00tools/recal_refix_reset.py\x00", True),
+                       (b"python\x00-m\x00pipeline\x00run\x00", True),
+                       (b"python\x00somethingelse.py\x00", False)):
+        monkeypatch.setattr(runmod, "Path", lambda _p, b=blob: FakePath(b))
+        assert runmod._pid_is_pipeline(4242) is want
+
+
+def test_daily_reports_interlock_blocks_every_caller(cfg, ledger,
+                                                     monkeypatch):
+    """CONT_DAILY_REPORTS=False must bind the BATCH driver too — the
+    rollback path re-arms hl-pipeline.timer with no --quiet."""
+    from pipeline import run as runmod
+    sent = []
+    monkeypatch.setattr(telegram, "send_message",
+                        lambda _c, t: sent.append(t))
+    at_2pm = datetime(2026, 8, 18, 14, 30, tzinfo=C.IST)
+    monkeypatch.setattr(C, "CONT_DAILY_REPORTS", False)
+    assert runmod.send_daily_report_if_due(cfg, ledger, at_2pm) is False
+    assert runmod.send_folder_issues_if_due(cfg, ledger, at_2pm) is False
+    assert sent == []
+    assert not (cfg.reports_dir / "2026-08-18" / ".sent").exists()
+
+
+def test_qa_v2_ragged_rows_fail_not_crash(tmp_path):
+    from translator.v2 import check_session_v2, V2_FRAME_COLS
+    d = tmp_path / "sess"
+    d.mkdir()
+    for f in ("video.mp4", "session.rrd", "rrd_creation.py"):
+        (d / f).write_bytes(b"x")
+    (d / "session.json").write_text(json.dumps({
+        "vendor_name": "humynlabs", "game_title": "Kamla",
+        "session_id": "s", "created_at_utc": "2026-08-14T10:00:00Z",
+        "ended_at_utc": "2026-08-14T10:02:00Z", "duration_ms": 120000,
+        "duration_seconds": 120.0, "fps": 30.0, "frame_count": 2,
+        "record_width_px": 1920, "record_height_px": 1080,
+        "screen_width_px": 1920, "screen_height_px": 1080,
+        "localization": "en-US", "platform": "pc",
+        "input_mouse_convention": {}}))
+    (d / "frames.csv").write_text(
+        ",".join(V2_FRAME_COLS) + "\n0,0\n1,33\n")     # 2 cols, not 36
+    res = check_session_v2(d)                          # must not raise
+    assert res.status == "FAIL"
+    assert any("ragged" in i for i in res.issues)
 
 
 # ------------------------------------------------------------- CLI smoke

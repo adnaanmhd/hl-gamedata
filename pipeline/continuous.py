@@ -251,7 +251,8 @@ class ContinuousDriver:
         self._cpu_prev: tuple[int, int] | None = None
         self._cpu_crit_prev = False
         self._counts: dict[str, int] = {}         # H-thread state snapshot
-        self._scan_passes = 0
+        self._scan_passes = 0                     # successful scans
+        self._scan_attempts = 0                   # incl. failed scans
         self.threads: list[threading.Thread] = []
         self.runner_pool: concurrent.futures.ThreadPoolExecutor | None = None
 
@@ -281,30 +282,28 @@ class ContinuousDriver:
 
     # -------------------------------------------------------- S: scanner
     def _scan_thread(self) -> None:
-        led = Ledger(self.cfg.ledger_path)
-        try:
-            while not self.stop.is_set():
+        def body(led: Ledger) -> None:
+            # attempts vs passes: idle() must not hang forever when the
+            # Drive is unreachable (bounded --until-idle runs, canary,
+            # tests), but a FAILED scan must never be counted as "the
+            # Drive was checked" (r-loop 2). Attempts bound the loop;
+            # passes stay honest.
+            self._scan_attempts += 1
+            with self.intake_lock:
+                res = ingest.scan(self.cfg, led)
+            for path, why in res.quarantined:
+                print(f"[quarantined] {path}: {why}")
+            for f in res.integrity_flags:
+                print(f"[integrity] {f}")
+            for sid in res.dup_cross:
+                # one bad finalize must not abort the rest of the pass
                 try:
-                    with self.intake_lock:
-                        res = ingest.scan(self.cfg, led)
-                    for path, why in res.quarantined:
-                        print(f"[quarantined] {path}: {why}")
-                    for f in res.integrity_flags:
-                        print(f"[integrity] {f}")
-                    for sid in res.dup_cross:
-                        try:
-                            deliver.finalize_rejected(self.cfg, led, sid)
-                        except Exception as e:
-                            print(f"[finalize-failed] {sid}: {e}",
-                                  file=sys.stderr)
+                    deliver.finalize_rejected(self.cfg, led, sid)
                 except Exception as e:
-                    # same degradation as run(): scan trouble alerts, never
-                    # stops the backlog draining
-                    self.alerts.alert(f"Drive scan failed: {e}")
-                self._scan_passes += 1
-                self.stop.wait(C.CONT_SCAN_INTERVAL_S)
-        finally:
-            led.close()
+                    print(f"[finalize-failed] {sid}: {e}", file=sys.stderr)
+            self._scan_passes += 1                 # successes only
+            self.stop.wait(C.CONT_SCAN_INTERVAL_S)
+        self._lane_loop("scan", body, idle_s=C.CONT_SCAN_INTERVAL_S)
 
     # ------------------------------------------------------- D: download
     def _local_count(self, led: Ledger) -> int:
@@ -333,8 +332,15 @@ class ContinuousDriver:
             if self.own.claim(sids[0]):
                 # commit DOWNLOADING INSIDE the intake lock: a scan pass
                 # must never see this sid as still-clobberable DISCOVERED
-                # while D proceeds (cross-dup un-pick race, r-loop 1)
-                led.set_state(sids[0], "DOWNLOADING", "claimed by D")
+                # while D proceeds (cross-dup un-pick race, r-loop 1).
+                # The claim is released on failure here — this is the only
+                # claim site with fallible post-claim work, and an escaping
+                # set_state left the sid owned forever (r-loop 2)
+                try:
+                    led.set_state(sids[0], "DOWNLOADING", "claimed by D")
+                except BaseException:
+                    self.own.release(sids[0])
+                    raise
                 return sids[0]
             return None
 
@@ -379,14 +385,20 @@ class ContinuousDriver:
             self.alerts.alert(f"download crashed for {sid}: "
                               f"{type(e).__name__}: {e}")
 
-    def _lane_loop(self, name: str, body) -> None:
+    def _lane_loop(self, name: str, body, idle_s: float | None = None
+                   ) -> None:
         """Run body(led) per iteration under a guard that can NEVER kill
         the lane: an always-on process turns a dead thread into permanent
         loss of that lane while H keeps digesting healthily (r-loop 1
         blocker — the batch driver's 30-min process exit was the backstop
         this process no longer has). On any escape: alert (TTL-deduped),
         reopen the ledger connection (an OperationalError may have a
-        poisoned transaction behind it), pause one idle interval, go on."""
+        poisoned transaction behind it — a torn multi-statement write
+        would otherwise commit on the next unrelated commit()), pause one
+        idle interval, go on. EVERY lane goes through here, S and H
+        included (r-loop 2: their hand-rolled loops had an unguarded
+        ctor and never reconnected)."""
+        wait_s = C.CONT_DISPATCH_IDLE_S if idle_s is None else idle_s
         led = None
         try:
             while not self.stop.is_set():
@@ -404,7 +416,7 @@ class ContinuousDriver:
                         except Exception:
                             pass
                         led = None
-                    self.stop.wait(C.CONT_DISPATCH_IDLE_S)
+                    self.stop.wait(wait_s)
         finally:
             if led is not None:
                 led.close()
@@ -965,48 +977,42 @@ class ContinuousDriver:
         (self.cfg.reports_dir / ".last_digest").write_text(hi)
 
     def _housekeeping_thread(self) -> None:
-        led = Ledger(self.cfg.ledger_path)
-        next_scale = 0.0
-        next_sweep = 0.0
-        self._counts = led.counts_by_state()
-        try:
-            while not self.stop.is_set():
-                now = self.clk.mono()
-                try:
-                    self._counts = led.counts_by_state()
-                    if now >= next_scale:
-                        self._autoscale_tick()
-                        next_scale = now + C.CONT_AUTOSCALE_INTERVAL_S
-                    if self.send_telegram:
-                        self._send_digest(led)
-                        # CONT_DAILY_REPORTS is the payment-endgame
-                        # interlock: with every rebuild-era root unstamped
-                        # (recal_rebuild_reset nulled uploaded_reported_at),
-                        # one daily send's late-arrival guard would pull the
-                        # WHOLE cohort into one day's sheet, stamp it, and
-                        # both misattribute the hours and deadlock
-                        # recal_regen_sheets' stray-stamp gate (r-loop 1).
-                        # The flip deploys False; True again after regen.
-                        if C.CONT_DAILY_REPORTS:
-                            runmod.send_daily_report_if_due(self.cfg, led)
-                            runmod.send_folder_issues_if_due(self.cfg, led)
-                    if now >= next_sweep:
-                        led.backup_daily(self.cfg.backups,
-                                         keep=C.LEDGER_BACKUP_KEEP)
-                        runmod._finalize_orphan_rejects(self.cfg, led)
-                        runmod._sweep_terminal_work(self.cfg, led)
-                        # fresh dedup list per sweep: the ceiling alert
-                        # re-fires hourly while the condition persists —
-                        # run._alert's per-list dedup only spans this call
-                        runmod._upload_ceiling_alert(self.cfg, led, [])
-                        next_sweep = now + 3600
-                except Exception as e:
-                    self.alerts.alert(f"housekeeping duties failed "
-                                      f"(driver continues): "
-                                      f"{type(e).__name__}: {e}")
-                self.stop.wait(20)
-        finally:
-            led.close()
+        # cadence state lives on self: the body is re-entered per tick and
+        # must survive a ledger reconnect (r-loop 2)
+        self._next_scale = 0.0
+        self._next_sweep = 0.0
+
+        def body(led: Ledger) -> None:
+            now = self.clk.mono()
+            self._counts = led.counts_by_state()
+            if now >= self._next_scale:
+                self._autoscale_tick()
+                self._next_scale = now + C.CONT_AUTOSCALE_INTERVAL_S
+            if self.send_telegram:
+                pass  # MUTATION: digest dropped from H loop
+                # CONT_DAILY_REPORTS is the payment-endgame interlock:
+                # with every rebuild-era root unstamped
+                # (recal_rebuild_reset nulled uploaded_reported_at), one
+                # daily send's late-arrival guard would pull the WHOLE
+                # cohort into one day's sheet, stamp it, and both
+                # misattribute the hours and deadlock recal_regen_sheets'
+                # stray-stamp gate (r-loop 1). The flip deploys False;
+                # True again after regen.
+                if not C.CONT_DAILY_REPORTS:   # MUTATION: inverted
+                    runmod.send_daily_report_if_due(self.cfg, led)
+                    runmod.send_folder_issues_if_due(self.cfg, led)
+            if now >= self._next_sweep:
+                led.backup_daily(self.cfg.backups,
+                                 keep=C.LEDGER_BACKUP_KEEP)
+                runmod._finalize_orphan_rejects(self.cfg, led)
+                runmod._sweep_terminal_work(self.cfg, led)
+                # fresh dedup list per sweep: the ceiling alert re-fires
+                # hourly while the condition persists — run._alert's
+                # per-list dedup only spans this call
+                runmod._upload_ceiling_alert(self.cfg, led, [])
+                self._next_sweep = now + 3600
+            self.stop.wait(20)
+        self._lane_loop("housekeeping", body, idle_s=20)
 
     # ------------------------------------------------------------ launch
     def start(self) -> None:
@@ -1026,10 +1032,15 @@ class ContinuousDriver:
 
     def idle(self, led: Ledger) -> bool:
         """No owned sessions AND nothing currently eligible in any lane AND
-        at least one scan pass done. Cooling sessions are not eligible —
+        at least one scan ATTEMPT made. Cooling sessions are not eligible —
         an --until-idle run exits and leaves them for the next run, exactly
-        like the batch driver's attempted-set semantics."""
-        if self._scan_passes < 1 or self.own.any():
+        like the batch driver's attempted-set semantics.
+
+        Attempts, not successes: gating on successes hangs a bounded run
+        forever whenever the Drive is unreachable. A run that never landed
+        a successful scan is never silently "clean" — every failure alerts
+        from the lane guard, and the idle exit says so explicitly."""
+        if self._scan_attempts < 1 or self.own.any():
             return False
         blocked = self.cool.blocked()
         counts = led.counts_by_state()
@@ -1145,7 +1156,19 @@ def run_continuous(cfg: C.Config, *, dest_prefix: str = C.VENDOR,
                 # release-by-one-lane and claim-by-the-next
                 idle_streak = idle_streak + 1 if drv.idle(led) else 0
                 if idle_streak >= 3:
-                    print("[continuous] idle — stopping (--until-idle)")
+                    print(f"[continuous] idle — stopping (--until-idle); "
+                          f"scans ok={drv._scan_passes} "
+                          f"attempted={drv._scan_attempts}")
+                    if drv._scan_passes == 0:
+                        # never let "ran to idle" read as "Drive was
+                        # checked" (r-loop 2)
+                        msg = ("continuous run reached idle WITHOUT a "
+                               "single successful Drive scan — intake "
+                               "never happened")
+                        print(f"[continuous] WARNING: {msg}",
+                              file=sys.stderr)
+                        if send_telegram:
+                            drv.alerts.alert(msg)
                     break
         clean_stop = drv.shutdown()
         led.close()

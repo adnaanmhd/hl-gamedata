@@ -197,8 +197,14 @@ def _locked_main(cfg) -> int:
         day_dir = cfg.reports_dir / day
         done = day_dir / ".regen-v2-done"
         counted_file = day_dir / ".regen-v2-counted.json"
-        if send and done.exists():
-            out.append({"day": day, "skipped": "already done"})
+        if done.exists():
+            # skip in BOTH modes: post-stamp, build_sheet_rows excludes
+            # every stamped root, so a "read-only" preview would rewrite
+            # the real payment-<day>.csv/.md as an EMPTY sheet over the
+            # sheets of record (r-loop 2 — the skip was send-only)
+            out.append({"day": day, "skipped": "already sent (.regen-v2-done)"
+                        + ("" if send else " — preview refuses to rewrite "
+                                          "post-stamp sheets")})
             continue
         day_dt = datetime.strptime(day, "%Y-%m-%d").replace(tzinfo=C.IST)
         lo_dt, hi_dt = reports._parse_ts(lo), reports._parse_ts(hi)
