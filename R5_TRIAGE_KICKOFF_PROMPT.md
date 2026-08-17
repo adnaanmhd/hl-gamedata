@@ -23,6 +23,18 @@ the required depth.
 
 ---
 
+## 0a. Work order (this sequencing is a ruling)
+
+1. **Triage + fix r-loop 5** (§3), re-verifying the four incomplete findings first.
+2. **Apply the r-loop-3 #6 fix** (§4) — RULED. #15 ruled IGNORED.
+3. **Iterations 6 → 7 → 8, stopping at the first quiet one** (§7) — RULED.
+4. **Independent REAL e2e verification** (§5), fresh agent, verdict relayed verbatim.
+5. **Finish `FLIP_HANDOVER.md` and hand over explicitly** (§6).
+
+Suite green on Mac AND VM at every commit. Nothing deploys — R4 holds.
+
+---
+
 ## 1. Read before code
 
 1. `FLIP_SESSION_KICKOFF_PROMPT.md` — the plan and Adnaan's rulings (§4 R1–R4, §7,
@@ -122,7 +134,14 @@ Check that first.
 
 ---
 
-## 4. Adnaan's decision needed — r-loop-3 #6 (design is ready to apply)
+## 4. RULED — apply the r-loop-3 #6 fix (Adnaan, 2026-08-18)
+
+**This is a ruling, not a proposal. Implement it. Do not re-open it.**
+**r-loop-3 #15 is RULED IGNORED** — do not fix it, and add it to the workflow's
+accepted-behaviours list so no later iteration spends agents re-reporting it.
+(If a future finding shows a *different* mechanism causing real harm — e.g.
+`validate.py:511`, gating manufacturing an unfixable `CNT_ACTIONS_FEW` — that is a
+separate finding on its own merits, not #15.)
 
 The mechanism is verified: `analyze_sample._windows` sets window bounds as
 *midpoints between VLM sample times*, and `rows_in_window` counts `action_frames`
@@ -156,10 +175,15 @@ atomic), bounded to one free repeat. This is **not** the reverted sidecar: it co
 *this plan to the last plan*, making no claim about file contents, so nothing can go
 stale.
 
-**r-loop-3 #15** (gate-blanked rows read as AFK): my assessment is that it is close to
-a non-issue — the stretch it cuts is genuinely non-gameplay, so the larger cut is
-arguably correct. Note `validate.py:511` above may be the real harm hiding behind it.
-Adnaan to rule.
+**r-loop-3 #15** (gate-blanked rows read as AFK): **RULED IGNORED** (Adnaan,
+2026-08-18). The stretch it cuts is genuinely non-gameplay, so the larger cut is
+arguably the correct outcome; the cost of chasing it is a coordinate-tracking
+artifact of exactly the kind that already had to be reverted once.
+
+**Pin the fix with tests that would fail before it:** identical span, two different
+VLM boundary placements across passes → identical verdict and identical gate params;
+plus an action on a *moving* frame just outside the window → NOT counted, NOT
+blanked.
 
 ---
 
@@ -193,15 +217,38 @@ deploy set the flip actually executes… do not assume."*
 
 ---
 
-## 7. Open decisions for Adnaan — surface, do not decide
+## 7. RULED — up to three more iterations, stop at the first quiet one
 
-1. **A sixth review iteration, beyond the cap of 5?** No iteration has gone quiet,
-   and each has found regressions in the previous one's fixes. The counter-argument
-   is real and measured: the cascade was producing **~76 child rows/hour** under the
-   old rules, every one judged under the methodology R1–R3 replaces, so the hold has
-   a running cost. Present both; let him choose.
-2. **r-loop-3 #6** (§4) — apply the design, or leave open.
-3. **r-loop-3 #15** — worth fixing at all?
+**Adnaan, 2026-08-18.** The cap of 5 is lifted to **8**: iterations 6, 7 and 8 are
+authorised, but **not mandatory**. **The moment an iteration comes back quiet, stop —
+do not run the remaining ones.** Go straight to §5 (e2e verification) and §6
+(handover).
+
+**"Quiet" is pre-registered here so it cannot be redefined to suit the result:**
+
+> **Quiet** = zero confirmed **blockers**, AND every confirmed major/minor is fixed
+> in that same iteration with the suite green on **both** hosts.
+>
+> **Not quiet** = any confirmed blocker, or any finding you cannot land and verify
+> cleanly.
+
+Judge it **after** fixing, on the findings as confirmed — and note that a finding
+whose verifiers died (§3.1) is *not* confirmed and must be re-verified before it
+counts either way.
+
+Run them in order — 6, then only if 6 is not quiet, 7; then only if 7 is not quiet,
+8 — never in parallel, since each must review the previous one's fixes. Every
+iteration keeps the full composition: whole-codebase + delta-since-loop-start +
+adversarial hunting for bugs the loop's own fixes introduced, 2-vote refute, and the
+§8 tree verification before each commit.
+
+**Keep the accepted-behaviours list current each round** (add that iteration's ruled
+decisions, plus r-loop-3 #15 per §4) or agents will spend themselves re-litigating
+settled ground.
+
+**If iteration 8 still is not quiet:** stop anyway — that is the authorised limit.
+Fix what you can, then hand Adnaan every verified-but-unfixed finding,
+severity-ordered, before the e2e verification. Do not silently spend a ninth.
 
 ---
 
