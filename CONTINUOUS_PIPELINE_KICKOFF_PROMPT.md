@@ -68,11 +68,11 @@ The batch architecture is retired. Adnaan ruled:
   (VM variant pins numpy==2.4.6 opencv-python-headless==5.0.0.93 rerun-sdk==0.36.0.)
 - Deploy: `rsync -a --delete --exclude 'out/' --exclude '__pycache__/' --exclude '*.rrd' ./ hl-pipeline-vm.asia-south1-a.hl-gamedata-pipeline:hl-gamedata/`
   then re-touch rrd stubs (see REVALIDATION_KICKOFF_PROMPT.md for the loop).
-- Review protocol (Q17 discipline): adversarial multi-agent review of the new driver
-  (full-diff + regression-hunt + spec lanes, findings adversarially verified), a REAL
-  kill matrix on the canary (kill -9 during download, validation, upload → exact resume,
-  no double-DELIVERED, hours once, no stub rrd), and an independent live verifier at the
-  end whose verdict is relayed VERBATIM.
+- Review protocol (Adnaan's ruling 08-17, supersedes the default Q17 shape — exact
+  terms in step 4): adversarial review→fix loop, ≤5 iterations, EVERY iteration runs
+  the full composition; leftovers after 5 go to Adnaan; then independent REAL e2e
+  verification. Plus a REAL kill matrix on the canary (kill -9 during download,
+  validation, upload → exact resume, no double-DELIVERED, hours once, no stub rrd).
 - Invariants that survive the rewrite untouched: F5 (nothing passes unlooked-at;
   VLM failure → HOLD_VLM), R23 ladder semantics (sticky rungs — redefine "sticky scope"
   sensibly for a continuous process: sticky until a quiet period, document it), duplicate
@@ -133,8 +133,25 @@ The batch architecture is retired. Adnaan ruled:
 3. **Tests** (suite green both hosts) incl. a REAL pool test and a
    `python -m pipeline run-continuous` smoke with ≥2 seeded sessions (spawn semantics —
    pytest cannot see `__main__` re-import failures; see plan §6).
-4. **Adversarial review workflow** (find lanes + 2-vote verification), fix confirmed
-   findings, commit.
+4. **Adversarial review → fix loop (Adnaan's ruling, 08-17 — exact terms):**
+   - **Maximum 5 iterations.** EVERY iteration (all five, no lighter late rounds) runs
+     the full composition: **deep FULL-CODEBASE review** (pipeline/ + translator/ +
+     tools/, not just the diff) **+ delta review of everything changed since loop
+     start + adversarial hunting for bugs/issues introduced by the loop's own
+     changes and fixes**. Multi-agent lanes with findings adversarially verified
+     (2-vote refute discipline) before they count.
+   - Fix confirmed findings each iteration, suite green both hosts, commit
+     path-scoped per iteration (r-loop message style, cite this prompt).
+   - The loop EXITS EARLY only when an iteration ends with zero confirmed findings
+     and nothing left to fix. **Anything verified-but-unfixed still standing after
+     iteration 5 is highlighted to Adnaan, severity-ordered, before proceeding.**
+   - Only after the loop exits clean (or Adnaan acknowledges the leftovers): run the
+     **independent REAL end-to-end verification** — a fresh agent that wrote and
+     reviewed none of this code, exercising the actual system (real VLM calls, real
+     Drive II `_pipeline_test/` uploads purged after, real kill/resume) and reporting
+     whether everything works as expected; its verdict is relayed VERBATIM and a
+     BLOCKED-with-error never becomes a pass. This is in ADDITION to the step-10
+     production verifier at the very end.
 5. **Canary**: `HL_PIPELINE_HOME=~/hl-pipeline-test`, test-mode Telegram, Drive II
    `_pipeline_test/` only (purge after via `deliver.cleanup_test_folder`), seeded
    sessions + the live (read-only) Drive scan; 3-leg kill matrix; autoscale observed
