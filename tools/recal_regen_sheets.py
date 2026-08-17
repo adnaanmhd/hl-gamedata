@@ -97,7 +97,18 @@ def cohort_reject_detail(ledger, lo_dt, hi_dt, cache):
         blocking = [x for x in reasons if x.get("blocking")]
         unfix = [x["code"] for x in blocking if not x.get("fixable")]
         label = " + ".join(dict.fromkeys(unfix)) if unfix else "fix-failed"
-        ev = (blocking[0].get("evidence", "")[:90] if blocking else "")
+        # evidence must come from the reason that produced the LABEL. It
+        # was taken unconditionally from blocking[0] — frequently a
+        # *fixable* reason — so the superseding payment document read
+        # "CNT_CHAT_PII — 7.2s static window at 412s", pairing an unfixable
+        # code with an unrelated reason's evidence. R1-R3 make multi-reason
+        # blocking sets the normal shape, since sub-5s spans now stay as
+        # gate reasons on the parent instead of becoming child rows
+        # (r-loop 4). This is the player-facing explanation of why hours
+        # were not paid, and the record a dispute is argued from.
+        src = next((x for x in blocking if not x.get("fixable")),
+                   blocking[0] if blocking else None)
+        ev = (src.get("evidence", "")[:90] if src else "")
         lines.append(f"- `{r['session_id']}`: {label}"
                      + (f" — {ev}" if ev else "")
                      + (f" · dossier: {r['dossier_path']}"

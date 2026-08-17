@@ -305,6 +305,15 @@ def classify_stills(api_key: str, model: str, grabber, game_title: str,
         arr = _parse_json_reply(generate(api_key, model, parts))
         if isinstance(arr, dict):
             arr = arr.get("frames", [arr])
+        # mirror confirm_flag's guard: `null`, a bare number or `true` are
+        # all valid JSON, so they raise no JSONDecodeError and no VLMError
+        # — the untyped `for o in arr` then raised TypeError, which escapes
+        # _build_aux's `except VLMError` and lands as QUARANTINED
+        # ("validation crashed"). A VLMError instead degrades to HOLD_VLM,
+        # which retries every 30 min forever, which is what a bad VLM
+        # reply deserves (r-loop 4).
+        if not isinstance(arr, list):
+            raise VLMError(f"stills reply not a list: {arr!r}")
         by_idx = {}
         for o in arr:
             if isinstance(o, dict):

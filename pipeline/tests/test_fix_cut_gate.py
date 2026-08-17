@@ -298,7 +298,20 @@ def test_remux_repairs_readable_file(tmp_path):
     assert V.probe(d / "video.mp4").frame_count > 0
 
 
-def test_plan_drops_gate_when_retrim_planned():
+def test_plan_gates_before_retrim_instead_of_dropping_it():
+    """r-loop 4: the gate used to be DROPPED whenever a head trim was
+    planned, so a pass carrying both reasons fixed only the trim and spent
+    a second attempt on the frozen window — leaving nothing for any third
+    reason, i.e. REJECTED "fix retries exhausted" on a deliverable session.
+    R3 made the collision common: a 2-5s mid-clip window used to be a CUT,
+    which MERGES with the head trim into one FIX_CUT_SEGMENTS step, and as
+    a gate it cannot merge.
+
+    Ordering is load-bearing: hygiene (re-derives input_actions) must come
+    before the gate, the gate must come before the retrim (its windows are
+    in pre-trim coordinates, correct at the moment it runs, and the retrim
+    never re-derives actions), and the sessionjson recompute must come last
+    because the retrim rewrites the video."""
     plan = fix.plan_fixes(
         [_r("CNT_EDGE_NONGAMEPLAY", params={"edge": "head",
                                             "cut_at_s": 12.5}),
@@ -306,7 +319,27 @@ def test_plan_drops_gate_when_retrim_planned():
         game="outer_wilds", has_raw=False)
     ids = [s[0] for s in plan["steps"]]
     assert "FIX_RETRIM_HEAD" in ids
-    assert "FIX_GATE_WINDOW" not in ids     # pre-trim coords are stale
+    assert "FIX_GATE_WINDOW" in ids, "the gate must not be silently dropped"
+    assert ids.index("FIX_GATE_WINDOW") < ids.index("FIX_RETRIM_HEAD")
+    assert ids.index("FIX_RETRIM_HEAD") < ids.index(
+        "FIX_SESSIONJSON_RECOMPUTE")
+    # the gate still carries the PRE-trim window it was detected at
+    gate = next(p for f, p in plan["steps"] if f == "FIX_GATE_WINDOW")
+    assert gate["windows"] == [(60.0, 61.5)]
+
+
+def test_plan_gate_still_follows_hygiene_when_retrimming():
+    """The r-loop-3 rule survives the r-loop-4 reordering: hygiene rewrites
+    input_actions, so it must never run after the gate."""
+    plan = fix.plan_fixes(
+        [_r("CNT_EDGE_NONGAMEPLAY", params={"edge": "head",
+                                            "cut_at_s": 12.5}),
+         _r("INP_FROZEN_ACTIONS", params={"t0": 60.0, "t1": 61.5}),
+         _r("INP_KEYS_NO_ACTION")],
+        game="kamla", has_raw=False)
+    ids = [s[0] for s in plan["steps"]]
+    assert ids.index("FIX_KEY_HYGIENE") < ids.index("FIX_GATE_WINDOW")
+    assert ids.index("FIX_GATE_WINDOW") < ids.index("FIX_RETRIM_HEAD")
 
 
 def test_plan_rows_surgery_precedes_cut():

@@ -856,13 +856,28 @@ def _verify_against_raw(session_dir: Path, raw_bundle: Path, s: dict,
     dx = [0.0] * len(rows)
     dy = [0.0] * len(rows)
     n_events = 0
-    for line in (raw_bundle / "inputs.jsonl").open():
+    # errors="replace": the metadata.json read above is guarded but this
+    # sibling — from the same untrusted player upload, copied byte-faithful
+    # by rclone and md5-verified only for video.mp4 — was strict UTF-8, so
+    # one accented key name written in cp1252 raised UnicodeDecodeError out
+    # of the whole checker and quarantined a session that would have PASSed
+    # (r-loop 4). isinstance guards the non-dict line (`null`, a bare
+    # number) that made .get() raise AttributeError.
+    try:
+        fh = (raw_bundle / "inputs.jsonl").open(errors="replace")
+    except OSError as e:
+        r.warn(f"raw verification skipped: inputs.jsonl unreadable "
+               f"({type(e).__name__})")
+        return
+    for line in fh:
         line = line.strip()
         if not line:
             continue
         try:
             e = json.loads(line)
         except json.JSONDecodeError:
+            continue
+        if not isinstance(e, dict):
             continue
         if e.get("type") != "mouse_raw" or not isinstance(e.get("t"), int):
             continue
@@ -876,8 +891,15 @@ def _verify_against_raw(session_dir: Path, raw_bundle: Path, s: dict,
             n_events += 1
     mismatch_idx = [
         i for i, x in enumerate(rows)
-        if float(x[col["input_mouse_dx"]] or 0) != dx[i]
-        or float(x[col["input_mouse_dy"]] or 0) != dy[i]]
+        # _num_cell, not bare float(): r-loop 3 sanitized the sync-measure
+        # call site but left this one, and this block runs for exactly the
+        # population the STR_SENTINELS fix path exists for (sessions WITH
+        # raw sidecars). A cell reading `abc` therefore still raised
+        # ValueError out of the whole checker -> QUARANTINED, re-opening
+        # the "FAIL, never crash" hole for the sessions most able to be
+        # repaired (r-loop 4 blocker).
+        if _num_cell(x[col["input_mouse_dx"]] or 0) != dx[i]
+        or _num_cell(x[col["input_mouse_dy"]] or 0) != dy[i]]
     if mismatch_idx:
         run = best = 1
         for a, b in zip(mismatch_idx, mismatch_idx[1:]):

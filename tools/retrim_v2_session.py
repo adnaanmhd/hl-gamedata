@@ -41,10 +41,20 @@ def retrim(session_dir: Path, head_s: float, out_dir: Path) -> dict:
     with tempfile.NamedTemporaryFile(suffix=".mp4", delete=False,
                                      dir=out_dir) as tf:
         tmp = Path(tf.name)
+    # TIMEOUT-BOUNDED (r-loop 4). apply_fixes runs in the continuous
+    # driver's session-runner THREAD, so a wedged ffmpeg pins a gate slot
+    # and leaves the sid owned forever — pool capacity permanently down by
+    # one, the row stuck FIXING, and on the batch rollback path it holds
+    # run.lock so every later tick exits immediately with the unit in
+    # 'activating' (TimeoutStartSec=infinity), meaning OnFailure never
+    # fires and nothing alerts. Design §12 promises every ffmpeg/ffprobe
+    # call in the fix path is bounded; this helper was the one the r-loop-2
+    # sweep missed. TimeoutExpired surfaces through apply_fixes as an
+    # ordinary fix failure (REVALIDATING).
     subprocess.run(
         ["ffmpeg", "-loglevel", "error", "-ss", f"{head_cut:.6f}", "-i",
          str(src), "-c", "copy", "-avoid_negative_ts", "make_zero", "-y",
-         str(tmp)], check=True)
+         str(tmp)], check=True, timeout=1800)
     new_info = V.probe(tmp)
 
     with (session_dir / "frames.csv").open(newline="") as f:
@@ -77,7 +87,7 @@ def retrim(session_dir: Path, head_s: float, out_dir: Path) -> dict:
     (out_dir / "session.json").write_text(json.dumps(s, indent=2))
     if session_dir != out_dir:
         shutil.copy2(session_dir / "rrd_creation.py", out_dir / "rrd_creation.py")
-    rrd.generate(out_dir)
+    rrd.generate(out_dir, timeout_s=1800)     # bounded, as deliver.py does
     return {"session": s["session_id"], "head_cut_s": round(head_cut, 3),
             "cut_rows": len(rows) - len(kept), "frames": len(kept),
             "duration_s": s["duration_seconds"], "out_dir": str(out_dir)}

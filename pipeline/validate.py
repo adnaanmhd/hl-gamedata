@@ -19,6 +19,8 @@ import csv
 import importlib.util
 import json
 import os
+import threading
+import uuid
 import re
 import shutil
 import sys
@@ -27,7 +29,6 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from . import config as C
-from . import gate as gatemod
 from . import scanner
 from . import vlm as vlmmod
 
@@ -111,10 +112,16 @@ _QA_STR_MAP = [
     # "session.json unreadable", "is not a JSON object", "frames.csv
     # unreadable/empty" — for those, QA_FAIL_UNMAPPED's retranslate-when-
     # sidecars-exist behaviour is already the right answer.
+    # "frame_id column unparseable" is deliberately NOT mapped: with no raw
+    # sidecars STR_ROWS_MISMATCH plans FIX_ROWS_SURGERY, which only
+    # truncates/appends up to 2 TAIL rows and never rewrites a frame_id
+    # cell — so it no-ops, and both attempts plus two paid VLM sweeps are
+    # spent reaching the same reject, with the operator-facing reason
+    # degraded to the bare fix-failed marker (r-loop 4). Same trap the
+    # ragged-row note above avoids.
     ("session.json numeric fields malformed", "STR_SJ_INVALID", True),
     ("session.json timestamps", "STR_SJ_INVALID", True),
     ("game_title not a string", "STR_SJ_INVALID", True),
-    ("frame_id column unparseable", "STR_ROWS_MISMATCH", True),
     ("timestamp_ms column unparseable", "STR_TS_NONMONO", True),
 ]
 
@@ -264,33 +271,9 @@ def _map_game_identity(rep: dict, expected_game: str | None,
             f"verify manually")
 
 
-def _already_gated(t0: float, t1: float, spans: list) -> bool:
-    """True when [t0,t1] sits inside a span FIX_GATE_WINDOW already blanked.
-
-    GATE_PAD_FRAMES (2 rows, ~66 ms) is sized for the scanner re-drawing a
-    boundary by +-1 frame. It is an order of magnitude too small for the
-    VLM path, whose gated span is bounded by midpoints between VLM SAMPLE
-    times: one boundary sample changing label between the fix pass and the
-    recheck moves the bound by ~0.5-1 s, i.e. 15-30 frames. The recheck
-    then recounts action frames over the NEW, wider window, re-raises
-    INP_FROZEN_ACTIONS, spends the second fix attempt re-gating (destroying
-    real gameplay input at the edge), and rejects the session as
-    "fix retries exhausted" on the third pass — a deliverable session lost
-    and an unpaid player, surfaced to ops as a bare "fix-failed" marker
-    (r-loop 3). R3 is what pushes this population through the gate path at
-    all: at the old 2 s bar these windows CUT on pass 1 and never entered
-    the fix/recheck loop.
-
-    So: if the frozen span was already blanked, the reason is SATISFIED.
-    Re-gating a boundary that merely moved would blank neighbouring real
-    gameplay, which is worse than leaving it."""
-    return any(a - 0.001 <= t0 and t1 <= b + 0.001 for a, b in spans)
-
-
 def _map_windows(rep: dict, aux: dict, reasons: list[dict],
                  advisories: list[str]) -> None:
     dur = float(rep.get("duration_s") or 0)
-    gated = aux.get("gated_spans") or []
     windows = list(rep.get("vlm", {}).get("windows", []))
     for w in windows:
         if not w.get("gating"):
@@ -375,13 +358,7 @@ def _map_windows(rep: dict, aux: dict, reasons: list[dict],
         # would also blank up to 30s of real input on the gate path.
         keep_span = max(span, cut1 - cut0)
         if keep_span <= C.KEEP_GATE_MAX_S:
-            if action_frames and _already_gated(w0, w1, gated):
-                advisories.append(
-                    f"{desc}: {action_frames} action frame(s) counted, but "
-                    f"the frozen span {w0}-{w1}s was already blanked by an "
-                    f"earlier FIX_GATE_WINDOW — treating as satisfied "
-                    f"rather than re-gating a moved boundary")
-            elif action_frames:
+            if action_frames:
                 # gate the FULL flagged window [cut0, cut1], not just the
                 # refined span: action_frames was counted over the whole
                 # VLM window, and gating a narrower span left counted
@@ -425,12 +402,7 @@ def _map_windows(rep: dict, aux: dict, reasons: list[dict],
         # cuts restricted to >5s that feedback loop cannot run — only ~95
         # windows ledger-wide (~0.2 per session) clear the bar at all.
         if span <= C.KEEP_GATE_MAX_S:
-            if xw.get("action_frames") and _already_gated(xw["t0"], xw["t1"],
-                                                          gated):
-                advisories.append(
-                    f"{desc}: already blanked by an earlier "
-                    f"FIX_GATE_WINDOW — satisfied, not re-gated")
-            elif xw.get("action_frames"):
+            if xw.get("action_frames"):
                 reasons.append(_reason(
                     "INP_FROZEN_ACTIONS", True, True,
                     {"t0": xw["t0"], "t1": xw["t1"]},
@@ -920,8 +892,15 @@ def _locked_report_update(report_path: Path, name: str,
             try:
                 if time.time() - lock.stat().st_mtime > \
                         C.REPORT_LOCK_STALE_S:
+                    # unique per RACER, not per process: the continuous
+                    # driver breaks this lock from S, U, H and every V
+                    # session runner — all one pid, hence one grave path.
+                    # os.rename over an existing EMPTY dir succeeds on
+                    # POSIX, so two threads could both "win" and both hold
+                    # the lock, losing one read-modify-write (r-loop 4).
                     grave = lock.with_name(
-                        f"{lock.name}.stale-{os.getpid()}")
+                        f"{lock.name}.stale-{os.getpid()}-"
+                        f"{threading.get_ident()}-{uuid.uuid4().hex[:8]}")
                     os.rename(lock, grave)
                     shutil.rmtree(grave, ignore_errors=True)
                     continue
@@ -1007,10 +986,7 @@ def _dead_black_check(luma: list[float]) -> tuple[bool, str | None]:
 def _build_aux(work_dir: Path, rep: dict, gem, *, gemini_key: str,
                gemini_model: str, vlm_expected: bool) -> dict:
     """Scanner timeline + AFK + refined windows + notif/chat confirmation."""
-    # spans a previous FIX_GATE_WINDOW already blanked in THIS session —
-    # read once, consumed by the AFK detector and by _already_gated
-    aux: dict = {"vlm_extra_failed": False,
-                 "gated_spans": gatemod.gated_spans(work_dir)}
+    aux: dict = {"vlm_extra_failed": False}
     video = work_dir / "video.mp4"
     try:
         ts_ms, active, has_action, tamper = _read_rows(
@@ -1122,29 +1098,7 @@ def _build_aux(work_dir: Path, rep: dict, gem, *, gemini_key: str,
         # AFK: >30s zero input + near-static (OW dialogue/map/reading are
         # gameplay — VLM label check below removes those)
         if ts_ms and active and not synthetic_timing:
-            # An AFK run must be evidence of PLAYER inactivity. Rows this
-            # pipeline blanked with FIX_GATE_WINDOW look identical to an
-            # idle player, so a 3s gate could stitch two real activity
-            # periods into one >=30s "AFK" run that the next pass CUT —
-            # turning R1's 3s gate into a 35s split one attempt later, with
-            # no fix budget left afterwards (r-loop 3). Gated rows are
-            # therefore treated as active here (and ONLY here): we cannot
-            # attribute their emptiness to the player. The tradeoff is
-            # deliberate and one-directional — a genuine AFK overlapping a
-            # gate may be split into sub-30s runs and missed, which costs a
-            # trim, whereas the reverse error destroys real gameplay.
-            gspans = aux["gated_spans"]
-            if gspans:
-                afk_active = [
-                    a or any(t0 <= (t / 1000.0) <= t1 for t0, t1 in gspans)
-                    for a, t in zip(active, ts_ms)]
-                aux.setdefault("notes", []).append(
-                    f"{len(gspans)} previously gated span(s) excluded from "
-                    f"AFK detection (pipeline-blanked rows are not player "
-                    f"inactivity)")
-            else:
-                afk_active = active
-            for a, b in scanner.zero_input_runs(ts_ms, afk_active,
+            for a, b in scanner.zero_input_runs(ts_ms, active,
                                                 C.AFK_MIN_S):
                 m = tl.window_motion(a, b)
                 if m is not None and baseline > 0 and \

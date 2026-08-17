@@ -93,13 +93,45 @@ def rebase_events(events: list[dict], head_cut_s: float, new_duration_s: float) 
     """
     head_us = head_cut_s * 1_000_000.0
     end_us = (head_cut_s + new_duration_s) * 1_000_000.0
+    # CARRY THE HELD STATE ACROSS THE CUT (r-loop 4). Dropping every event
+    # before head_us loses the fact that a key/button was already DOWN when
+    # the trim starts. bin_session seeds keys_down empty and only learns a
+    # key from a 'down' it sees, while the surviving 'up' still does
+    # keys_in[f].add(k) before discarding — so a W held from 4.5s to 14.0s
+    # with the implicit 5s head trim shipped as ONE frame carrying 'w' (at
+    # the release) instead of ~270 frames of hold. Nothing downstream can
+    # see it: qa-v2 has no held-run check and the sync grounding correlates
+    # mouse motion only. Worse, the resulting long empty stretch can read
+    # as player inactivity to the AFK detector.
+    held_keys: dict = {}
+    held_btns: dict = {}
     out: list[dict] = []
     for e in events:
         t = e.get("t")
         if not isinstance(t, int):
             continue
-        if head_us <= t < end_us:
+        if t < head_us:
+            et, act = e.get("type"), e.get("action")
+            if et == "key" and e.get("key") is not None:
+                if act == "down":
+                    held_keys[e["key"]] = e
+                else:
+                    held_keys.pop(e["key"], None)
+            elif et == "mouse_button" and e.get("button") is not None:
+                if act == "down":
+                    held_btns[e["button"]] = e
+                else:
+                    held_btns.pop(e["button"], None)
+            continue
+        if t < end_us:
             ne = dict(e)
             ne["t"] = int(t - head_us)
             out.append(ne)
-    return out
+    # re-press whatever was still held at the cut, at the new frame 0
+    carried = []
+    for e in list(held_keys.values()) + list(held_btns.values()):
+        ne = dict(e)
+        ne["t"] = 0
+        ne["action"] = "down"
+        carried.append(ne)
+    return carried + out

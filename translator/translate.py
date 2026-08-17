@@ -26,13 +26,23 @@ from .keybinds import KEYBINDS, game_key_from_name
 VENDOR = "humynlabs"
 SPEC_VERSION = "v1"
 
+# every semantic action name the built-in keybinds define — the authority
+# for telling a semantic from a literal when sniffing keybind.json direction
+_SEMANTIC_VOCAB = {sem for kb in KEYBINDS.values() for sem in kb}
+
 
 # --------------------------------------------------------------------------- #
 # shared helpers
 # --------------------------------------------------------------------------- #
 def load_events(inputs_path: Path) -> list[dict]:
     events: list[dict] = []
-    with Path(inputs_path).open() as f:
+    # errors="replace" + a dict guard: this is untrusted player-written
+    # JSONL, and a single cp1252 byte (an accented key name from a non-US
+    # layout) or a bare `null` line used to raise out of the translator —
+    # the same holes the checker had (r-loop 4). A key we cannot decode is
+    # dropped by normalize_event_key anyway; crashing the whole translate
+    # over one byte is never the right trade.
+    with Path(inputs_path).open(errors="replace") as f:
         for line in f:
             line = line.strip()
             if not line:
@@ -41,7 +51,7 @@ def load_events(inputs_path: Path) -> list[dict]:
                 ev = json.loads(line)
             except json.JSONDecodeError:
                 continue
-            if isinstance(ev.get("t"), int):
+            if isinstance(ev, dict) and isinstance(ev.get("t"), int):
                 events.append(ev)
     return events
 
@@ -58,12 +68,43 @@ def resolve_keybind(*, keybind_path: Path | None, game_name: str | None,
     return dict(KEYBINDS.get(slug, {})) if slug else {}
 
 
+def _looks_semantic(x) -> bool:
+    """A semantic ACTION name, not a literal key token.
+
+    Requiring a '_' is not enough on its own — real literals like
+    'left_shift' and 'mouse_left' have one. The authoritative test is our
+    own semantic vocabulary (the keys of the built-in keybinds); anything
+    outside it must be clearly namespaced to count.
+
+    Biased deliberately toward NOT flipping: wrongly flipping a
+    correctly-oriented file empties the whole keyboard column and gets the
+    session rejected as CNT_ACTIONS_FEW (unfixable, unpaid player), whereas
+    failing to flip a genuinely inverted one leaves it as it arrived."""
+    if not isinstance(x, str) or "_" not in x:
+        return False
+    if x in _SEMANTIC_VOCAB:
+        return True
+    return x.count("_") >= 2
+
+
 def _as_semantic_to_literal(raw: dict) -> dict:
     """Detect direction; return semantic->literal form the resolver expects."""
     # Heuristic: if values are lists of strings that look like our semantic
     # action names (contain '_' and aren't single keys), it's already inverted.
     vals = list(raw.values())
-    looks_inverted = vals and all(isinstance(v, list) for v in vals)
+    # Implement the test the comment describes: the LIST ELEMENTS must look
+    # like semantic action names. "all values are lists" alone was wrong,
+    # because keybind.json is documented as user-authored {semantic:
+    # literal} in which "multi-binding alternatives appear as lists" — so a
+    # correctly-oriented file whose entries are all multi-bind (e.g.
+    # {"movement_move_x_axis": ["a","d"], ...}) was flipped, making literals
+    # the semantics. Every real key then failed to resolve, input_keys and
+    # input_actions shipped EMPTY on every row, and — because qa-v2 cannot
+    # see a keyboard that simply is not there — the session was rejected as
+    # CNT_ACTIONS_FEW, which is unfixable, with the player coached to "play
+    # actively" for a bug in our parser (r-loop 4).
+    looks_inverted = bool(vals) and all(isinstance(v, list) for v in vals) \
+        and all(_looks_semantic(x) for v in vals for x in v)
     if not looks_inverted:
         return raw
     sem2lit: dict[str, list[str]] = {}

@@ -16,6 +16,7 @@ from __future__ import annotations
 import csv
 import importlib.util
 import json
+import os
 import shutil
 import subprocess
 import sys
@@ -75,6 +76,9 @@ def plan_fixes(reasons: list[dict], *, game: str, has_raw: bool) -> dict:
     cut_windows: list[tuple[float, float]] = []
     gate_windows: list[tuple[float, float]] = []
     head_cut: float | None = None
+    # FIX_RETRIM_HEAD is emitted late (after hygiene and the gate) — see
+    # the head_cut branch below for why the ordering is load-bearing
+    head_step: tuple[str, dict] | None = None
     tail_cut: float | None = None
     csv_fixes: list[tuple[str, dict]] = []
     remux = reroute = v1 = raw_only = context_fix = False
@@ -197,12 +201,24 @@ def plan_fixes(reasons: list[dict], *, game: str, has_raw: bool) -> dict:
     if head_cut:
         # the retrim tool asserts a v2 header too (review-r4 #23)
         _pre_cut_csv_fixes()
-        steps.append(("FIX_RETRIM_HEAD", {"head_s": head_cut}))
-        # gate windows carry PRE-trim timestamps; retrim rebases every
-        # row — gating here would blank the wrong frames. The re-validation
-        # after the trim re-derives the frozen window on the new timeline
-        # (review finding #7).
-        gate_windows = []
+        # DEFERRED, not dropped (r-loop 4). The retrim is emitted at the end
+        # so the final order is: structural -> hygiene/context/CSV writers
+        # -> GATE_WINDOW -> RETRIM_HEAD -> SESSIONJSON_RECOMPUTE.
+        #   * gate after hygiene, because hygiene re-derives input_actions
+        #     and would undo it (r-loop 3);
+        #   * gate BEFORE the retrim, because gate windows carry PRE-trim
+        #     timestamps — correct at the moment the gate runs — and the
+        #     retrim only slices head rows and rebases what survives, never
+        #     re-deriving actions;
+        #   * sessionjson last, because the retrim rewrites the video.
+        # Dropping the gate (the old behaviour) cost a whole fix attempt:
+        # the reason survived untouched into revalidation and attempt 2 was
+        # spent gating it, leaving nothing for any third reason — REJECTED
+        # "fix retries exhausted", an unpaid player, surfaced to ops as a
+        # bare fix-failed marker. R3 made the collision common rather than
+        # rare: a 2-5s mid-clip window used to be a CUT, which MERGES with
+        # the head trim into one FIX_CUT_SEGMENTS step; as a gate it cannot.
+        head_step = ("FIX_RETRIM_HEAD", {"head_s": head_cut})
     if tail_cut:
         _pre_cut_csv_fixes()
         steps.append(("FIX_CUT_SEGMENTS", {"cut": [(tail_cut, 1e9)]}))
@@ -255,6 +271,8 @@ def plan_fixes(reasons: list[dict], *, game: str, has_raw: bool) -> dict:
     # columns and are ordered above for the same reason.
     if gate_windows:
         steps.append(("FIX_GATE_WINDOW", {"windows": sorted(gate_windows)}))
+    if head_step is not None:
+        steps.append(head_step)
     if steps:
         steps.append(("FIX_SESSIONJSON_RECOMPUTE", {}))
     return {"steps": steps, "unfixable": sorted(set(unfixable))}
@@ -300,11 +318,31 @@ def _append_fixlog(dossier_dir: Path, entries: list[dict]) -> None:
     path = dossier_dir / "fixlog.json"
     try:
         log = json.loads(path.read_text())
-    except (FileNotFoundError, json.JSONDecodeError):
+    except FileNotFoundError:
+        log = []
+    except json.JSONDecodeError:
+        # a torn file is EVIDENCE LOSS, not a fresh start: rename it aside
+        # so the loss is visible rather than silently overwritten. This is
+        # design §13's "dossier evidence + fixlog" — the artifact a payment
+        # dispute is adjudicated against (r-loop 4).
+        stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+        try:
+            path.replace(path.with_name(f"fixlog.json.corrupt-{stamp}"))
+            print(f"[fixlog-corrupt] {dossier_dir.name}: unreadable log "
+                  f"preserved as fixlog.json.corrupt-{stamp}")
+        except OSError:
+            pass
         log = []
     log.append({"ts": datetime.now(timezone.utc).isoformat(
         timespec="seconds"), "fixes": entries})
-    path.write_text(json.dumps(log, indent=1))
+    # ATOMIC, like every other artifact writer here (frames.csv,
+    # session.json, translation_report.json, the split manifest, the digest
+    # anchor): kill -9 is the designed-for path, and a torn write here
+    # discarded the ENTIRE fix history, including which frames the pipeline
+    # itself blanked and why.
+    tmp = path.with_name(f"fixlog.json.tmp.{os.getpid()}")
+    tmp.write_text(json.dumps(log, indent=1))
+    tmp.replace(path)
 
 
 def _dispatch(fix_id: str, params: dict, work: Path, game: str,

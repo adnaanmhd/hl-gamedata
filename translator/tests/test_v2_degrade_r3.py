@@ -132,8 +132,6 @@ def test_qa_hardening_fail_strings_map_to_fixable_reasons():
              "STR_SJ_INVALID"),
             ("session.json game_title not a string: ['Kamla']",
              "STR_SJ_INVALID"),
-            ("frame_id column unparseable (non-integer or short row)",
-             "STR_ROWS_MISMATCH"),
             ("timestamp_ms column unparseable (non-integer or short row)",
              "STR_TS_NONMONO")):
         reasons = []
@@ -161,3 +159,13 @@ def test_ragged_rows_stay_unmapped_because_no_fix_clears_them():
     _map_qa_issues(["FAIL: frames.csv has 3 short/ragged row(s)"],
                    reasons, has_raw=True)
     assert reasons[0]["fixable"] is True     # retranslate from sidecars
+
+    # "frame_id column unparseable" belongs to the same class (r-loop 4):
+    # STR_ROWS_MISMATCH plans FIX_ROWS_SURGERY, which only truncates or
+    # appends up to 2 TAIL rows and never rewrites a frame_id cell, so it
+    # no-ops and spends both attempts plus two paid VLM sweeps reaching the
+    # same reject — with a worse, untyped operator-facing reason.
+    reasons = []
+    _map_qa_issues(["FAIL: frame_id column unparseable (non-integer or "
+                    "short row)"], reasons, has_raw=False)
+    assert [r["code"] for r in reasons] == ["QA_FAIL_UNMAPPED"]

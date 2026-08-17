@@ -243,24 +243,6 @@ def test_short_window_still_keeps_when_both_bounds_clear_the_bar():
     assert [r["code"] for r in reasons] == ["INP_FROZEN_ACTIONS"]
 
 
-def test_previously_gated_window_is_satisfied_not_regated():
-    """GATE_PAD_FRAMES (2 rows, ~66ms) is sized for +-1 frame of scanner
-    jitter, but a VLM window bound is a midpoint between VLM SAMPLES and
-    moves ~0.5-1s (15-30 frames) when one boundary sample changes label
-    between passes. The recheck then recounted actions over the new wider
-    window, re-raised INP_FROZEN_ACTIONS, spent attempt 2 re-gating (blanking
-    real gameplay at the edge) and rejected the session on pass 3."""
-    rep = {"duration_s": 600.0, "vlm": {"windows": [
-        _vlm_window(100.0, 104.0, action_frames=7)]}}
-    aux = {"refined": {(100.0, 104.0): (101.0, 102.5)},
-           "extra_windows": [], "afk_windows": [],
-           "gated_spans": [(100.5, 103.0)]}       # covers the frozen run
-    reasons, advisories = [], []
-    validate._map_windows(rep, aux, reasons, advisories)
-    assert reasons == [], "an already-blanked span must not re-fire"
-    assert any("already blanked" in a for a in advisories)
-
-
 def test_gate_step_runs_after_the_csv_writers():
     """FIX_KEY_HYGIENE re-resolves input_actions for every row from
     keys|buttons plus the motion flags, and motion-bound semantics (kamla
@@ -278,36 +260,6 @@ def test_gate_step_runs_after_the_csv_writers():
     assert ids.index("FIX_GATE_WINDOW") > ids.index("FIX_KEY_HYGIENE"), (
         "the gate only blanks, so it must run last among the frames.csv "
         "writers or hygiene repopulates the actions it just cleared")
-
-
-def test_gate_blanked_rows_do_not_manufacture_an_afk_cut():
-    """gate.py blanks keys+actions in place and validate re-reads that same
-    frames.csv, so pipeline-blanked rows are indistinguishable from an idle
-    player. A 3s gate could therefore stitch two real activity periods into
-    one >=30s AFK run that the NEXT pass CUT — turning R1's 3s gate into a
-    35s split one attempt later, with no fix budget left."""
-    ts_ms = [i * 100 for i in range(600)]          # 60s at 10Hz
-    active = [False] * 600
-    for i in range(0, 100):                        # gameplay 0-10s
-        active[i] = True
-    for i in range(200, 230):                      # key burst 20-23s
-        active[i] = True
-    for i in range(450, 600):                      # gameplay 45-60s
-        active[i] = True
-    # pre-gate: the burst breaks the run, so no >=30s idle span exists
-    assert scanner.zero_input_runs(ts_ms, active, C.AFK_MIN_S) == []
-    # the gate blanks exactly the burst R1 routes to gating
-    gated = [(20.0, 23.0)]
-    afk_active = [a or any(t0 <= (t / 1000.0) <= t1 for t0, t1 in gated)
-                  for a, t in zip(active, ts_ms)]
-    assert scanner.zero_input_runs(ts_ms, afk_active, C.AFK_MIN_S) == [], (
-        "rows the pipeline itself blanked must not read as player "
-        "inactivity")
-    # ...and without the mask the manufactured AFK run reappears
-    blanked = list(active)
-    for i in range(200, 230):
-        blanked[i] = False
-    assert scanner.zero_input_runs(ts_ms, blanked, C.AFK_MIN_S) != []
 
 
 def test_synthetic_timeline_is_declared_and_acts_on_nothing():

@@ -298,7 +298,6 @@ class ContinuousDriver:
             # tests), but a FAILED scan must never be counted as "the
             # Drive was checked" (r-loop 2). Attempts bound the loop;
             # passes stay honest.
-            self._scan_attempts += 1
             # Fetch OUTSIDE the mutex, adjudicate INSIDE it. The listing is
             # a full recursive `rclone lsjson -R --hash` of Drive I with a
             # 3600s ceiling, and holding intake_lock across it blocked
@@ -311,9 +310,23 @@ class ContinuousDriver:
             # (r-loop 3). Nothing about the listing needs the lock: the
             # cross-dup un-pick race the lock exists for is decided from
             # ledger reads that all happen after the listing returns.
-            entries = ingest.list_drive(self.cfg)
-            with self.intake_lock:
-                res = ingest.scan(self.cfg, led, entries)
+            # attempts counted in a finally around the WHOLE attempt, not
+            # before it: idle() gates only on `_scan_attempts < 1`, so
+            # bumping it up-front let a bounded `--until-idle` run against
+            # a drained ledger reach three idle reads (~1.5s) and exit
+            # while the very first Drive listing was still running — zero
+            # sessions discovered, and then the "reached idle WITHOUT a
+            # single successful Drive scan" alert misattributing a
+            # self-inflicted early exit to an unreachable Drive (r-loop 4).
+            # Counting completed attempts still bounds the loop when the
+            # Drive really is unreachable, which is what the r-loop-2
+            # attempts-vs-passes split was for.
+            try:
+                entries = ingest.list_drive(self.cfg)
+                with self.intake_lock:
+                    res = ingest.scan(self.cfg, led, entries)
+            finally:
+                self._scan_attempts += 1
             for path, why in res.quarantined:
                 print(f"[quarantined] {path}: {why}")
             for f in res.integrity_flags:
@@ -333,13 +346,28 @@ class ContinuousDriver:
         counts = led.counts_by_state()
         n = sum(counts.get(s, 0) for s in LOCAL_STATES
                 if s != "QUARANTINED")
-        # QUARANTINED holds media only until the hourly sweep reclaims it at
-        # CONT_QUARANTINE_RECLAIM_H. Counting the raw state total would
-        # ratchet the cap shut permanently, since the row stays QUARANTINED
-        # forever after its media is gone — so count only the rows whose
-        # media the sweep has not yet taken, using the same age test.
+        # QUARANTINED counts ONLY while it actually holds local media.
+        #
+        # The cap exists to bound BYTES ON DISK, so membership must be
+        # decided by the same question the reclaimer asks — does the work
+        # dir exist — and not by age. An age test was wrong in both
+        # directions: two of the three quarantine producers create rows
+        # that never held a byte (ingest.scan inserts one INT_PATH row per
+        # malformed Drive directory, pre-download and unbounded in count;
+        # _validate_one writes "work copy missing"), and _sweep_terminal_work
+        # iterates the work dir, so it never visits a media-less row and
+        # never advances its updated_at. One operator uploading a nested
+        # folder tree could therefore mint 40+ media-less QUARANTINED rows
+        # in a single scan and stop ALL intake for 48h with the disk empty
+        # and no operator lever to clear it — verified by repro (45 junk
+        # dirs -> _local_count 45, work/ empty, _pick_download None).
+        # Worse, ingest's bad-path chase re-stamps updated_at when the
+        # operator FIXES the folder, re-arming another 48h (r-loop 4
+        # blocker; a regression from r-loop 3's own cap fix).
         for r in led.by_state("QUARANTINED"):
-            if runmod._terminal_age_h(r) < C.CONT_QUARANTINE_RECLAIM_H:
+            sid = r["session_id"]
+            if (self.cfg.work / sid).exists() or \
+                    (self.cfg.work / f"{sid}-analysis").exists():
                 n += 1
         return n
 
@@ -1008,8 +1036,33 @@ class ContinuousDriver:
             "        WHERE e2.session_id=s.session_id AND e2.to_state "
             "        NOT IN ('HOLD_VLM','VALIDATING')), '')) first_hold "
             "FROM sessions s WHERE s.state='HOLD_VLM'").fetchall()
+        # A permanently-failing DELIVERY can never match the query above:
+        # deliver_session writes `ledger.update(rrd_sampled=...)` on every
+        # attempt, and Ledger.update always refreshes updated_at, while
+        # _deliver_one retries forever on a 10-minute cooldown with the
+        # state left READY/PACKAGED/UPLOADED. So its updated_at is never
+        # older than ~10 min and the one surface meant to name stuck
+        # sessions never did — the same class the HOLD_VLM stint query was
+        # added to fix, left unfixed in the U lane, and it matters most at
+        # the flip because CONT_DAILY_REPORTS ships False and the digest is
+        # the ONLY ops surface (r-loop 4). Age these from the immutable
+        # events audit: the start of the current delivery stint.
+        undelivered = led.db.execute(
+            "SELECT s.session_id, s.state, "
+            "(SELECT MIN(e.ts) FROM events e "
+            "  WHERE e.session_id=s.session_id "
+            "    AND e.to_state IN ('READY','PACKAGED','UPLOADED') "
+            "    AND e.ts >= COALESCE((SELECT MAX(e2.ts) FROM events e2 "
+            "        WHERE e2.session_id=s.session_id AND e2.to_state "
+            "        NOT IN ('READY','PACKAGED','UPLOADED')), '')) first_rdy "
+            "FROM sessions s WHERE s.state IN "
+            "('READY','PACKAGED','UPLOADED')").fetchall()
         stuck = [(r["session_id"], r["state"], r["updated_at"])
-                 for r in rows]
+                 for r in rows
+                 if r["state"] not in ("READY", "PACKAGED", "UPLOADED")]
+        for r in undelivered:
+            if r["first_rdy"] and r["first_rdy"] < cut:
+                stuck.append((r["session_id"], r["state"], r["first_rdy"]))
         for r in held:
             if r["first_hold"] and r["first_hold"] < cut:
                 stuck.append((r["session_id"], "HOLD_VLM", r["first_hold"]))
@@ -1122,8 +1175,19 @@ class ContinuousDriver:
             return
         counts = self._counts or led.counts_by_state()
         held = counts.get("HOLD_VLM", 0)
-        dom, dom_n = max(((s, counts.get(s, 0)) for s in LOCAL_STATES),
-                         key=lambda kv: kv[1])
+        # Blame the state from the SAME tally the cap uses. QUARANTINED
+        # rows stay in that state forever after their media is reclaimed,
+        # so the raw snapshot grows without bound while contributing
+        # nothing to `n` — the alert would say "40/40 ... (mostly
+        # QUARANTINED: 200)", internally contradictory and pointing at the
+        # wrong cause (r-loop 4).
+        tally = {s: counts.get(s, 0) for s in LOCAL_STATES
+                 if s != "QUARANTINED"}
+        tally["QUARANTINED"] = sum(
+            1 for r in led.by_state("QUARANTINED")
+            if (self.cfg.work / r["session_id"]).exists()
+            or (self.cfg.work / f"{r['session_id']}-analysis").exists())
+        dom, dom_n = max(tally.items(), key=lambda kv: kv[1])
         extra = (f" — {held} of them HOLD_VLM, which never exits on its own "
                  f"(check the VLM key/quota)") if held * 2 >= n else ""
         self.alerts.alert(
@@ -1369,3 +1433,27 @@ def run_continuous(cfg: C.Config, *, dest_prefix: str = C.VENDOR,
         # for pid-based reclaim once this process actually dies
         if clean_stop:
             runmod.release_lock(cfg)
+        elif any(t.is_alive() for t in drv.threads) or drv.gate.active:
+            # Only when work is GENUINELY still in flight — an unclean
+            # verdict with everything actually stopped must still return
+            # normally (tests, and any caller inspecting the result).
+            # "exiting anyway" was NOT true. runner_pool is a
+            # ThreadPoolExecutor whose workers are non-daemon, and
+            # concurrent.futures registers an atexit hook that JOINS every
+            # one of them; shutdown(wait=False, cancel_futures=True) only
+            # drops QUEUED futures, so a runner blocked in a validation
+            # subprocess or a fix step keeps the interpreter alive. The
+            # unit then sat in 'deactivating' until systemd's
+            # TimeoutStopSec SIGKILL — a documented 10-minute drain
+            # becoming a 15-minute stop — and a manual --until-idle run
+            # hung indefinitely after printing that it was stopping
+            # (r-loop 4). Leaving by os._exit is safe here and only here:
+            # the drain grace has already expired, every state transition
+            # is committed before its side effect, and the run lock is
+            # deliberately KEPT for pid-reclaim.
+            print("[shutdown] drain grace expired with work still in "
+                  "flight — exiting immediately; the ledger resumes "
+                  "exactly as it does from kill -9", file=sys.stderr)
+            sys.stderr.flush()
+            sys.stdout.flush()
+            os._exit(0)

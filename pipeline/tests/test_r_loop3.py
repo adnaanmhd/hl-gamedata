@@ -291,3 +291,36 @@ def test_run_continuous_rejects_unknown_args(monkeypatch, capsys):
     assert runmod.main(["run-continuous", "--dest-prefix="]) == 2
     out = capsys.readouterr().out
     assert "humynlabs" in out or "non-empty" in out
+
+
+# ------------------------------------------------ r-loop 4: real hooks
+
+def test_validate_reject_runs_the_real_finalize_hook(cfg, ledger,
+                                                     monkeypatch):
+    """Design §1 makes finalize_rejected a per-session terminal hook at the
+    REJECTED transition (it replaced the batch close-out sweep). Every
+    reject-flow test drove a fake _validate_one that called the hook
+    itself, so deleting the production call site left all 363 tests green
+    — mutation-proven. Losing it means rejected sessions keep multi-GB work
+    dirs and get no coaching dossier until the hourly orphan sweep, which
+    on a reject-heavy hour throttles intake for a reason nothing reports
+    (r-loop 4).
+    """
+    sid = "s-reject"
+    ledger.insert_session(session_id=sid, game="kamla",
+                          operator_email="op@x.com", player_email="p@x.com",
+                          drive_path="kamla/op@x.com/p@x.com/" + sid,
+                          drive_ctime="2026-08-14T10:00:00.000Z",
+                          md5_video="a" * 32, bytes_=10, state="INGESTED")
+    (cfg.work / sid).mkdir(parents=True)
+    seen = []
+    monkeypatch.setattr(cont.deliver, "finalize_rejected",
+                        lambda c, l, s: seen.append(s))
+    monkeypatch.setattr(cont, "_POOL_DISABLED", True)
+    monkeypatch.setattr(cont, "_WORKER_FN", lambda job: {
+        "sid": job["sid"], "vlm_rung": 0, "hold_vlm": False, "bin": 3,
+        "reasons": [{"code": "CNT_SHORT", "blocking": True,
+                     "fixable": False}]})
+    drv = cont.ContinuousDriver(cfg, send_telegram=False)
+    assert drv._validate_one(ledger, sid, ledger.get(sid)) == "REJECTED"
+    assert seen == [sid], "the REJECTED transition must finalize in place"

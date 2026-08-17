@@ -113,6 +113,12 @@ def main() -> int:
     from pipeline.run import acquire_lock, release_lock
     ap = argparse.ArgumentParser()
     ap.add_argument("--yes", action="store_true")
+    ap.add_argument("--allow-reported", action="store_true",
+                    help="proceed even for roots already counted on a sent "
+                         "payment sheet (their uploaded_reported_at stamp is "
+                         "preserved either way, so nothing is double-paid — "
+                         "but the sheet of record and Drive II will disagree "
+                         "until you reconcile)")
     args = ap.parse_args()
     cfg = C.load()
     if not acquire_lock(cfg):
@@ -164,10 +170,32 @@ def _locked_main(cfg, args) -> int:
                     print(f"WARN: {sid} state={row['state']} but no "
                           f"UPLOADED event — verify manually")
         plan.append((root, kids, moves))
+    # Already-REPORTED roots need a human, not an automatic re-run. Their
+    # hours are on a sheet that has been sent (and may have been paid); the
+    # re-run re-delivers the same footage, and since the stamp is now
+    # preserved those hours will simply not be re-counted — which is right
+    # for payment, but the operator must know the sheet and the tree will
+    # no longer agree until they reconcile. Refuse by default rather than
+    # deciding it silently (r-loop 4).
+    stamped = [p[0] for p in plan
+               if (row := ledger.get(p[0])) is not None
+               and row["uploaded_reported_at"]]
+    if stamped and not args.allow_reported:
+        print(json.dumps({
+            "ABORT": "roots already counted on a sent payment sheet",
+            "stamped_roots": stamped,
+            "why": ("their uploaded hours are already reported; re-running "
+                    "them re-delivers the same footage. The stamp is "
+                    "preserved so nothing is double-paid, but the sheet of "
+                    "record and Drive II will disagree until reconciled."),
+            "how": "re-run with --allow-reported once you have reconciled",
+        }, indent=1))
+        return 2
     print(json.dumps({
         "fix_failed_rows": len(fix_failed),
         "fix_failed_hours": round(hours, 2),
         "roots": [p[0] for p in plan],
+        "already_reported_roots": stamped,
         "subtree_rows": sum(len(p[1]) for p in plan),
         "drive_moves": [m for p in plan for m in
                         [f"{s} -> {d}" for s, d in p[2]]],
@@ -222,10 +250,23 @@ def _locked_main(cfg, args) -> int:
                 _locked_report_remove(report, sid)
             for stage_dir in cfg.stage.glob(f"*/*/*/{sid}"):
                 shutil.rmtree(stage_dir, ignore_errors=True)
+        # uploaded_reported_at is DELIBERATELY preserved (r-loop 4 blocker).
+        # Clearing it re-opens an already-reported cohort: the video
+        # identity is unchanged (same drive_path, same md5, same
+        # duration_raw_s), so these are not new uploaded hours — and that
+        # stamp is the only thing stopping build_sheet_rows' LATE-ARRIVAL
+        # guard from counting the root a second time. It was harmless only
+        # while recal_rebuild_reset had already nulled the whole cohort;
+        # once normal dailies resume (FLIP_RUNBOOK 7.3) every root carries
+        # a stamp, and un-stamping would pay the same footage on two sheets
+        # that never reference each other — with step 8 deleting
+        # superseded-refix-*/ so the first copy is gone from Drive II.
+        # (ledger.supersede clears it correctly, because there the md5 is
+        # new and the hours genuinely are new.)
         ledger.db.execute(
             "UPDATE sessions SET state='DISCOVERED', bin=NULL,"
             " reasons_json='[]', fix_attempts=0, duration_delivered_s=NULL,"
-            " rrd_sampled=0, delivered_at=NULL, uploaded_reported_at=NULL,"
+            " rrd_sampled=0, delivered_at=NULL,"
             " updated_at=? WHERE session_id=?", (now, root))
         ledger.db.execute(
             "INSERT INTO events(session_id, ts, from_state, to_state,"

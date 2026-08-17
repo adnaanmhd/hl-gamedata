@@ -119,8 +119,31 @@ def _locked_main(cfg) -> int:
         if extra:
             defects.append(f"{rd}: EXTRA files {sorted(extra)} "
                            f"(stale-rrd class — must be removed)")
+    # A dir belonging to a row that is legitimately MID-DELIVERY is not
+    # stale. `expected` is built from DELIVERED rows only, so every
+    # PACKAGED/UPLOADED session's dir was branded with the exact label
+    # whose documented meaning is "listed for cleanup" — and step 8 is the
+    # last destructive act. deliver_session sets PACKAGED and then runs
+    # upload_and_verify, which can take hours, so deleting one discards a
+    # verified partial upload the driver would otherwise resume into. The
+    # tool already (correctly) reports these as "stuck mid-delivery"; it
+    # was contradicting itself about the same path (r-loop 4).
+    inflight = {}
+    for r in stuck:
+        ev = ledger.db.execute(
+            "SELECT detail FROM events WHERE session_id=? AND "
+            "to_state='UPLOADED' AND detail LIKE 'verified at %' "
+            "ORDER BY ts DESC LIMIT 1", (r["session_id"],)).fetchone()
+        if ev is not None:
+            inflight[ev["detail"][len("verified at "):].strip()] = (
+                r["session_id"], r["state"])
     for rd in sorted(set(actual) - set(expected)):
-        defects.append(f"STALE remote dir (no DELIVERED row): {rd}")
+        if rd in inflight:
+            sid, st = inflight[rd]
+            notes.append(f"IN-FLIGHT remote dir — do NOT delete: {rd} "
+                         f"({sid}, {st})")
+            continue
+        defects.append(f"STALE remote dir (no session row): {rd}")
 
     notes.append(f"delivered rows: {len(delivered)}; remote dirs: "
                  f"{len(actual)}; expected dirs: {len(expected)}")

@@ -176,7 +176,20 @@ def _cut_loop(session_dir: Path, keep, out_root: Path, sid: str, s: dict,
             r[0] = str(j)
             r[1] = str(int(round(seg_pts[j] / 1000.0)))  # segment's OWN PTS
 
-        seg_created = created + timedelta(milliseconds=offset_ms)
+        # Anchor on the EXACT source PTS, not the millisecond-rounded CSV
+        # timestamp. qa-v2's _verify_against_raw recovers the head offset
+        # from this stamp and re-bins every raw mouse event against the
+        # segment's real PTS, so a rounding error of up to +-500us shifts
+        # every event that lands within that of a frame boundary onto the
+        # neighbouring frame. That is a broad systematic band, not the
+        # isolated jitter RAW_DXDY_RUN_BLOCK was calibrated for: measured
+        # 34% of rows mismatched on a mid-clip cut, and 70% of children
+        # FAILing at 1kHz mouse polling. Each spurious FAIL costs a paid
+        # Gemini sweep, a full retranslate and one of only two fix
+        # attempts. Tail-only cuts start at i0=0 (delta=0), which is why
+        # this never surfaced (r-loop 4 blocker). offset_ms stays for
+        # reporting only.
+        seg_created = created + timedelta(microseconds=src_pts[i0])
         seg_ended = seg_created + timedelta(seconds=info.duration_s)
         seg_s = dict(s)
         seg_s.update(

@@ -132,9 +132,21 @@ Canonical order (later steps depend on earlier):
 ```
 REMUX → V1_TO_V2 / TRANSLATE_RAW → REROUTE_GAME → RETRANSLATE (supersedes CSV fixes)
       → HEADER_REWRITE → ROWS_SURGERY → TSREPAIR_PTS      (structural, must precede any cut)
-      → RETRIM_HEAD / CUT_SEGMENTS → GATE_WINDOW
-      → KEY_HYGIENE → ACTIONS_CONTEXT → SESSIONJSON_RECOMPUTE
+      → RETRIM_HEAD / CUT_SEGMENTS
+      → KEY_HYGIENE → ACTIONS_CONTEXT → other CSV writers
+      → GATE_WINDOW                                       (LAST of the frames.csv writers)
+      → SESSIONJSON_RECOMPUTE
 ```
+
+**Why `GATE_WINDOW` is last** (r-loop 3): it only BLANKS `input_keys` /
+`input_actions`, so it is safe last — while every step above it re-derives
+those same columns. `fix_key_hygiene` re-resolves actions for every row from
+`keys | buttons` plus the motion flags, and motion-bound semantics (kamla
+`look: mouse`) fire from `dx/dy` alone, which the gate deliberately leaves as
+captured. Planned earlier, the gate came back with `input_actions` repopulated
+on every frame that still had mouse motion — in the same pass that gated it —
+so `INP_FROZEN_ACTIONS` re-fired on revalidation and burned the second fix
+attempt. Do not "restore" the older order.
 
 | Fix | Does |
 |---|---|

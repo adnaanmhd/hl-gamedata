@@ -177,7 +177,11 @@ def _script_validate(monkeypatch, script: dict[str, list[str]], log=None):
                 sid, [{"code": "CNT_SHORT", "blocking": True,
                        "fixable": False}], 3)
             led.set_state(sid, "REJECTED", "CNT_SHORT")
-            self._finalize_reject(led, sid)
+            # deliberately does NOT call self._finalize_reject: the fake
+            # used to EMULATE the production terminal hook, so deleting the
+            # real call site left the whole suite green (mutation-proven).
+            # The real path is exercised by
+            # test_validate_reject_runs_the_real_finalize_hook below.
         return out
     monkeypatch.setattr(cont.ContinuousDriver, "_validate_one", v)
 
