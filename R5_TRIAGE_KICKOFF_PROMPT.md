@@ -67,9 +67,11 @@ rebuild's tree).
 **Nothing is deployed.** Per R4 the whole set ships at the flip. **A different
 session executes the canary and flip** (Adnaan, 2026-08-18) — see §6.
 
-**Adversarial review loop: 5 of 5 iterations spent.** Adnaan's standing ruling is
-*"stop when an iteration goes quiet."* No iteration has gone quiet: r-loop 3 found
-2 blockers, r-loop 4 found 6, r-loop 5 found 3.
+**Adversarial review loop: 5 spent, cap lifted to 8** (Adnaan 2026-08-18). No
+iteration has gone quiet yet — r-loop 3 found 2 blockers, r-loop 4 found 6 (five of
+them regressions from r-loop 3's own fixes), r-loop 5 found 3. Iterations 6–8 are
+authorised but NOT mandatory: **stop at the first quiet one** — see §7, where
+"quiet" is pre-registered.
 
 ---
 
