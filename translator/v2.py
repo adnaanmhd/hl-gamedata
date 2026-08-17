@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import csv
 import json
+import os
 import re
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -358,7 +359,12 @@ def translate_bundle_v2(bundle_dir: Path, out_root: Path, *,
         report = {}
     report[session_id] = {**sync_report, "shift_us": shift_us,
                           "out_dir": str(out_dir)}
-    report_path.write_text(json.dumps(report, indent=2))
+    # atomic tmp+replace (matching validate._locked_report_update's
+    # discipline): a bare write_text tears the shared file under
+    # concurrent readers, and qa reads it unlocked (r-loop 1)
+    tmp = report_path.with_suffix(f".json.tmp{os.getpid()}")
+    tmp.write_text(json.dumps(report, indent=2))
+    os.replace(tmp, report_path)
 
     if shift_us:
         sync_dq = (f"corrected {sync_report['applied_shift_ms']:+.1f}ms "
@@ -428,19 +434,41 @@ def _check_session_json(s: dict, r: V2Result) -> None:
         r.fail(f"session.json missing required fields: {missing}")
         return
     for k in ("created_at_utc", "ended_at_utc"):
-        if not _TS_RE.match(s[k]):
+        if not isinstance(s[k], str) or not _TS_RE.match(s[k]):
             r.fail(f"session.json {k} not timezone-aware ISO 8601: {s[k]!r}")
-    created = datetime.fromisoformat(s["created_at_utc"].replace("Z", "+00:00"))
-    ended = datetime.fromisoformat(s["ended_at_utc"].replace("Z", "+00:00"))
-    if ended <= created:
-        r.fail("ended_at_utc <= created_at_utc")
-    if abs(s["duration_ms"] / 1000.0 - s["duration_seconds"]) > 1.0:
-        r.fail("duration_ms/1000 differs from duration_seconds by > 1s")
-    if abs((ended - created).total_seconds() - s["duration_ms"] / 1000.0) > 1.0:
-        r.fail("duration_ms inconsistent with ended-created (> 1s)")
-    if abs(s["frame_count"] - s["fps"] * s["duration_seconds"]) > 2:
-        r.fail("frame_count differs from fps*duration_seconds by > 2 frames")
-    if not _LOC_RE.match(s["localization"]):
+    # guarded parses/arithmetic: a checker must FAIL on malformed input,
+    # never crash — an unhandled ValueError/TypeError here quarantined the
+    # session as "validation crashed" instead of rejecting it with a real
+    # reason the fix registry can act on (r-loop 1)
+    created = ended = None
+    try:
+        created = datetime.fromisoformat(
+            s["created_at_utc"].replace("Z", "+00:00"))
+        ended = datetime.fromisoformat(
+            s["ended_at_utc"].replace("Z", "+00:00"))
+    except (ValueError, TypeError, AttributeError):
+        r.fail("session.json timestamps unparseable")
+    if created is not None and ended is not None:
+        try:
+            if ended <= created:
+                r.fail("ended_at_utc <= created_at_utc")
+        except TypeError:
+            r.fail("session.json timestamps mix naive and aware")
+            created = ended = None
+    try:
+        if abs(s["duration_ms"] / 1000.0 - s["duration_seconds"]) > 1.0:
+            r.fail("duration_ms/1000 differs from duration_seconds by > 1s")
+        if created is not None and ended is not None and \
+                abs((ended - created).total_seconds()
+                    - s["duration_ms"] / 1000.0) > 1.0:
+            r.fail("duration_ms inconsistent with ended-created (> 1s)")
+        if abs(s["frame_count"] - s["fps"] * s["duration_seconds"]) > 2:
+            r.fail("frame_count differs from fps*duration_seconds "
+                   "by > 2 frames")
+    except (TypeError, ValueError):
+        r.fail("session.json numeric fields malformed (non-numeric type)")
+    if not isinstance(s["localization"], str) \
+            or not _LOC_RE.match(s["localization"]):
         r.fail(f"localization not BCP 47 per spec pattern: {s['localization']!r}")
     if s["platform"] not in _PLATFORMS:
         r.fail(f"platform not in spec enum: {s['platform']!r}")
@@ -479,8 +507,23 @@ def check_session_v2(session_dir: Path, raw_bundle: Path | None = None) -> V2Res
     if r.status == "FAIL":
         return r
 
-    s = json.loads((session_dir / "session.json").read_text())
+    try:
+        s = json.loads((session_dir / "session.json").read_text())
+    except (json.JSONDecodeError, UnicodeDecodeError, OSError) as e:
+        r.fail(f"session.json unreadable: {type(e).__name__}")
+        return r
+    if not isinstance(s, dict):
+        r.fail("session.json is not a JSON object")
+        return r
     _check_session_json(s, r)
+    # downstream cross-checks dereference these numerics directly; after
+    # the type FAILs above, normalize malformed values so a broken upload
+    # yields a FAIL verdict instead of a checker crash (r-loop 1)
+    for k in ("duration_ms", "duration_seconds", "fps", "frame_count",
+              "record_width_px", "record_height_px"):
+        if isinstance(s.get(k), bool) or \
+                not isinstance(s.get(k), (int, float)):
+            s[k] = 0
 
     with (session_dir / "frames.csv").open(newline="") as f:
         reader = csv.reader(f)
@@ -495,10 +538,18 @@ def check_session_v2(session_dir: Path, raw_bundle: Path | None = None) -> V2Res
     # structure
     if len(rows) != s.get("frame_count"):
         r.fail(f"row count {len(rows)} != session.json frame_count {s.get('frame_count')}")
-    fids = [int(x[col["frame_id"]]) for x in rows]
+    try:
+        fids = [int(x[col["frame_id"]]) for x in rows]
+    except (ValueError, IndexError):
+        r.fail("frame_id column unparseable (non-integer or short row)")
+        return r
     if fids != list(range(len(rows))):
         r.fail("frame_id not zero-based sequential")
-    ts = [int(x[col["timestamp_ms"]]) for x in rows]
+    try:
+        ts = [int(x[col["timestamp_ms"]]) for x in rows]
+    except (ValueError, IndexError):
+        r.fail("timestamp_ms column unparseable (non-integer or short row)")
+        return r
     if any(b <= a for a, b in zip(ts, ts[1:])):
         r.fail("timestamp_ms not strictly increasing")
     frame_iv = 1000.0 / s["fps"] if s.get("fps") else 0.0

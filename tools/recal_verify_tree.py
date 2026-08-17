@@ -38,7 +38,24 @@ REMOTE = "drive-deliver:"
 
 
 def main() -> int:
+    """HOLDS the run lock (r-loop 1): run against a LIVE driver, any
+    session delivered between the ledger snapshot and the 30-min remote
+    listing would be branded 'STALE remote dir' — a class the endgame's
+    step-8 cleanup treats as deletable. Pause the driver first; the lock
+    makes that mandatory instead of aspirational."""
+    from pipeline.run import acquire_lock, release_lock
     cfg = C.load()
+    if not acquire_lock(cfg):
+        print("ABORT: run lock held — stop the driver "
+              "(hl-continuous.service / hl-pipeline.timer) first")
+        return 2
+    try:
+        return _locked_main(cfg)
+    finally:
+        release_lock(cfg)
+
+
+def _locked_main(cfg) -> int:
     ledger = Ledger(cfg.ledger_path)
     defects: list[str] = []
     notes: list[str] = []

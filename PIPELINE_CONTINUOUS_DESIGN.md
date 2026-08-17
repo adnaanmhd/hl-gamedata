@@ -65,9 +65,22 @@ the scoping airtight where the batch driver relied on batch membership.
   ledger-driven, not discovery-driven, by construction.
 - **V dispatcher** picks, in priority order: (1) FIX_QUEUED (immediacy ruling —
   includes U's gate-fail hand-backs), (2) FIXING/REVALIDATING/VALIDATING
-  (crash-resume triage), (3) INGESTED FIFO, (4) HOLD_VLM whose 30-min cooldown
-  expired. It acquires one autoscale-gate slot (blocking), claims the sid, and
-  submits a **session runner**.
+  (crash-resume triage), (3) HOLD_VLM whose 30-min cooldown expired — BEFORE
+  fresh intake, or a steady INGESTED stream starves held sessions (ruling 6 /
+  review-r4 #9; the 30-min cooldown bounds HOLD's share of dispatch),
+  (4) INGESTED FIFO. It acquires one autoscale-gate slot (blocking), claims
+  the sid, and submits a **session runner**.
+- **Every lane loop is iteration-guarded** (`_lane_loop`): an exception that
+  escapes the per-sid handlers alerts (TTL-deduped), reopens the lane's
+  ledger connection, pauses one idle interval, and continues. A dead lane in
+  an always-on process is permanent loss with a healthy-looking heartbeat —
+  the batch driver's 30-min process exit was the backstop this process no
+  longer has (r-loop 1 blocker).
+- **D resumes DOWNLOADING rows first** (they are already inside the media
+  cap; rclone is idempotent), then picks fresh DISCOVERED. The
+  DISCOVERED→DOWNLOADING transition commits INSIDE the intake lock, so a
+  scan pass can never see a D-claimed sid as still-clobberable (cross-dup
+  un-pick race).
 - **A session runner** drives ONE session through the whole V domain in a loop,
   holding its slot until the session leaves the domain:
   `validate → {READY | HOLD_VLM | REJECTED | FIX_QUEUED}`;
@@ -183,10 +196,14 @@ every job at submit (dequeue-time, not plan-time — no staleness), max absorbed
 from every result (today's semantics, tightened by per-future submission).
 **Reset rule: the rung drops back to 0 after `CONT_RUNG_QUIET_RESET_MIN = 60`
 minutes with zero pressure-file activity and zero worker-reported climbs.**
-This is the continuous analogue of "next run resets to 3.7": a run boundary
-meant "quota trouble is presumed over"; sixty quiet minutes now carries that
-presumption. Reset is logged and surfaces in the next digest. Driver restart
-also resets to rung 0 (today's kill behavior, kept deliberately).
+A climb is **reported > injected** for that job — never a comparison against
+the driver's current rung: workers echo max(injected, climbed), so a stale
+in-flight job finishing after a quiet-period reset must not resurrect the
+rung or re-stamp the climb clock (r-loop 1). This is the continuous analogue
+of "next run resets to 3.7": a run boundary meant "quota trouble is presumed
+over"; sixty quiet minutes now carries that presumption. Reset is logged and
+surfaces in the next digest. Driver restart also resets to rung 0 (today's
+kill behavior, kept deliberately).
 
 ## 5. Fix & HOLD_VLM scheduling
 
@@ -203,8 +220,8 @@ also resets to rung 0 (today's kill behavior, kept deliberately).
   arbitration against fresh intake.
 - Anti-spin generally: the batch driver's `attempted` set (once per run)
   becomes per-failure-class cooldowns: transient download 5 min, upload
-  failure 10 min, HOLD_VLM 30 min. Same retry-forever semantics as the 30-min
-  tick, with explicit pacing.
+  failure 10 min, session-runner crash 5 min, HOLD_VLM 30 min. Same
+  retry-forever semantics as the 30-min tick, with explicit pacing.
 
 ## 6. Dup ordering under 5-min polls (documented semantics)
 
@@ -259,7 +276,15 @@ adjudicated in one pass, so ordering inside a poll is deterministic.
   plain totals line (pace.compute degenerates past the deadline).
 - **Daily payment + folder-issues**: UNCHANGED functions, called from H only
   (single-threaded trigger — concurrency race class closed). Stamps→anchor→
-  marker ordering untouched.
+  marker ordering untouched. **`CONT_DAILY_REPORTS` is the payment-endgame
+  interlock** (r-loop 1 blocker): every rebuild-era root is unstamped, so
+  one post-flip daily send's late-arrival guard would pull the whole cohort
+  into one day's sheet, stamp it, misattribute the hours AND deadlock
+  `recal_regen_sheets`' stray-stamp gate. The flip deploys it False; set
+  True (+ redeploy + restart) only after the regen `--send` completes.
+- The digest's window line also counts new quarantines; the stuck list
+  excludes DISCOVERED (cap-throttled intake is normal) and ages HOLD_VLM
+  from its FIRST hold event (each 30-min retry refreshes `updated_at`).
 - **Alerts**: same `⚠️` surfaces; dedup becomes TTL-based
   (`CONT_ALERT_DEDUP_MIN = 60`, pruned) — a forever-process must re-raise
   persisting conditions and must not grow an unbounded sent-list.
@@ -337,11 +362,31 @@ floor 8) · `CONT_AUTOSCALE_INTERVAL_S=60` · `CONT_CPU_HIGH=85` ·
 
 ## 12. Small hardening deltas ridden along (each justified by always-on)
 
-- `scanner.py`: kill the ffmpeg child on decode timeout (today's
-  `p.wait(timeout)` leaks it; a 30-min process exit no longer cleans up).
+- `scanner.py`: the decode deadline is enforced on the READ loop itself
+  (select + os.read; a stalled decoder blocks a naive read() forever and a
+  wait()-timeout never fires while it does), and the ffmpeg child is killed
+  on expiry — a leaked/wedged decoder accumulates forever in an always-on
+  process.
 - `validate.py`: `_locked_report_update` lock patience scales with the pool
   band (the ~5 s give-up-and-write-anyway fallback was sized for 8 workers;
   at ~44 it re-opens the lost-update window).
+- `cutter.py`/`fix.py`/`translator/video.py`: every ffmpeg/ffprobe call is
+  timeout-bounded — a wedged helper must surface as a fix failure, never pin
+  a runner slot forever.
+- `translator/v2.py`: malformed session.json / frames.csv yields FAIL
+  verdicts, never checker crashes (a crash misclassifies the session as
+  "validation crashed" → QUARANTINED instead of an actionable reject);
+  `translate_bundle_v2`'s shared-report write is atomic tmp+replace.
+- On an unclean stop (threads outlive the drain grace) the run lock is
+  deliberately KEPT — pid-reclaim by the next starter is the safe path;
+  releasing it over live writer threads would let a second driver run
+  against concurrent writes.
+- The flip-time tools (`recal_refix_reset`, `recal_regen_sheets`,
+  `recal_verify_tree`) ACQUIRE the run lock for their whole duration —
+  a bare existence check left a TOCTOU where systemd Restart=always could
+  start the driver mid-tool. `recal_regen_sheets`' stray-stamp gate is
+  cohort-scoped (post-hi16 roots stamped by normal dailies never block the
+  endgame; a stamped COHORT root aborts loudly for human reconcile).
 - Digest/daily windows use `[lo, hi)` with persisted `hi` → seconds-granular
   timestamps never double-count boundary rows.
 

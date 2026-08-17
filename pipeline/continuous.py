@@ -50,6 +50,12 @@ LOCAL_STATES = ("DOWNLOADING", "INGESTED", "VALIDATING", "FIX_QUEUED",
 V_DEPTH_STATES = ("INGESTED", "VALIDATING", "FIX_QUEUED", "FIXING",
                   "REVALIDATING")
 
+# Test seams for _validate_one: the real path runs _WORKER_FN in a fresh
+# single-job spawn subprocess (monkeypatches cannot cross that boundary);
+# tests set _POOL_DISABLED=True to run the (possibly faked) worker inline.
+_WORKER_FN = runmod._validate_worker
+_POOL_DISABLED = False
+
 
 # ------------------------------------------------------------ primitives
 
@@ -310,14 +316,25 @@ class ContinuousDriver:
             self.alerts.alert(f"disk under {C.DISK_LOW_WATER_GB} GB free — "
                               f"downloads paused (F7)")
             return None
-        if self._local_count(led) >= C.CONT_MEDIA_CAP_SESSIONS:
-            return None                    # cap reached; V/U keep draining
         with self.intake_lock:
             exclude = self.own.snapshot() | self.cool.blocked()
+            # kill-resume first: DOWNLOADING rows are already inside the
+            # media cap (LOCAL_STATES counts them) and rclone re-downloads
+            # idempotently — without this they orphan forever (r-loop 1)
+            for r in led.by_state("DOWNLOADING"):
+                sid = r["session_id"]
+                if sid not in exclude and self.own.claim(sid):
+                    return sid
+            if self._local_count(led) >= C.CONT_MEDIA_CAP_SESSIONS:
+                return None                # cap gates NEW intake only
             sids = ingest.next_batch(led, size=1, exclude=exclude)
             if not sids:
                 return None
             if self.own.claim(sids[0]):
+                # commit DOWNLOADING INSIDE the intake lock: a scan pass
+                # must never see this sid as still-clobberable DISCOVERED
+                # while D proceeds (cross-dup un-pick race, r-loop 1)
+                led.set_state(sids[0], "DOWNLOADING", "claimed by D")
                 return sids[0]
             return None
 
@@ -362,33 +379,60 @@ class ContinuousDriver:
             self.alerts.alert(f"download crashed for {sid}: "
                               f"{type(e).__name__}: {e}")
 
-    def _download_thread(self) -> None:
-        led = Ledger(self.cfg.ledger_path)
+    def _lane_loop(self, name: str, body) -> None:
+        """Run body(led) per iteration under a guard that can NEVER kill
+        the lane: an always-on process turns a dead thread into permanent
+        loss of that lane while H keeps digesting healthily (r-loop 1
+        blocker — the batch driver's 30-min process exit was the backstop
+        this process no longer has). On any escape: alert (TTL-deduped),
+        reopen the ledger connection (an OperationalError may have a
+        poisoned transaction behind it), pause one idle interval, go on."""
+        led = None
         try:
             while not self.stop.is_set():
-                sid = self._pick_download(led)
-                if sid is None:
-                    self.stop.wait(C.CONT_DISPATCH_IDLE_S)
-                    continue
                 try:
-                    self._download_one(led, sid)
-                finally:
-                    self.own.release(sid)
-        except Exception as e:
-            self.alerts.alert(f"download thread crashed: "
-                              f"{type(e).__name__}: {e}")
+                    if led is None:
+                        led = Ledger(self.cfg.ledger_path)
+                    body(led)
+                except Exception as e:
+                    self.alerts.alert(
+                        f"{name} lane iteration failed (lane continues): "
+                        f"{type(e).__name__}: {e}")
+                    if led is not None:
+                        try:
+                            led.close()
+                        except Exception:
+                            pass
+                        led = None
+                    self.stop.wait(C.CONT_DISPATCH_IDLE_S)
         finally:
-            led.close()
+            if led is not None:
+                led.close()
+
+    def _download_thread(self) -> None:
+        def body(led: Ledger) -> None:
+            sid = self._pick_download(led)
+            if sid is None:
+                self.stop.wait(C.CONT_DISPATCH_IDLE_S)
+                return
+            try:
+                self._download_one(led, sid)
+            finally:
+                self.own.release(sid)
+        self._lane_loop("download", body)
 
     # ------------------------------------------------- V: session runners
     def _pick_v(self, led: Ledger) -> str | None:
         """Priority: (1) FIX_QUEUED — immediacy ruling, includes U's
-        gate-fail hand-backs; (2) crash-resume triage states; (3) fresh
-        INGESTED, FIFO; (4) HOLD_VLM whose 30-min cooldown expired."""
+        gate-fail hand-backs; (2) crash-resume triage states; (3) HOLD_VLM
+        whose 30-min cooldown expired — BEFORE fresh intake, or a steady
+        INGESTED stream starves held sessions indefinitely (ruling 6 /
+        review-r4 #9, re-found by r-loop 1; the 30-min cooldown bounds how
+        much dispatch HOLD can consume); (4) fresh INGESTED, FIFO."""
         for states in (("FIX_QUEUED",),
                        ("FIXING", "REVALIDATING", "VALIDATING"),
-                       ("INGESTED",),
-                       ("HOLD_VLM",)):
+                       ("HOLD_VLM",),
+                       ("INGESTED",)):
             for r in led.by_state(*states):
                 sid = r["session_id"]
                 if not self.cool.ready(sid):
@@ -398,35 +442,36 @@ class ContinuousDriver:
         return None
 
     def _v_dispatcher(self) -> None:
-        led = Ledger(self.cfg.ledger_path)
-        try:
-            while not self.stop.is_set():
-                if not self.gate.acquire(self.stop):
-                    break                          # stopping
+        def body(led: Ledger) -> None:
+            if not self.gate.acquire(self.stop):
+                return                             # stopping
+            handed_off = False
+            sid = None
+            try:
                 sid = self._pick_v(led)
                 if sid is None:
-                    self.gate.release()
                     self.stop.wait(C.CONT_DISPATCH_IDLE_S)
-                    continue
-                try:
-                    self.runner_pool.submit(self._session_runner, sid)
-                except RuntimeError:               # pool shut down
+                    return
+                self.runner_pool.submit(self._session_runner, sid)
+                handed_off = True                  # runner owns slot+claim
+            finally:
+                if not handed_off:
                     self.gate.release()
-                    self.own.release(sid)
-                    break
-        except Exception as e:
-            self.alerts.alert(f"validation dispatcher crashed: "
-                              f"{type(e).__name__}: {e}")
-        finally:
-            led.close()
+                    if sid is not None:
+                        self.own.release(sid)
+        self._lane_loop("validation dispatcher", body)
 
     def _session_runner(self, sid: str) -> None:
         """Drive ONE session through the whole V domain, holding its gate
         slot until it leaves — validate → fix → revalidate cycles happen
         here, immediately, which is what makes the parked-fix-tail class
         structurally impossible."""
-        led = Ledger(self.cfg.ledger_path)
+        led = None
         try:
+            # ctor INSIDE the try: a Ledger() failure here previously
+            # leaked the gate slot + ownership forever (the pool swallows
+            # the exception — r-loop 1)
+            led = Ledger(self.cfg.ledger_path)
             while not self.stop.is_set():
                 row = led.get(sid)
                 if row is None:
@@ -453,10 +498,27 @@ class ContinuousDriver:
         except Exception as e:
             self.alerts.alert(f"session runner crashed on {sid}: "
                               f"{type(e).__name__}: {e}")
+            # crash cooldown: the state is unchanged (priority-2 triage
+            # class), so without this the dispatcher re-claims instantly
+            # and a persistent pre-subprocess fault hot-spins events
+            self.cool.set(sid, C.CONT_RUNNER_CRASH_RETRY_MIN * 60)
         finally:
-            led.close()
+            if led is not None:
+                led.close()
             self.own.release(sid)
             self.gate.release()
+
+    def _drop_shift_entry(self, sid: str) -> None:
+        """Design §7: terminal wipe drops the sid's entry in the shared
+        work-root translation_report.json (DELIVERED/REJECTED entries are
+        dropped by deliver.py's wipe sites; SPLIT parents here — children
+        received their own copies at cut time via _propagate_shift_record)."""
+        try:
+            from .validate import _locked_report_remove
+            _locked_report_remove(
+                self.cfg.work / "translation_report.json", sid)
+        except Exception as e:
+            print(f"[shift-drop-failed] {sid}: {e}", file=sys.stderr)
 
     def _finalize_reject(self, led: Ledger, sid: str) -> None:
         """Per-session terminal hook (replaces the batch close-out sweep)."""
@@ -483,16 +545,23 @@ class ContinuousDriver:
                "gemini_model": self.cfg.gemini_model,
                "vlm_rung": self.current_rung(),
                "pressure_path": str(self.pressure_path)}
-        ctx = multiprocessing.get_context("spawn")
-        try:
-            with concurrent.futures.ProcessPoolExecutor(
-                    max_workers=1, mp_context=ctx) as ex:
-                res = list(ex.map(runmod._validate_worker, [job]))[0]
-        except concurrent.futures.process.BrokenProcessPool:
-            res = {"sid": sid,
-                   "error": "validation worker died (native crash "
-                            "decoding this session)"}
-        if "vlm_rung" in res:
+        if _POOL_DISABLED:
+            res = _WORKER_FN(job)          # test hook: in-process worker
+        else:
+            ctx = multiprocessing.get_context("spawn")
+            try:
+                with concurrent.futures.ProcessPoolExecutor(
+                        max_workers=1, mp_context=ctx) as ex:
+                    res = list(ex.map(_WORKER_FN, [job]))[0]
+            except concurrent.futures.process.BrokenProcessPool:
+                res = {"sid": sid,
+                       "error": "validation worker died (native crash "
+                                "decoding this session)"}
+        # TRUE climbs only: the worker echoes max(injected, climbed)
+        # (run.py:129), so comparing against the CURRENT driver rung let a
+        # stale in-flight job resurrect the rung right after a quiet-period
+        # reset and re-stamp _climb_ep forever (r-loop 1)
+        if int(res.get("vlm_rung", 0)) > job["vlm_rung"]:
             self.absorb_rung(int(res["vlm_rung"]))
         if "error" in res:
             led.set_state(sid, "QUARANTINED",
@@ -538,6 +607,7 @@ class ContinuousDriver:
             shutil.rmtree(self.cfg.work / sid, ignore_errors=True)
             (self.cfg.work / f"{sid}.split-manifest.json").unlink(
                 missing_ok=True)          # only after the SPLIT commit
+            self._drop_shift_entry(sid)   # children got their own copies
             return False                  # children are INGESTED rows now
         led.set_state(sid, "REVALIDATING",
                       "mid-fix crash — re-deriving fix plan")
@@ -616,6 +686,7 @@ class ContinuousDriver:
             shutil.rmtree(work, ignore_errors=True)
             (self.cfg.work / f"{sid}.split-manifest.json").unlink(
                 missing_ok=True)
+            self._drop_shift_entry(sid)   # children got their own copies
             return False
         led.set_state(sid, "REVALIDATING", "fixes applied")
         return True
@@ -673,22 +744,16 @@ class ContinuousDriver:
         self.alerts.alert(f"upload failed for {sid}: {out.detail}")
 
     def _upload_thread(self) -> None:
-        led = Ledger(self.cfg.ledger_path)
-        try:
-            while not self.stop.is_set():
-                sid = self._pick_upload(led)
-                if sid is None:
-                    self.stop.wait(C.CONT_DISPATCH_IDLE_S)
-                    continue
-                try:
-                    self._deliver_one(led, sid)
-                finally:
-                    self.own.release(sid)
-        except Exception as e:
-            self.alerts.alert(f"upload thread crashed: "
-                              f"{type(e).__name__}: {e}")
-        finally:
-            led.close()
+        def body(led: Ledger) -> None:
+            sid = self._pick_upload(led)
+            if sid is None:
+                self.stop.wait(C.CONT_DISPATCH_IDLE_S)
+                return
+            try:
+                self._deliver_one(led, sid)
+            finally:
+                self.own.release(sid)
+        self._lane_loop("upload", body)
 
     # ------------------------------------------------- H: housekeeping
     def _cpu_pct(self) -> float | None:
@@ -802,24 +867,38 @@ class ContinuousDriver:
         return runmod._batch_fallback_count(self.cfg, sids)
 
     def _stuck_lines(self, led: Ledger) -> tuple[list[str], int]:
-        cut = (self.clk.utcnow()
-               - timedelta(hours=C.CONT_STUCK_H)).isoformat(
-                   timespec="seconds")
+        """Stuck = non-terminal, unchanged > CONT_STUCK_H. DISCOVERED is
+        excluded (cap-throttled intake is normal, not stuck — the digest's
+        undownloaded count already shows it). HOLD_VLM ages from the FIRST
+        HOLD event: each 30-min retry refreshes updated_at, which would
+        otherwise hide a permanently-held session forever (r-loop 1)."""
+        now = self.clk.utcnow()
+        cut = (now - timedelta(hours=C.CONT_STUCK_H)).isoformat(
+            timespec="seconds")
         rows = led.db.execute(
             "SELECT session_id, state, updated_at FROM sessions WHERE "
             "state NOT IN ('DELIVERED','REJECTED','SPLIT','DUPLICATE',"
-            "'QUARANTINED') AND updated_at<? ORDER BY updated_at",
-            (cut,)).fetchall()
+            "'QUARANTINED','DISCOVERED','HOLD_VLM') AND updated_at<? "
+            "ORDER BY updated_at", (cut,)).fetchall()
+        held = led.db.execute(
+            "SELECT s.session_id, s.state, "
+            "(SELECT MIN(ts) FROM events e WHERE e.session_id=s.session_id"
+            " AND e.to_state='HOLD_VLM') first_hold "
+            "FROM sessions s WHERE s.state='HOLD_VLM'").fetchall()
+        stuck = [(r["session_id"], r["state"], r["updated_at"])
+                 for r in rows]
+        for r in held:
+            if r["first_hold"] and r["first_hold"] < cut:
+                stuck.append((r["session_id"], "HOLD_VLM", r["first_hold"]))
         out = []
-        for r in rows[:5]:
+        for sid, state, since in stuck[:5]:
             try:
-                age_h = (self.clk.utcnow()
-                         - datetime.fromisoformat(r["updated_at"])
+                age_h = (now - datetime.fromisoformat(since)
                          ).total_seconds() / 3600.0
             except (ValueError, TypeError):
                 age_h = 0.0
-            out.append(f"{r['session_id']} ({r['state']} {age_h:.1f}h)")
-        return out, len(rows)
+            out.append(f"{sid} ({state} {age_h:.1f}h)")
+        return out, len(stuck)
 
     def _send_digest(self, led: Ledger) -> None:
         win = self._digest_window()
@@ -840,6 +919,10 @@ class ContinuousDriver:
             f"SELECT reasons_json FROM sessions WHERE state='REJECTED' AND "
             f"{reports.REJECT_TS}>=? AND {reports.REJECT_TS}<?",
             (lo, hi)).fetchall()
+        quar_n = led.db.execute(
+            "SELECT COUNT(DISTINCT session_id) n FROM events WHERE "
+            "to_state='QUARANTINED' AND ts>=? AND ts<?",
+            (lo, hi)).fetchone()["n"]
         label_lists = []
         for r in rej_rows:
             try:
@@ -865,6 +948,7 @@ class ContinuousDriver:
                 "FIX_QUEUED", "FIXING", "REVALIDATING")),
             backlog_hold=counts.get("HOLD_VLM", 0),
             incomplete=len(led.incomplete_list()),
+            quarantined_n=quar_n,
             on_fallback=self._fallback_count(led, lo, hi),
             pool_target=self.gate.target, pool_active=self.gate.active,
             vlm_rung=self.current_rung(),
@@ -895,8 +979,17 @@ class ContinuousDriver:
                         next_scale = now + C.CONT_AUTOSCALE_INTERVAL_S
                     if self.send_telegram:
                         self._send_digest(led)
-                        runmod.send_daily_report_if_due(self.cfg, led)
-                        runmod.send_folder_issues_if_due(self.cfg, led)
+                        # CONT_DAILY_REPORTS is the payment-endgame
+                        # interlock: with every rebuild-era root unstamped
+                        # (recal_rebuild_reset nulled uploaded_reported_at),
+                        # one daily send's late-arrival guard would pull the
+                        # WHOLE cohort into one day's sheet, stamp it, and
+                        # both misattribute the hours and deadlock
+                        # recal_regen_sheets' stray-stamp gate (r-loop 1).
+                        # The flip deploys False; True again after regen.
+                        if C.CONT_DAILY_REPORTS:
+                            runmod.send_daily_report_if_due(self.cfg, led)
+                            runmod.send_folder_issues_if_due(self.cfg, led)
                     if now >= next_sweep:
                         led.backup_daily(self.cfg.backups,
                                          keep=C.LEDGER_BACKUP_KEEP)
@@ -951,7 +1044,12 @@ class ContinuousDriver:
                     return False
         return True
 
-    def shutdown(self) -> None:
+    def shutdown(self) -> bool:
+        """Returns True when every thread stopped inside the grace window.
+        False = threads may still be writing the ledger; the caller must
+        NOT release the run lock (a second driver could then start against
+        live writes — r-loop 1); the stale lock is pid-reclaimed by the
+        next starter once this process is truly dead."""
         self.stop.set()
         deadline = self.clk.mono() + C.CONT_DRAIN_GRACE_S
         for t in self.threads:
@@ -961,7 +1059,9 @@ class ContinuousDriver:
         alive = [t.name for t in self.threads if t.is_alive()]
         if alive:
             print(f"[shutdown] threads still alive after grace: {alive} — "
-                  f"exiting anyway (kill-safe by design)", file=sys.stderr)
+                  f"exiting anyway (kill-safe by design); run lock kept "
+                  f"for pid-reclaim", file=sys.stderr)
+        return not alive
 
 
 def run_continuous(cfg: C.Config, *, dest_prefix: str = C.VENDOR,
@@ -981,6 +1081,7 @@ def run_continuous(cfg: C.Config, *, dest_prefix: str = C.VENDOR,
         print("run lock held — another driver is live; refusing to start",
               file=sys.stderr)
         return 1
+    clean_stop = True
     drv = ContinuousDriver(cfg, dest_prefix=dest_prefix,
                            send_telegram=send_telegram, clocks=clocks)
     if install_signals:
@@ -1016,6 +1117,7 @@ def run_continuous(cfg: C.Config, *, dest_prefix: str = C.VENDOR,
         print(f"[continuous] started: pool {C.CONT_POOL_MIN}.."
               f"{C.CONT_POOL_MAX}, scan {C.CONT_SCAN_INTERVAL_S}s, "
               f"cap {C.CONT_MEDIA_CAP_SESSIONS}, states {dict(counts)}")
+        clean_stop = False               # threads about to go live
         drv.start()
         t0 = drv.clk.mono()
         idle_streak = 0
@@ -1031,8 +1133,14 @@ def run_continuous(cfg: C.Config, *, dest_prefix: str = C.VENDOR,
                 if idle_streak >= 3:
                     print("[continuous] idle — stopping (--until-idle)")
                     break
-        drv.shutdown()
+        clean_stop = drv.shutdown()
         led.close()
         return 0
     finally:
-        runmod.release_lock(cfg)
+        if not clean_stop and drv.threads:
+            # exception path after start(): still attempt a graceful stop
+            clean_stop = drv.shutdown()
+        # never release the lock over live writer threads: leave it stale
+        # for pid-based reclaim once this process actually dies
+        if clean_stop:
+            runmod.release_lock(cfg)

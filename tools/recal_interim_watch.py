@@ -43,10 +43,21 @@ def send(msg: str) -> None:
 send(f"👁 interim watcher live on the VM (survives Mac session closes): "
      f"3h digests until the rebuild ends. Now: {counts()}")
 last = time.time()
-while rebuild_active():
-    time.sleep(300)
-    if time.time() - last >= 3 * 3600:
-        last = time.time()
-        send(f"⏱ rebuild digest: {counts()}")
+inactive_streak = 0
+# one is-active sample also reads false during 'activating'/'deactivating'
+# or a restart backoff window — a single sample sent a false REBUILD ENDED
+# and exited permanently (r-loop 1). Require 3 consecutive inactive reads
+# ~30 s apart before declaring the run over.
+while inactive_streak < 3:
+    if rebuild_active():
+        inactive_streak = 0
+        time.sleep(300)
+        if time.time() - last >= 3 * 3600:
+            last = time.time()
+            send(f"⏱ rebuild digest: {counts()}")
+    else:
+        inactive_streak += 1
+        if inactive_streak < 3:
+            time.sleep(30)
 send(f"🏁 REBUILD RUN ENDED — final states: {counts()} — the continuous-"
      f"pipeline session owns the flip + endgame from here")

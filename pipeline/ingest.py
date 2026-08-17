@@ -388,8 +388,9 @@ def scan(cfg: C.Config, ledger: Ledger,
                         f"{ds.session_id}: re-upload with different md5 while "
                         f"state={existing['state']} — not superseding "
                         f"(supersede applies after a reject/quarantine only)")
-            elif ds.payload == "zip" \
-                    and existing["state"] in ("REJECTED", "QUARANTINED") \
+            elif existing["state"] in ("REJECTED", "QUARANTINED") \
+                    and (ds.payload == "zip"
+                         or not existing["md5_video"]) \
                     and (total_bytes != (existing["bytes"] or 0)
                          or (ds.ctime or "") >
                          (existing["drive_ctime"] or "")):
@@ -399,10 +400,27 @@ def scan(cfg: C.Config, ledger: Ledger,
                 # (review-r2 #9; QUARANTINED slots included, review-r3
                 # #17 — a bad-archive quarantine is exactly what a
                 # re-upload corrects). Changed bytes or a newer
-                # createdTime is the re-upload signal; the download-time
-                # dedupe re-checks the fresh md5 against everyone else,
-                # so the review-2 #1 side-door stays closed.
-                ledger.supersede(ds.session_id, new_md5="",
+                # createdTime is the re-upload signal. A payload-SWITCH
+                # re-upload — a zip-origin slot (stored md5 empty)
+                # corrected as plain files — lands here too: neither the
+                # md5 branch (needs a stored md5) nor a zip-only condition
+                # could see it, so it was silently ignored forever
+                # (r-loop 1). When the fresh listing DOES carry a video
+                # md5, the review-2 #1 side-door check runs here exactly
+                # as in the md5 branch; zip re-uploads still defer it to
+                # the download-time dedupe.
+                if vmd5:
+                    other = [r for r in ledger.by_md5(vmd5)
+                             if r["session_id"] != ds.session_id
+                             and r["state"] not in ("QUARANTINED",)]
+                    if other:
+                        res.integrity_flags.append(
+                            f"{ds.session_id}: rejected-slot re-upload "
+                            f"carries the same video md5 as "
+                            f"{other[0]['session_id']} — not superseding "
+                            f"(INT_DUP_CROSS)")
+                        continue
+                ledger.supersede(ds.session_id, new_md5=vmd5 or "",
                                  new_bytes=total_bytes,
                                  new_ctime=ds.ctime,
                                  dossier_root=cfg.dossiers)

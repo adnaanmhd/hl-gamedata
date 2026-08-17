@@ -14,6 +14,7 @@ import json
 import random
 import shutil
 import subprocess
+import sys
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -213,6 +214,7 @@ def deliver_session(cfg: C.Config, ledger: Ledger, session_id: str, *,
     shutil.rmtree(cfg.work / session_id, ignore_errors=True)
     shutil.rmtree(cfg.work / f"{session_id}-analysis", ignore_errors=True)
     shutil.rmtree(stage_dir, ignore_errors=True)
+    _drop_shift_entry(cfg, session_id)
     return DeliveryOutcome(session_id, "delivered", hours=hours / 3600.0,
                            rrd_sampled=sampled)
 
@@ -264,6 +266,21 @@ def finalize_rejected(cfg: C.Config, ledger: Ledger,
     ledger.update(session_id, dossier_path=str(dossier))
     shutil.rmtree(cfg.work / session_id, ignore_errors=True)
     shutil.rmtree(cfg.work / f"{session_id}-analysis", ignore_errors=True)
+    _drop_shift_entry(cfg, session_id)
+
+
+def _drop_shift_entry(cfg: C.Config, session_id: str) -> None:
+    """Terminal wipe drops the sid's entry in the shared work-root
+    translation_report.json (continuous design §7): entries surviving the
+    session forever both grow the file unboundedly under 24/7 operation
+    and pre-poison any future same-sid re-upload path that skips the
+    supersede hook. Best-effort — never fails the delivery/reject."""
+    try:
+        from .validate import _locked_report_remove
+        _locked_report_remove(cfg.work / "translation_report.json",
+                              session_id)
+    except Exception as e:
+        print(f"[shift-drop-failed] {session_id}: {e}", file=sys.stderr)
 
 
 def cleanup_test_folder(cfg: C.Config, prefix: str = "_pipeline_test"

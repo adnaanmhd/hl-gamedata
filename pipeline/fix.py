@@ -386,7 +386,7 @@ def fix_remux(work: Path) -> str:
     p = subprocess.run(
         ["ffmpeg", "-y", "-v", "error", "-i", str(src), "-map", "0",
          "-c", "copy", "-movflags", "+faststart", str(tmp)],
-        capture_output=True, text=True)
+        capture_output=True, text=True, timeout=1800)
     if p.returncode != 0 or not tmp.exists():
         tmp.unlink(missing_ok=True)
         raise FixFailed(f"remux failed: {p.stderr.strip()[:200]}")

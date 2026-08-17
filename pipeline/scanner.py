@@ -17,7 +17,10 @@ baseline is this session's own live gameplay, not an absolute constant.
 """
 from __future__ import annotations
 
+import os
+import select
 import subprocess
+import time
 from bisect import bisect_left, bisect_right
 from dataclasses import dataclass
 from pathlib import Path
@@ -87,21 +90,43 @@ def scan_video(video: Path, *, pts_us: list[int] | None = None,
     diffs: list[float] = []
     luma: list[float] = []
     prev = None
+    # deadline covers the WHOLE decode, enforced on the READ loop itself:
+    # a stalled decoder that stops writing but never exits blocks a naive
+    # stdout.read() forever, and only the loop can see that (a wait()
+    # timeout never fires while read() blocks). An always-on driver cannot
+    # afford either the wedge or the leaked ffmpeg (r-loop 1).
+    deadline = time.monotonic() + timeout_s
     try:
         assert p.stdout is not None
-        while True:
-            buf = p.stdout.read(_FRAME_BYTES)
-            if len(buf) < _FRAME_BYTES:
-                break
-            fr = np.frombuffer(buf, dtype=np.uint8).astype(np.int16)
-            luma.append(float(fr.mean()))
-            if prev is not None:
-                diffs.append(float(np.abs(fr - prev).mean()))
-            prev = fr
+        fd = p.stdout.fileno()
+        pending = b""
+        eof = False
+        while not eof:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                p.kill()
+                p.wait()
+                raise subprocess.TimeoutExpired("ffmpeg scan_video",
+                                                timeout_s)
+            ready, _, _ = select.select([fd], [], [], min(remaining, 60.0))
+            if not ready:
+                continue
+            chunk = os.read(fd, 1 << 20)
+            if not chunk:
+                eof = True
+            pending += chunk
+            while len(pending) >= _FRAME_BYTES:
+                buf = pending[:_FRAME_BYTES]
+                pending = pending[_FRAME_BYTES:]
+                fr = np.frombuffer(buf, dtype=np.uint8).astype(np.int16)
+                luma.append(float(fr.mean()))
+                if prev is not None:
+                    diffs.append(float(np.abs(fr - prev).mean()))
+                prev = fr
     finally:
         p.stdout.close()
         try:
-            p.wait(timeout=timeout_s)
+            p.wait(timeout=max(1.0, deadline - time.monotonic()))
         except subprocess.TimeoutExpired:
             # kill the decoder before propagating: an always-on driver
             # (continuous service) never exits, so a leaked ffmpeg from a

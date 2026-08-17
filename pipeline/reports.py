@@ -165,6 +165,7 @@ class DigestStats:
     backlog_fix: int = 0
     backlog_hold: int = 0
     incomplete: int = 0
+    quarantined_n: int = 0        # new quarantines in the window
     on_fallback: int = 0          # R23 flagged verdicts in the window
     pool_target: int = 0
     pool_active: int = 0
@@ -184,6 +185,8 @@ def build_digest_message(d: DigestStats, pace: PaceStatus | None) -> str:
          f"(+{d.delivered_hours:.1f} h) · {d.rejected_n} rejected")
     if d.reject_labels:
         w += f" ({' · '.join(d.reject_labels)})"
+    if d.quarantined_n:
+        w += f" · {d.quarantined_n} quarantined"
     lines.append(w)
     lines.append(
         f"totals: Kamla {d.hours_kamla:.1f}/{C.TARGET_HOURS_PER_GAME:.0f} · "

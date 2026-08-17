@@ -377,17 +377,23 @@ def test_pick_download_media_cap_and_disk(cfg, ledger, monkeypatch):
     _seed(ledger, SID1, state="DISCOVERED")
     _seed(ledger, SID2, state="INGESTED")   # occupies one local slot
     drv = cont.ContinuousDriver(cfg, send_telegram=False)
+    # disk patched HIGH and alerts captured FIRST: on a host under the
+    # 100 GB low-water the first assertion would otherwise pass via the
+    # disk branch (cap unproven) and fire a real Telegram attempt
+    alerts = []
+    monkeypatch.setattr(cont.AlertBook, "alert",
+                        lambda self, text: alerts.append(text))
+    monkeypatch.setattr(deliver, "disk_free_gb", lambda p: 500)
     monkeypatch.setattr(C, "CONT_MEDIA_CAP_SESSIONS", 1)
     assert drv._pick_download(ledger) is None          # cap reached
     monkeypatch.setattr(C, "CONT_MEDIA_CAP_SESSIONS", 5)
     monkeypatch.setattr(deliver, "disk_free_gb", lambda p: 50)
-    alerts = []
-    monkeypatch.setattr(cont.AlertBook, "alert",
-                        lambda self, text: alerts.append(text))
     assert drv._pick_download(ledger) is None          # low water
     assert any("downloads paused" in a for a in alerts)
     monkeypatch.setattr(deliver, "disk_free_gb", lambda p: 500)
     assert drv._pick_download(ledger) == SID1          # FIFO pick + claim
+    # the pick committed DOWNLOADING inside the intake lock (scan-race fix)
+    assert ledger.get(SID1)["state"] == "DOWNLOADING"
     assert drv._pick_download(ledger) is None          # owned now
 
 
@@ -450,13 +456,14 @@ def test_digest_message_format():
         delivered_n=2, delivered_hours=0.42, rejected_n=1,
         reject_labels=["black-frozen"], hours_kamla=29.4, hours_ow=0.0,
         backlog_undownloaded=135, backlog_inflight=45, backlog_fix=99,
-        backlog_hold=0, incomplete=3, on_fallback=1, pool_target=10,
-        pool_active=9, vlm_rung=1, stuck=["sid1 (FIX_QUEUED 8.1h)"],
-        stuck_total=4)
+        backlog_hold=0, incomplete=3, quarantined_n=2, on_fallback=1,
+        pool_target=10, pool_active=9, vlm_rung=1,
+        stuck=["sid1 (FIX_QUEUED 8.1h)"], stuck_total=4)
     msg = reports.build_digest_message(d, None)
     assert msg == (
         "📡 digest 14:05 · last 3.0h\n"
-        "window: 2 delivered (+0.4 h) · 1 rejected (black-frozen)\n"
+        "window: 2 delivered (+0.4 h) · 1 rejected (black-frozen) · "
+        "2 quarantined\n"
         "totals: Kamla 29.4/500 · OW 0.0/500 (Σ 29.4/1000)\n"
         "backlog: 135 undownloaded · 45 in-flight · 99 fix · 0 hold · "
         "3 incomplete\n"
@@ -505,8 +512,9 @@ def test_digest_windows_delivered_and_rejected(cfg, ledger, monkeypatch):
                         lambda _cfg, text: sent.append(text))
     # real wall-clock window: the REJECTED transition's events row is
     # stamped by the ledger with REAL now, so the window must cover it —
-    # hi sits a few seconds ahead because [lo, hi) excludes hi's own second
-    now = datetime.now(UTC) + timedelta(seconds=5)
+    # hi sits WELL ahead ([lo, hi) semantics don't depend on the margin;
+    # a 5 s margin flaked under load, r-loop 1)
+    now = datetime.now(UTC) + timedelta(seconds=60)
     lo = (now - timedelta(hours=3)).isoformat(timespec="seconds")
     (cfg.reports_dir / ".last_digest").write_text(lo)
     # inside the window
@@ -592,6 +600,181 @@ def test_lock_released_after_run(cfg, monkeypatch):
     monkeypatch.setattr(ingest, "list_drive", lambda _cfg: [])
     assert _run(cfg) == 0
     assert not cfg.lock_dir.exists()
+
+
+# ------------------------------------------------- r-loop 1 coverage adds
+
+def test_downloading_row_resumes(cfg, ledger, monkeypatch):
+    """kill -9 mid-download leaves DOWNLOADING; D must re-pick it (rclone
+    is idempotent) — the orphan class from review iteration 1."""
+    _seed(ledger, SID1, state="DOWNLOADING")
+    monkeypatch.setattr(ingest, "list_drive", lambda _cfg: [])
+    _fake_download(monkeypatch)
+    _script_validate(monkeypatch, {SID1: ["READY"]})
+    _fake_deliver(monkeypatch)
+    assert _run(cfg) == 0
+    led = Ledger(cfg.ledger_path)
+    try:
+        assert led.get(SID1)["state"] == "DELIVERED"
+    finally:
+        led.close()
+
+
+def test_hold_picked_before_ingested(cfg, ledger, monkeypatch):
+    """Ruling 6: a cooldown-expired HOLD_VLM session outranks fresh
+    intake — a steady INGESTED stream must not starve it."""
+    _seed(ledger, SID1, state="HOLD_VLM")
+    _seed(ledger, SID2, state="INGESTED",
+          ctime="2026-08-14T09:00:00.000Z")   # earlier ctime, tier lower
+    for s in (SID1, SID2):
+        (cfg.work / s).mkdir(parents=True)
+    monkeypatch.setattr(ingest, "list_drive", lambda _cfg: [])
+    monkeypatch.setattr(C, "CONT_POOL_MIN", 1)
+    monkeypatch.setattr(C, "CONT_POOL_MAX", 1)   # serialize runners
+    log = []
+    _script_validate(monkeypatch, {SID1: ["READY"], SID2: ["READY"]}, log)
+    _fake_deliver(monkeypatch)
+    assert _run(cfg) == 0
+    vals = [e for e in log if e[0] == "val"]
+    assert vals and vals[0][1] == SID1
+
+
+def test_upload_lane_resume_packaged_uploaded(cfg, ledger, monkeypatch):
+    """kill during upload leaves PACKAGED/UPLOADED; U re-picks both and
+    each delivers exactly once (events oracle)."""
+    _seed(ledger, SID1, state="PACKAGED")
+    _seed(ledger, SID2, state="UPLOADED")
+    monkeypatch.setattr(ingest, "list_drive", lambda _cfg: [])
+    _fake_deliver(monkeypatch)
+    assert _run(cfg) == 0
+    led = Ledger(cfg.ledger_path)
+    try:
+        for sid in (SID1, SID2):
+            assert led.get(sid)["state"] == "DELIVERED"
+            n = led.db.execute(
+                "SELECT COUNT(*) n FROM events WHERE session_id=? AND "
+                "to_state='DELIVERED'", (sid,)).fetchone()["n"]
+            assert n == 1
+    finally:
+        led.close()
+
+
+def test_failed_upload_cooldown_keeps_state(cfg, ledger, monkeypatch):
+    _seed(ledger, SID1, state="READY")
+    monkeypatch.setattr(ingest, "list_drive", lambda _cfg: [])
+    log = []
+    _fake_deliver(monkeypatch, outcomes={SID1: ["failed_upload"]}, log=log)
+    alerts = []
+    monkeypatch.setattr(cont.AlertBook, "alert",
+                        lambda self, t: alerts.append(t))
+    assert _run(cfg) == 0                  # cooldown blocks -> idle exit
+    led = Ledger(cfg.ledger_path)
+    try:
+        assert led.get(SID1)["state"] == "READY"   # retryable, kept
+    finally:
+        led.close()
+    assert [e for e in log if e[0] == "up"] == [("up", SID1,
+                                                 "failed_upload")]
+    assert any("upload failed" in a for a in alerts)
+
+
+def test_lane_survives_iteration_exception(cfg, ledger, monkeypatch):
+    """The r-loop 1 blocker: one escaping exception must never kill a
+    lane — the guard alerts, reopens the ledger, and the lane continues."""
+    _seed(ledger, SID1, state="READY")
+    monkeypatch.setattr(ingest, "list_drive", lambda _cfg: [])
+    _fake_deliver(monkeypatch)
+    calls = {"n": 0}
+    orig = cont.ContinuousDriver._pick_upload
+
+    def flaky(self, led):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise RuntimeError("transient ledger hiccup")
+        return orig(self, led)
+    monkeypatch.setattr(cont.ContinuousDriver, "_pick_upload", flaky)
+    alerts = []
+    monkeypatch.setattr(cont.AlertBook, "alert",
+                        lambda self, t: alerts.append(t))
+    assert _run(cfg) == 0
+    led = Ledger(cfg.ledger_path)
+    try:
+        assert led.get(SID1)["state"] == "DELIVERED"
+    finally:
+        led.close()
+    assert any("upload lane iteration failed" in a for a in alerts)
+
+
+def test_rung_injection_and_true_climb_absorb(cfg, ledger, monkeypatch):
+    """Design §4: jobs carry the driver's current rung + pressure path;
+    only reported > INJECTED counts as a climb (a worker echoes
+    max(injected, climbed), so echoes must never re-pin after a reset)."""
+    _seed(ledger, SID1, state="INGESTED")
+    (cfg.work / SID1).mkdir(parents=True)
+    jobs = []
+
+    def climb_worker(job):
+        jobs.append(job)
+        return {"sid": job["sid"], "bin": 1, "hold_vlm": False,
+                "reasons": [], "advisories": [], "engine_verdict": "ok",
+                "vlm_rung": 2, "vlm_fallback": True}
+    monkeypatch.setattr(cont, "_POOL_DISABLED", True)
+    monkeypatch.setattr(cont, "_WORKER_FN", climb_worker)
+    drv = cont.ContinuousDriver(cfg, send_telegram=False)
+    assert drv._validate_one(ledger, SID1, ledger.get(SID1)) == "READY"
+    assert jobs[0]["vlm_rung"] == 0
+    assert jobs[0]["pressure_path"].endswith("vlm-pressure.jsonl")
+    assert drv.current_rung() == 2          # true climb 0->2 absorbed
+    # echo case: injected at rung 2, quiet reset lands mid-flight, worker
+    # echoes 2 -> must NOT resurrect the rung
+    _seed(ledger, SID2, state="INGESTED")
+    (cfg.work / SID2).mkdir(parents=True)
+
+    def echo_worker(job):
+        with drv._rung_lock:
+            drv._rung = 0                   # simulate H's quiet reset
+        return {"sid": job["sid"], "bin": 1, "hold_vlm": False,
+                "reasons": [], "advisories": [], "engine_verdict": "ok",
+                "vlm_rung": job["vlm_rung"], "vlm_fallback": False}
+    monkeypatch.setattr(cont, "_WORKER_FN", echo_worker)
+    assert drv._validate_one(ledger, SID2, ledger.get(SID2)) == "READY"
+    assert drv.current_rung() == 0          # echo did not re-pin
+
+
+def test_autoscale_tick_backpressure_moves_gate(cfg, monkeypatch):
+    monkeypatch.setattr(C, "CONT_POOL_MIN", 8)
+    monkeypatch.setattr(C, "CONT_POOL_MAX", 44)   # band is host-dependent
+    now = [50_000.0]
+    drv = cont.ContinuousDriver(cfg, clocks=cont._Clocks(now=lambda: now[0]))
+    drv.gate.set_target(14)
+    drv._counts = {"INGESTED": 30}
+    p = drv.pressure_path
+    p.parent.mkdir(parents=True, exist_ok=True)
+    with open(p, "a") as f:
+        for i in range(15):
+            f.write(json.dumps({"ts": now[0] - i * 10, "status": 429,
+                                "rung": 0, "tag": "genlang r0"}) + "\n")
+    drv._autoscale_tick()
+    assert drv.gate.target == 14 - C.CONT_STEP_DOWN
+
+
+def test_batches_table_left_byte_identical(cfg, ledger, monkeypatch):
+    """Design §3: leftover open batch rows are the dormant batch driver's
+    ROLLBACK state — the continuous driver must not close or mutate them."""
+    bno = ledger.start_batch(sessions=["ghost-member-sid"])
+    before = dict(ledger.db.execute(
+        "SELECT * FROM batches WHERE batch_no=?", (bno,)).fetchone())
+    _seed(ledger, SID1, state="READY")
+    monkeypatch.setattr(ingest, "list_drive", lambda _cfg: [])
+    _fake_deliver(monkeypatch)
+    assert _run(cfg) == 0
+    led = Ledger(cfg.ledger_path)
+    try:
+        after = dict(led.db.execute(
+            "SELECT * FROM batches WHERE batch_no=?", (bno,)).fetchone())
+    finally:
+        led.close()
+    assert after == before and after["finished"] is None
 
 
 # ------------------------------------------------------------- CLI smoke

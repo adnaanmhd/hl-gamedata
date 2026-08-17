@@ -152,6 +152,13 @@ CONT_UPLOAD_WORKERS = 1           # serial U preserves the R17 15%-floor read
 CONT_STUCK_H = 6.0                # digest stuck-list threshold
 CONT_DOWNLOAD_RETRY_MIN = 5.0     # transient download failure cooldown
 CONT_UPLOAD_RETRY_MIN = 10.0      # upload failure cooldown
+CONT_RUNNER_CRASH_RETRY_MIN = 5.0  # session-runner crash cooldown
+# Payment-endgame interlock: while False the driver sends NO daily payment
+# or folder-issues reports (digest/alerts unaffected). The flip deploys
+# False so a 14:00 IST send can never stamp the unstamped rebuild cohort
+# before recal_regen_sheets.py regenerates the 08-15/08-16 sheets; set
+# True (+ redeploy + restart) right after the regen --send completes.
+CONT_DAILY_REPORTS = True
 CONT_DISPATCH_IDLE_S = 2.0        # dispatcher poll when nothing eligible
 CONT_DRAIN_GRACE_S = 600          # SIGTERM: wait this long for runners
 

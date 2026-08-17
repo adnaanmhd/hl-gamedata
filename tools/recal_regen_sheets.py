@@ -50,7 +50,11 @@ TERMINAL = ("DELIVERED", "REJECTED", "SPLIT", "QUARANTINED", "DUPLICATE")
 
 
 def top_root_ctime(ledger, sid, cache):
-    """Upload time of the top-level recording a row belongs to."""
+    """Upload time of the top-level recording a row belongs to.
+    created_at fallback for blank/unparseable drive_ctime mirrors
+    build_sheet_rows' own windowing fallback — without it the gate and the
+    reject detail go blind to a root the generated sheet includes
+    (r-loop 1)."""
     seen = []
     for _ in range(10):
         if sid in cache:
@@ -60,7 +64,8 @@ def top_root_ctime(ledger, sid, cache):
             cache[sid] = None
             break
         if not row["parent_id"]:
-            cache[sid] = reports._parse_ts(row["drive_ctime"])
+            cache[sid] = (reports._parse_ts(row["drive_ctime"])
+                          or reports._parse_ts(row["created_at"]))
             break
         seen.append(sid)
         sid = row["parent_id"]
@@ -112,11 +117,24 @@ def rewrite_reject_section(md_path: Path, lines: list[str]) -> None:
 
 
 def main() -> int:
-    send = "--send" in sys.argv[1:]
+    """HOLDS the run lock for the tool's whole duration (r-loop 1): the
+    old bare existence check left a TOCTOU where systemd Restart=always
+    could start the continuous driver mid-regeneration. acquire_lock also
+    reclaims a stale lock from a killed driver — exactly the flip state."""
+    from pipeline.run import acquire_lock, release_lock
     cfg = C.load()
-    if cfg.lock_dir.exists():
-        print(f"ABORT: {cfg.lock_dir} exists — pipeline not paused")
+    if not acquire_lock(cfg):
+        print("ABORT: run lock held — stop the driver "
+              "(hl-continuous.service / hl-pipeline.timer) first")
         return 2
+    try:
+        return _locked_main(cfg)
+    finally:
+        release_lock(cfg)
+
+
+def _locked_main(cfg) -> int:
+    send = "--send" in sys.argv[1:]
     ledger = Ledger(cfg.ledger_path)
     cache: dict = {}
     hi16_dt = reports._parse_ts(HI16)
@@ -143,19 +161,34 @@ def main() -> int:
               f"upload >= hi16 — structurally outside both windows, "
               f"ignored")
 
-    # stray-stamp pre-check
+    # stray-stamp pre-check — COHORT-SCOPED (r-loop 1): only stamped roots
+    # whose upload time falls inside our windows can empty the superseding
+    # sheets. Post-hi16 roots are stamped by every NORMAL daily send once
+    # continuous operation resumes — aborting on those deadlocked the
+    # endgame forever. A stamped COHORT root, though, means a daily send
+    # already counted (and misattributed) rebuild-cohort hours: that needs
+    # a human reconcile, never an auto-unstamp.
     recorded: set = set()
     for day, _, _ in WINDOWS:
         p = cfg.reports_dir / day / ".regen-v2-counted.json"
         if p.exists():
             recorded |= set(json.loads(p.read_text()))
-    stray = [r["session_id"] for r in ledger.db.execute(
-        "SELECT session_id FROM sessions WHERE parent_id IS NULL AND "
-        "uploaded_reported_at IS NOT NULL")
-        if r["session_id"] not in recorded]
+    stray = []
+    for r in ledger.db.execute(
+            "SELECT session_id FROM sessions WHERE parent_id IS NULL AND "
+            "uploaded_reported_at IS NOT NULL"):
+        if r["session_id"] in recorded:
+            continue
+        ct = top_root_ctime(ledger, r["session_id"], cache)
+        if ct is not None and ct >= hi16_dt:
+            continue                     # post-cohort: normal daily stamp
+        stray.append(r["session_id"])
     if stray:
-        print(f"ABORT: {len(stray)} root(s) already stamped outside our "
-              f"resume records (a stray daily send?): {stray[:10]}")
+        print(f"ABORT: {len(stray)} COHORT root(s) already stamped outside "
+              f"our resume records — a daily send counted rebuild-cohort "
+              f"hours into the wrong sheet (CONT_DAILY_REPORTS interlock "
+              f"breached?). Reconcile by hand before regenerating: "
+              f"{stray[:10]}")
         return 2
 
     anchor = cfg.reports_dir / ".last_daily_sent"

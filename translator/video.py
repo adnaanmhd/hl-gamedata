@@ -27,7 +27,7 @@ class VideoInfo:
 
 
 def _run(cmd: list[str]) -> dict:
-    out = subprocess.check_output(cmd, text=True)
+    out = subprocess.check_output(cmd, text=True, timeout=600)
     return json.loads(out)
 
 
@@ -96,7 +96,7 @@ def frame_pts(path: Path) -> list[int]:
     out = subprocess.check_output([
         "ffprobe", "-v", "error", "-select_streams", "v:0",
         "-show_entries", "packet=pts_time", "-of", "csv=p=0", str(path),
-    ], text=True)
+    ], text=True, timeout=600)
     times: list[float] = []
     for line in out.splitlines():
         line = line.strip().rstrip(",")
@@ -122,7 +122,7 @@ def keyframe_times(path: Path, within_s: float | None = None) -> list[float]:
     ]
     if within_s is not None:
         cmd[2:2] = ["-read_intervals", f"%+{within_s}"]
-    out = subprocess.check_output(cmd, text=True)
+    out = subprocess.check_output(cmd, text=True, timeout=600)
     times = []
     for line in out.splitlines():
         line = line.strip().rstrip(",")

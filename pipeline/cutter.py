@@ -145,13 +145,17 @@ def _cut_loop(session_dir: Path, keep, out_root: Path, sid: str, s: dict,
             shutil.rmtree(out_dir, ignore_errors=True)
         out_dir.mkdir(parents=True, exist_ok=True)
         created_dirs.append(out_dir)
+        # timeout: a wedged ffmpeg would otherwise pin a continuous-driver
+        # runner slot forever (stream copy of one segment takes seconds;
+        # 1800 s is generous). TimeoutExpired surfaces as a CutError-class
+        # failure and the existing error routing rescinds the plan.
         subprocess.run(
             ["ffmpeg", "-y", "-v", "error",
              "-ss", f"{start + first_abs:.6f}", "-to",
              f"{t1 + first_abs:.6f}",
              "-i", str(src_video), "-map", "0", "-c", "copy",
              "-avoid_negative_ts", "make_zero",
-             str(out_dir / "video.mp4")], check=True)
+             str(out_dir / "video.mp4")], check=True, timeout=1800)
         info = V.probe(out_dir / "video.mp4")
         seg_pts = V.frame_pts(out_dir / "video.mp4")
         m = info.frame_count

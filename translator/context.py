@@ -130,7 +130,12 @@ def classify_video(video_path, fps: float, game: str = "outer_wilds") -> list[st
         rows.append(_frame_scores(fr, templates))
     cap.release()
     n = len(rows)
-    col = {k: np.array([r[k] for r in rows]) for k in rows[0]} if n else {}
+    if not n:
+        # a video that opens but decodes zero frames must degrade like any
+        # other length mismatch (callers skip gating with a warning), not
+        # crash on col["paused"] (r-loop 1)
+        return []
+    col = {k: np.array([r[k] for r in rows]) for k in rows[0]}
     sec = lambda t: max(1, int(round(t * fps)))
 
     paused = _close_binary(col["paused"] > _TH["paused"], sec(0.7))

@@ -25,3 +25,6 @@ TimeoutStopSec=900
 # path (systemd has no user PATH); deps PINNED to the suite-green versions
 # (review-r2 #38 — an unpinned latest silently drifts the runtime).
 ExecStart=/bin/bash -o pipefail -c 'exec __HOME__/.local/bin/uv run --with numpy==2.4.6 --with opencv-python-headless==5.0.0.93 --with rerun-sdk==0.36.0 python -m pipeline run-continuous'
+
+[Install]
+WantedBy=multi-user.target

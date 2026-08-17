@@ -80,13 +80,27 @@ def rclone(args: list[str]) -> tuple[int, str]:
 
 
 def main() -> int:
+    """HOLDS the run lock for the tool's whole duration (r-loop 1): the
+    old bare existence check left a TOCTOU where systemd Restart=always
+    could start the continuous driver mid-reset. acquire_lock also
+    reclaims a stale lock from a killed driver — exactly the flip state
+    (kickoff 6a expects one after stopping hl-recal-rebuild)."""
+    from pipeline.run import acquire_lock, release_lock
     ap = argparse.ArgumentParser()
     ap.add_argument("--yes", action="store_true")
     args = ap.parse_args()
     cfg = C.load()
-    if cfg.lock_dir.exists():
-        print(f"ABORT: {cfg.lock_dir} exists — pipeline not paused")
+    if not acquire_lock(cfg):
+        print("ABORT: run lock held — stop the driver "
+              "(hl-continuous.service / hl-pipeline.timer) first")
         return 2
+    try:
+        return _locked_main(cfg, args)
+    finally:
+        release_lock(cfg)
+
+
+def _locked_main(cfg, args) -> int:
     ledger = Ledger(cfg.ledger_path)
     now = datetime.now(timezone.utc).isoformat(timespec="seconds")
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")

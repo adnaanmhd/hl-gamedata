@@ -77,6 +77,10 @@ if [ "${1:-}" = "--enable-continuous" ]; then
   sudo systemctl enable --now hl-backup.timer hl-continuous.service
   systemctl list-timers hl-backup.timer --no-pager
   systemctl status hl-continuous.service --no-pager | head -5
+  # boot-persistence proof: the unit must actually be enabled (an absent
+  # [Install] section makes enable a no-op and the driver dies on reboot)
+  [ "$(systemctl is-enabled hl-continuous.service)" = "enabled" ] \
+    || { echo "FATAL: hl-continuous.service not enabled — check [Install]" >&2; exit 1; }
 fi
 
 # --- acceptance (§7.3) -----------------------------------------------------
