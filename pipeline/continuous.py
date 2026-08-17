@@ -1049,19 +1049,33 @@ class ContinuousDriver:
         False = threads may still be writing the ledger; the caller must
         NOT release the run lock (a second driver could then start against
         live writes — r-loop 1); the stale lock is pid-reclaimed by the
-        next starter once this process is truly dead."""
+        next starter once this process is truly dead.
+
+        Session runners live in runner_pool, NOT self.threads — deciding
+        clean-vs-unclean from lane threads alone released the lock over
+        runners still mid fix/validate writes (r-loop 2 blocker). Every
+        runner releases its gate slot in a finally, so gate.active == 0 is
+        the runner-liveness oracle."""
         self.stop.set()
         deadline = self.clk.mono() + C.CONT_DRAIN_GRACE_S
         for t in self.threads:
             t.join(timeout=max(0.1, deadline - self.clk.mono()))
+        # bounded both by the injected clock AND a real iteration cap so a
+        # frozen test clock can never spin this forever
+        for _ in range(int(C.CONT_DRAIN_GRACE_S * 4) + 1):
+            if self.gate.active == 0 or self.clk.mono() >= deadline:
+                break
+            time.sleep(0.25)
         if self.runner_pool is not None:
             self.runner_pool.shutdown(wait=False, cancel_futures=True)
         alive = [t.name for t in self.threads if t.is_alive()]
-        if alive:
-            print(f"[shutdown] threads still alive after grace: {alive} — "
-                  f"exiting anyway (kill-safe by design); run lock kept "
-                  f"for pid-reclaim", file=sys.stderr)
-        return not alive
+        runners = self.gate.active
+        if alive or runners:
+            print(f"[shutdown] still alive after grace: threads={alive} "
+                  f"runners={runners} — exiting anyway (kill-safe by "
+                  f"design); run lock kept for pid-reclaim",
+                  file=sys.stderr)
+        return not alive and runners == 0
 
 
 def run_continuous(cfg: C.Config, *, dest_prefix: str = C.VENDOR,

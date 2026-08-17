@@ -777,6 +777,18 @@ def test_batches_table_left_byte_identical(cfg, ledger, monkeypatch):
     assert after == before and after["finished"] is None
 
 
+def test_shutdown_unclean_while_runner_active(cfg, monkeypatch):
+    """r-loop 2: a live session runner (gate slot held) must make shutdown
+    report UNCLEAN so the run lock is kept — lane threads alone are not
+    the liveness oracle."""
+    monkeypatch.setattr(C, "CONT_DRAIN_GRACE_S", 0.5)
+    drv = cont.ContinuousDriver(cfg, send_telegram=False)
+    assert drv.gate.acquire(threading.Event())     # simulate a live runner
+    assert drv.shutdown() is False
+    drv2 = cont.ContinuousDriver(cfg, send_telegram=False)
+    assert drv2.shutdown() is True                 # no runners -> clean
+
+
 # ------------------------------------------------------------- CLI smoke
 
 def test_run_continuous_cli_smoke(tmp_path):
