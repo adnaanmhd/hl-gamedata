@@ -100,7 +100,16 @@ def scan_video(video: Path, *, pts_us: list[int] | None = None,
             prev = fr
     finally:
         p.stdout.close()
-        p.wait(timeout=timeout_s)
+        try:
+            p.wait(timeout=timeout_s)
+        except subprocess.TimeoutExpired:
+            # kill the decoder before propagating: an always-on driver
+            # (continuous service) never exits, so a leaked ffmpeg from a
+            # hung decode would accumulate forever — the 30-min batch
+            # process exit used to clean these up incidentally
+            p.kill()
+            p.wait()
+            raise
     n = len(luma)
     if pts_us and len(pts_us) == n:
         times = [t / 1e6 for t in pts_us]

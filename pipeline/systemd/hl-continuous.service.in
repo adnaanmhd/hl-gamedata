@@ -1,0 +1,27 @@
+[Unit]
+Description=HL continuous pipeline driver (Adnaan rulings 2026-08-17: no batches, autoscale, 3h digest)
+Wants=network-online.target
+After=network-online.target
+# Restart=always restarts silently; OnFailure fires only when the unit
+# finally enters 'failed' — which needs a start limit, or a crash loop
+# stays Telegram-invisible forever (design §10)
+OnFailure=hl-continuous-alert.service
+StartLimitIntervalSec=600
+StartLimitBurst=5
+
+[Service]
+Type=simple
+User=__USER__
+WorkingDirectory=__HOME__/hl-gamedata
+# journald must see output live — python block-buffers otherwise
+Environment=PYTHONUNBUFFERED=1
+Restart=always
+RestartSec=10
+# graceful drain window on stop; after it SIGKILL is safe by design
+# (kill at any instant resumes exactly from the ledger)
+TimeoutStopSec=900
+# journald-only: the batch unit's tee-to-$(date)-file freezes the filename
+# at process start, which is wrong for an always-on service. uv by absolute
+# path (systemd has no user PATH); deps PINNED to the suite-green versions
+# (review-r2 #38 — an unpinned latest silently drifts the runtime).
+ExecStart=/bin/bash -o pipefail -c 'exec __HOME__/.local/bin/uv run --with numpy==2.4.6 --with opencv-python-headless==5.0.0.93 --with rerun-sdk==0.36.0 python -m pipeline run-continuous'

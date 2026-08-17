@@ -22,6 +22,7 @@ def _module_state(monkeypatch):
     monkeypatch.setattr(_vlmmod, "_rung", 0)
     # "" = prev-key rung unarmed; None would read the REAL secrets.env
     monkeypatch.setattr(_vlmmod, "_prev_key_cache", "")
+    monkeypatch.setattr(_vlmmod, "_pressure_path", None)
     _vlmmod._session_models.clear()
     _runmod._reset_vlm_run_state()
 

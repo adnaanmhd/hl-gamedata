@@ -1,0 +1,8 @@
+[Unit]
+Description=Telegram alert when hl-continuous exhausts its start limit (crash loop)
+
+[Service]
+Type=oneshot
+User=__USER__
+WorkingDirectory=__HOME__/hl-gamedata
+ExecStart=__HOME__/.local/bin/uv run python -c "from pipeline import config, telegram; telegram.send_message(config.load(), '⚠️ hl-continuous CRASH-LOOPING — start limit hit, driver is DOWN. journalctl -u hl-continuous')"

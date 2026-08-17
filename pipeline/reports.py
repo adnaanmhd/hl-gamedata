@@ -148,6 +148,73 @@ def build_batch_message(b: BatchStats, pace: PaceStatus | None) -> str:
 
 
 @dataclass
+class DigestStats:
+    """3-h continuous digest (replaces the per-batch topline — Adnaan
+    ruling 4, 2026-08-17). All window figures are LEDGER-derived over
+    [anchor, hi) so a kill never loses or doubles them."""
+    now_ist: datetime
+    window_h: float
+    delivered_n: int
+    delivered_hours: float
+    rejected_n: int
+    reject_labels: list[str] = field(default_factory=list)
+    hours_kamla: float = 0.0
+    hours_ow: float = 0.0
+    backlog_undownloaded: int = 0
+    backlog_inflight: int = 0
+    backlog_fix: int = 0
+    backlog_hold: int = 0
+    incomplete: int = 0
+    on_fallback: int = 0          # R23 flagged verdicts in the window
+    pool_target: int = 0
+    pool_active: int = 0
+    vlm_rung: int = 0
+    stuck: list[str] = field(default_factory=list)   # pre-formatted lines
+    stuck_total: int = 0
+    past_deadline: bool = False
+
+
+def build_digest_message(d: DigestStats, pace: PaceStatus | None) -> str:
+    """Pure formatter (byte-pinnable like the batch/daily templates).
+    Sent every CONT_DIGEST_INTERVAL_H even when idle — the heartbeat."""
+    total = d.hours_kamla + d.hours_ow
+    lines = [f"📡 digest {d.now_ist.strftime('%H:%M')} · "
+             f"last {d.window_h:.1f}h"]
+    w = (f"window: {d.delivered_n} delivered "
+         f"(+{d.delivered_hours:.1f} h) · {d.rejected_n} rejected")
+    if d.reject_labels:
+        w += f" ({' · '.join(d.reject_labels)})"
+    lines.append(w)
+    lines.append(
+        f"totals: Kamla {d.hours_kamla:.1f}/{C.TARGET_HOURS_PER_GAME:.0f} · "
+        f"OW {d.hours_ow:.1f}/{C.TARGET_HOURS_PER_GAME:.0f} "
+        f"(Σ {total:.1f}/{2 * C.TARGET_HOURS_PER_GAME:.0f})")
+    lines.append(
+        f"backlog: {d.backlog_undownloaded} undownloaded · "
+        f"{d.backlog_inflight} in-flight · {d.backlog_fix} fix · "
+        f"{d.backlog_hold} hold · {d.incomplete} incomplete")
+    pool = f"pool: {d.pool_active}/{d.pool_target} active"
+    if d.vlm_rung:
+        pool += f" · rung {d.vlm_rung}"
+    lines.append(pool)
+    if d.on_fallback:
+        lines.append(f"{d.on_fallback} on fallback model")
+    if d.past_deadline:
+        lines.append("deadline passed — pace line retired")
+    elif pace is not None and pace.alarm:
+        lines.append(
+            f"⚠️ PACE need {pace.need_total:.0f} h/day · trailing "
+            f"{pace.trailing_24h:.0f} → ~{pace.min_per_player_day:.0f} "
+            f"min/player/day required")
+    if d.stuck:
+        s = "stuck: " + " · ".join(d.stuck)
+        if d.stuck_total > len(d.stuck):
+            s += f" (+{d.stuck_total - len(d.stuck)} more)"
+        lines.append(s)
+    return "\n".join(lines)
+
+
+@dataclass
 class DailyStats:
     day_ist: datetime
     delivered_hours_today: float

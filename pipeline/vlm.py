@@ -54,6 +54,29 @@ _session_models: list[dict] = []
 
 _prev_key_cache: str | None = None
 
+# Continuous-driver 429 backpressure channel (PIPELINE_CONTINUOUS_DESIGN §4):
+# the driver passes a jsonl path into each validation job; the 429/5xx branch
+# appends one small line per event so the autoscaler can see quota pressure
+# IN REAL TIME (worker results only arrive when a multi-minute job ends —
+# blind exactly during a backoff storm). Unset (None) = channel off, which is
+# what the batch driver gets. Lines carry ts/status/rung/tag — TAGS, never
+# URLs or keys (the secrets discipline above).
+_pressure_path: str | None = None
+
+
+def _pressure(status: int, tag: str) -> None:
+    """Best-effort append of one pressure event; never raises, never logs
+    secrets. O_APPEND single-write keeps concurrent workers' lines whole."""
+    if not _pressure_path:
+        return
+    try:
+        line = json.dumps({"ts": round(time.time(), 1), "status": int(status),
+                           "rung": _rung, "tag": tag}) + "\n"
+        with open(_pressure_path, "a") as f:
+            f.write(line)
+    except OSError:
+        pass
+
 
 class VLMError(Exception):
     """Sweep could not finish — the session goes HOLD_VLM upstream."""
@@ -125,6 +148,7 @@ def _generate_once(url: str, headers: dict, body: dict, tag: str) -> str:
             retry_after = e.headers.get("Retry-After") if e.headers else None
             last = f"HTTP {e.code} ({tag})"
             if e.code == 429 or e.code >= 500:
+                _pressure(e.code, tag)
                 if attempt < C.VLM_MAX_TRIES - 1:
                     if retry_after and retry_after.isdigit():
                         delay = min(float(retry_after), C.VLM_BACKOFF_MAX_S)

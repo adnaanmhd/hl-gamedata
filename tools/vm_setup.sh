@@ -57,15 +57,26 @@ chmod 600 "$HOME/.config/rclone/rclone.conf"
 
 # --- systemd units (§7.7): template + install, do NOT enable here ---------
 UNITS="$HOME/hl-gamedata/pipeline/systemd"
-for u in hl-pipeline.service hl-pipeline.timer hl-backup.service hl-backup.timer hl-pipeline-alert.service hl-backup-alert.service; do
+for u in hl-pipeline.service hl-pipeline.timer hl-backup.service hl-backup.timer hl-pipeline-alert.service hl-backup-alert.service hl-continuous.service hl-continuous-alert.service; do
   sed -e "s|__USER__|$ME|g" -e "s|__HOME__|$HOME|g" -e "s|__BUCKET__|$BUCKET|g" \
     "$UNITS/$u.in" | sudo tee "/etc/systemd/system/$u" >/dev/null
 done
 sudo systemctl daemon-reload
 
+# --enable-timers no longer arms hl-pipeline.timer (the batch tick): since
+# the 2026-08-17 continuous flip that timer is the ROLLBACK path, and a
+# post-flip re-provision must never resurrect two drivers on one ledger.
+# Arming the batch driver for rollback is an explicit manual act:
+#   sudo systemctl enable --now hl-pipeline.timer   (after stopping
+#   hl-continuous and setting PIPELINE_CONTINUOUS=False)
 if [ "${1:-}" = "--enable-timers" ]; then
-  sudo systemctl enable --now hl-pipeline.timer hl-backup.timer
-  systemctl list-timers hl-pipeline.timer hl-backup.timer --no-pager
+  sudo systemctl enable --now hl-backup.timer
+  systemctl list-timers hl-backup.timer --no-pager
+fi
+if [ "${1:-}" = "--enable-continuous" ]; then
+  sudo systemctl enable --now hl-backup.timer hl-continuous.service
+  systemctl list-timers hl-backup.timer --no-pager
+  systemctl status hl-continuous.service --no-pager | head -5
 fi
 
 # --- acceptance (§7.3) -----------------------------------------------------
@@ -80,4 +91,8 @@ rclone lsd "gcs-backup:$BUCKET" >/dev/null \
   || { echo "FATAL: gcs-backup:$BUCKET not listable — set HL_BACKUP_BUCKET to the bucket provision_vm.sh created" >&2; exit 1; }
 echo "backup bucket: gs://$BUCKET listable"
 echo "timezone: $(timedatectl show -p Timezone --value)"
-echo "DONE (timers $( [ "${1:-}" = "--enable-timers" ] && echo ENABLED || echo installed, not enabled ))"
+case "${1:-}" in
+  --enable-timers)     echo "DONE (hl-backup.timer ENABLED; batch timer stays rollback-only)";;
+  --enable-continuous) echo "DONE (hl-continuous.service + hl-backup.timer ENABLED)";;
+  *)                   echo "DONE (units installed, nothing enabled)";;
+esac

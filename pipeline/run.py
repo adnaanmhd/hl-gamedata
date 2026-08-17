@@ -127,6 +127,10 @@ def _validate_worker(args: dict) -> dict:
     # climbed on an earlier job in this generation must not be clobbered
     # back to the batch-start value (review-r1 #11).
     vlmmod._rung = max(vlmmod._rung, int(args.get("vlm_rung", 0)))
+    # continuous-driver 429 backpressure channel — optional, additive: the
+    # batch driver never passes it and gets today's behavior unchanged
+    if args.get("pressure_path"):
+        vlmmod._pressure_path = args["pressure_path"]
     try:
         res = validate_session(
             Path(args["work_dir"]), Path(args["dossier_dir"]),
@@ -1548,6 +1552,16 @@ def main(argv: list[str] | None = None) -> int:
             print("[run] --quiet: telegram toplines + daily reports "
                   "suppressed for this run")
         return run(cfg, send_telegram=not quiet)
+    if cmd == "run-continuous":
+        # the always-on driver (Adnaan rulings 08-17). Lazy import: the
+        # dormant batch path must not pay for (or break on) the module.
+        from . import continuous
+        dest = next((a.split("=", 1)[1] for a in argv[1:]
+                     if a.startswith("--dest-prefix=")), C.VENDOR)
+        return continuous.run_continuous(
+            cfg, dest_prefix=dest,
+            until_idle="--until-idle" in argv[1:],
+            send_telegram="--quiet" not in argv[1:])
     if cmd == "status":
         ledger = Ledger(cfg.ledger_path)
         print(json.dumps({
@@ -1562,7 +1576,8 @@ def main(argv: list[str] | None = None) -> int:
         issues = send_folder_issues_if_due(cfg, ledger)
         print(f"daily report sent: {sent}; folder issues sent: {issues}")
         return 0
-    print(f"unknown command {cmd!r} (run | status | daily-report)")
+    print(f"unknown command {cmd!r} "
+          f"(run | run-continuous | status | daily-report)")
     return 2
 
 

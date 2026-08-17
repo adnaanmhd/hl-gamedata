@@ -789,7 +789,11 @@ def _locked_report_update(report_path: Path, name: str,
     timeout we write anyway — worst case equals the pre-lock behavior."""
     lock = report_path.parent / (report_path.name + ".lock")
     held = False
-    for _ in range(100):                     # <=5 s
+    # patience sized to the LARGEST worker band, not the historical 8: the
+    # continuous driver autoscales up to CONT_POOL_MAX concurrent workers,
+    # and the give-up-and-write-anyway fallback below re-opens the r1 #8
+    # lost update if contention can outlast the wait (0.05 s per try)
+    for _ in range(max(100, 20 * int(getattr(C, "CONT_POOL_MAX", 8)))):
         try:
             os.mkdir(lock)
             held = True

@@ -120,6 +120,41 @@ VLM_MODEL_LADDER = ("gemini-3.7-flash", "gemini-3.5-flash",
 PIPELINE_OVERLAP = True
 MAX_BATCHES_IN_FLIGHT = 3         # R5 amendment: <=3 batches (~30 sessions)
 
+# --- Continuous driver (Adnaan rulings 2026-08-17; PIPELINE_CONTINUOUS_DESIGN.md)
+# Gates `python -m pipeline run-continuous`. False is the ROLLBACK interlock:
+# with it False a lingering/re-enabled hl-continuous.service refuses to start,
+# so re-arming hl-pipeline.timer can never produce two drivers on one ledger.
+PIPELINE_CONTINUOUS = True
+CONT_SCAN_INTERVAL_S = 300        # ruling 2: poll Drive I every 5 min
+CONT_MEDIA_CAP_SESSIONS = 40      # ruling 2: ~40 sessions local, ledger-counted
+CONT_HOLD_RETRY_MIN = 30          # ruling 6: HOLD_VLM one retry / 30 min, forever
+CONT_DIGEST_INTERVAL_H = 3.0      # ruling 4: Telegram digest cadence
+# Autoscale band (ruling 3): validation-runner concurrency, bounded below by
+# the suggested floor and above by cores-12 (headroom for D/U/S/H, ffmpeg
+# side-processes and the OS). Computed at import so the resize to
+# c2d-highcpu-56 lifts the ceiling without a config edit.
+CONT_POOL_MIN = 8
+CONT_POOL_MAX = max(8, (os.cpu_count() or 16) - 12)
+CONT_AUTOSCALE_INTERVAL_S = 60
+CONT_CPU_HIGH = 85.0              # no up-steps above this CPU%
+CONT_CPU_CRIT = 95.0              # two consecutive intervals above -> step down
+CONT_STEP_UP = 2
+CONT_STEP_DOWN = 4                # 429 backpressure steps down harder than up
+CONT_BACKPRESSURE_WINDOW_S = 600  # trailing window for 429-pressure counting
+CONT_BACKPRESSURE_429_PER_MIN = 1.0
+# Sticky-rung scope redefined for a forever-process (R23 amendment, ruling
+# "sticky until a quiet period"): the rung resets to 0 after this many
+# minutes with zero 429-pressure events and zero worker-reported climbs.
+CONT_RUNG_QUIET_RESET_MIN = 60
+CONT_ALERT_DEDUP_MIN = 60         # TTL dedup: recurring conditions re-alert
+CONT_DOWNLOAD_WORKERS = 1         # serial D preserves F3 ctime-order intake
+CONT_UPLOAD_WORKERS = 1           # serial U preserves the R17 15%-floor read
+CONT_STUCK_H = 6.0                # digest stuck-list threshold
+CONT_DOWNLOAD_RETRY_MIN = 5.0     # transient download failure cooldown
+CONT_UPLOAD_RETRY_MIN = 10.0      # upload failure cooldown
+CONT_DISPATCH_IDLE_S = 2.0        # dispatcher poll when nothing eligible
+CONT_DRAIN_GRACE_S = 600          # SIGTERM: wait this long for runners
+
 # Ledger states (§6 state machine)
 STATES = (
     "DISCOVERED", "INCOMPLETE", "DOWNLOADING", "INGESTED", "VALIDATING",
