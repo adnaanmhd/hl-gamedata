@@ -32,14 +32,14 @@ the first unchecked item.
 - [x] C9 suite knob-independence + SUITE_FLOOR 578 + doc corrections — repro CONFIRMED on the pinned runbook invocation (14 failed/567 passed at pre-C9 HEAD; 11→14 = the three new C5 send-path tests); green at BOTH knob values (582/582)
 - [x] Full gate green on Mac AND VM at final r8-fix HEAD b694456 — Mac 582 (61s), VM side checkout 582 (251s), both floor 578; tree-verify (diff/status/MUTATION) clean
 - [x] Review iteration 9 RAN (2026-08-18, workflow `tools/review/flip-review-iter9.js`, 53 agents) — **NOT QUIET: 23 confirmed (14 major / 9 minor / 0 blockers), 0 killed**; findings of record in `R9_FINDINGS.md`; fixes synthesized into §9 as D1–D8 (Adnaan redirected the r8 session to hand off instead of fixing in-iteration)
-- [ ] D0 DISCUSSION FIRST (Adnaan, 2026-08-18): the D7 payment rule needs his ruling before D7 is implemented — measure the affected population on the real ledger, present options A/B/C, record the ruling in §9 D7 (procedure: R9_EXEC_KICKOFF_PROMPT.md "FIRST ITEM"). Blocks D7 only, but runs before everything.
+- [x] D0 DISCUSSION RAN (2026-08-18): measured the real ledger read-only — production schema is PRE-payment-split (no `accepted_reported_at`/`tree_sealed_at` columns; they arrive with the flip deploy's migration), 0/1396 rows carry any payment stamp, 16 fix-failed rows → 14 selectable roots → 0.76 h, **0 trees with payment evidence** — the kickoff's assumption confirmed (option A would have cost nothing at the flip; the dilemma bites only post-flip refix waves). Options A/B/C presented; **Adnaan RULED C — per-piece payment memory** (2026-08-18). §9 D7a superseded accordingly; accepted-behaviours entry 21 rewritten to match.
 - [ ] D1 translator hardening (#2 carried-only rebase guard, #3/#16 v2 untyped crashes, #17 falsy-key binding) — §9
 - [ ] D2 validation truth sources (#12 CNT_SHORT from probed duration, #15 analyze() typed-FAIL path) — §9
 - [ ] D3 driver host classes (#9 BrokenProcessPool first-death=host, #10 U-lane CalledProcessError) — §9
 - [ ] D4 gate-record clock rebasing + adoption propagation (#11/#20, #14, #22 tests) — §9
 - [ ] D5 daily-send resume robustness (#6/#21 day-agnostic, #4 conditional re-stamp, #8 doc_sent) — §9
 - [ ] D6 quarantine heal md5-conditional stamp clearing (#5) — §9
-- [ ] D7 refix tool payment-evidence refusal + pending-record interlock + lsf honesty (#1/#18, #7, #19) — §9 — OBSERVABLE payment-behaviour change, surface to Adnaan
+- [ ] D7 refix tool per-piece payment memory (RULED C, Adnaan 2026-08-18) + pending-record interlock + lsf honesty (#1/#18, #7, #19) — §9 — OBSERVABLE payment-behaviour change, surface to Adnaan
 - [ ] D8 C8 leftovers (#13 parse-and-regex re-emit, #23 conv_other test) — §9
 - [ ] Post-D8: new SUITE_FLOOR measured+pinned; full gate green Mac AND VM; tree-verify
 - [ ] Review iteration 10 (fix-in-iteration; quiet-judged; accepted-list additions 21–28 from §9)
@@ -1034,44 +1034,90 @@ different-md5 case, citing r-loop 9).
 
 ### D7 — refix tool: payment-evidence refusal + probe honesty (#1, #18, #19, #7-tool-side) — `tools/recal_refix_reset.py`, `tools/recal_rebuild_reset.py`
 
-**⚠ D7a IS PENDING ADNAAN'S RULING (ledger item D0).** He asked to discuss
-this rule before it lands (2026-08-18) — the spec below is the session's
-RECOMMENDATION (option A), not yet a ruling. Hold the D0 discussion first
-(procedure in R9_EXEC_KICKOFF_PROMPT.md "FIRST ITEM": measure the affected
-population, present options A/refuse, B/seal-patched, C/per-piece memory),
-then implement D7a per whatever he rules and update this spec + the two
-named test rewrites to match. D7b (#7 pending-record interlock) and D7c
-(#19 lsf honesty) are NOT part of the dilemma and proceed as specified
-regardless.
+**✅ D7a RULED (D0, Adnaan 2026-08-18): option C — per-piece payment
+memory.** D0's measurement (read-only, real `~/hl-pipeline/ledger.db`):
+production schema is pre-payment-split (no `accepted_reported_at` /
+`tree_sealed_at` columns — the flip deploy's migration adds them), 0/1396
+rows carry any payment stamp, and 0 trees hold payment evidence beside a
+fix-failed node — so this rule has zero effect AT the flip and exists for
+post-flip refix waves. The option-A text this supersedes is preserved in
+git history (this file, pre-D0). D7b (#7 pending-record interlock) and
+D7c (#19 lsf honesty) were never part of the dilemma and proceed as
+specified below.
 
-**D7a (#1+#18, MAJOR, one coherent rule)** two seal defects with one root:
-the tool's plan-time paid/unpaid computation reads only per-node accepted
-marks. (#18) a fully-paid tree seals and re-runs, but its recovered
-fix-failed child's hours can then NEVER reach a sheet — the seal swallows
-the exact money the refix path exists to recover — while NOT sealing would
-double-pay the re-delivered paid child: the same "no automatable answer"
-dilemma C6 ruled must go to a human. (#1) a SEALED tree re-selected on a
-later pass (its re-run child fix-failed again) recomputes paid=[] — the
-seal itself suppresses new accepted marks — and the teardown OVERWRITES the
-seal with NULL, re-opening already-paid footage for a second payment with
-`sealed_roots: []` hiding it. One rule fixes both: **the tool proceeds ONLY
-on trees with ZERO payment evidence** — refuse (into `skipped_mixed`, with
-paid_nodes / unpaid_delivered_nodes / an existing `tree_sealed_at` listed)
-any plan root where `paid` is non-empty OR the root's `tree_sealed_at` is
-already set. Consequences: the seal-writing branch becomes unreachable
-(keep `tree_sealed_at=None` on the proceeding UPDATE — proceeding trees
-have no payment evidence by construction; the column, its reports-side
-honor logic and its clears all STAY as defense-in-depth for the sealed
-trees refused here and any historical rows). This is an OBSERVABLE
-payment-behaviour change to C6's "fully-paid tree proceeds and seals" rule —
-rewrite `test_refix_seal_only_fires_where_hours_were_actually_counted`
-(tree B now lands in skipped_mixed with its rows untouched; A and C still
-proceed) and `test_refix_fully_paid_tree_never_recounted_end_to_end`
-(refused, not sealed; assert its rows/hours untouched and it appears in
-skipped_mixed), citing r-loop 9 — and SURFACE both rewrites to Adnaan in
-the final report exactly as the C6 changes were. NOTE for production: no
-sealed trees exist yet (nothing is deployed; the flip's refix run is the
-first), so no migration concern.
+**D7a (#1+#18, MAJOR, ruling C spec)** the defects: the tool's plan-time
+paid/unpaid computation reads only per-node accepted marks; (#18) sealing
+a fully-paid tree swallows its recovered fix-failed child's hours forever;
+(#1) a sealed tree re-selected later recomputes paid=[] and the teardown
+OVERWRITES the seal with NULL — double payment, hidden by
+`sealed_roots: []`. Ruling C fixes both by remembering WHICH pieces were
+paid instead of sealing whole trees:
+
+1. `pipeline/ledger.py`: additive migration — new table
+   `paid_pieces(root_id TEXT, session_id TEXT, seconds REAL,
+   seg TEXT NULL, recorded_at TEXT, PRIMARY KEY(root_id, session_id))`
+   with an `INSERT OR IGNORE` writer helper (first record wins — it
+   describes the payment that actually happened). Payment memory is
+   NEVER auto-deleted: `supersede()`, the quarantine heal and
+   `recal_rebuild_reset` all leave it alone (evidence of money moved
+   outlives byte changes; a stale collision surfaces loudly on the sheet
+   side, see 3).
+2. `tools/recal_refix_reset.py`:
+   - A root whose `tree_sealed_at` is SET is REFUSED into a new
+     `skipped_sealed` list (per-piece fidelity never existed for old
+     seals; the seal is NEVER overwritten — #1 closed). Historical-only:
+     production has zero seals and post-D7 nothing writes new ones.
+   - All other trees PROCEED — including fully-paid and mixed ones. The
+     C6 `skipped_mixed` refusal is SUPERSEDED (memory restores the
+     per-node fidelity whose loss was that refusal's whole reason);
+     `skipped_mixed` stays in the output JSON, now expected `[]`, for
+     schema stability.
+   - Before teardown: record every paid piece (DELIVERED node with
+     `accepted_reported_at`, root included) into `paid_pieces` —
+     `seconds` = its `duration_delivered_s`, `seg` = the "split segment
+     {t0}-{t1}s" detail when parseable — AND mirror the list into the
+     teardown event detail for forensics. The seal-writing branch is
+     DELETED (never seal; the recovered hours must stay payable — #18
+     closed). Root UPDATE keeps `accepted_reported_at=NULL`,
+     `tree_sealed_at=NULL`, and the preserved `uploaded_reported_at`,
+     all as today.
+3. `pipeline/reports.py build_sheet_rows`: when counting tree nodes for
+   accepted hours, consult `paid_pieces` for the root. A DELIVERED node
+   matching a memory row (same session_id AND |duration_delivered_s −
+   seconds| ≤ 1.0) is SKIPPED like an accepted-stamped node (its footage
+   was paid pre-teardown), with a conservation-style log line; NO stamp
+   is written (the stamp keeps meaning "this row counted on a sent
+   sheet"). Same session_id but seconds MISMATCH (an id collision — the
+   re-run cut differently) → SKIP + LOUD "AMBIGUOUS re-delivered piece
+   <sid>: paid memory {X}s, re-delivered {Y}s — NOT counted; reconcile
+   by hand" (money-safe: never auto-pay a colliding id; a withheld hour
+   is hand-recoverable, a double-pay is not). The `tree_sealed_at` honor
+   logic in reports stays as defense-in-depth for historical rows.
+4. Later refix passes over the same tree: memory rows persist
+   (INSERT OR IGNORE), so an excluded piece stays excluded across passes
+   with no mark needed — the #1 second-pass shape can never re-open paid
+   footage. Newly-paid pieces (e.g. the recovered child, paid on a later
+   sheet, then fix-failed again) are added at their pass's teardown.
+5. `FLIP_RUNBOOK.md` §6 "review JSON (now includes skipped_mixed)" and
+   the §6c verification greps gain `paid_pieces` markers (fold into the
+   D7 commit's doc edit).
+
+This is an OBSERVABLE payment-behaviour change to C6's "fully-paid tree
+proceeds and seals" rule — rewrite
+`test_refix_seal_only_fires_where_hours_were_actually_counted` (now: tree
+B proceeds with its paid node recorded in `paid_pieces` and NO
+`tree_sealed_at` written; A and C proceed with zero memory rows) and
+`test_refix_fully_paid_tree_never_recounted_end_to_end` (now: fully-paid
+tree proceeds; after the re-run re-delivers the same-id/same-seconds
+piece, no sheet ever counts it again — memory skip — AND the recovered
+fix-failed sibling's hours reach a sheet exactly ONCE: the #18 recovery
+asserted end-to-end), citing r-loop 9 + the D0 ruling — and SURFACE both
+rewrites to Adnaan in the final report exactly as the C6 changes were.
+New tests: sealed root → skipped_sealed, rows untouched, seal intact;
+second-pass shape (#1) → no double-pay, memory intact; id-collision with
+different seconds → excluded + AMBIGUOUS loud line; mixed tree proceeds
+and the previously-unpaid delivered node's hours land exactly once after
+re-delivery.
 
 **D7b (#7, MAJOR)** the already-reported guard is blind to a PENDING daily
 send: with `.daily-counted.json` written but stamps not yet applied
@@ -1125,10 +1171,15 @@ id="conv_other_missing_label".
    `flip-review-iter10.js`; retarget the regressions lane at the D1–D8
    commits; refresh suite numbers; APPEND to the accepted list (keeping ALL
    existing entries):
-   21. The refix tool refuses ANY tree with payment evidence (paid nodes or
-       an existing tree_sealed_at) into skipped_mixed; the seal-write branch
-       is intentionally unreachable; tree_sealed_at stays honored
-       defensively (D7).
+   21. RULED (Adnaan 2026-08-18, D0): the refix tool uses per-piece payment
+       memory — paid pieces are recorded in the ledger's `paid_pieces` table
+       before teardown and build_sheet_rows skips matching re-delivered
+       nodes (seconds-tolerance match; id collisions are excluded LOUDLY,
+       never auto-paid); the tool never writes tree_sealed_at (the column
+       stays honored defensively) and refuses only already-SEALED roots
+       (skipped_sealed); the C6 mixed-tree refusal is superseded — mixed
+       and fully-paid trees proceed; payment memory is never auto-deleted
+       (D7).
    22. The daily resume is day-agnostic (oldest pending record first, one
        send per tick); resume refuses loudly on a missing counted row and
        skips (loudly) re-stamping rows whose marks were cleared after the
@@ -1158,10 +1209,12 @@ id="conv_other_missing_label".
    and hand Adnaan the list if 11 is not quiet. Then §6 e2e → §7 flip.
 
 **Deviations from finder proposals, recorded:** #1/#18 are unified into the
-zero-payment-evidence refusal (each finding's own fix would leave the other's
-defect half-open: preserving the seal (#1) still swallows recovered hours
-(#18); refusing paid+fix-failed trees (#18) still lets a SEALED tree without
-current paid marks erase its seal (#1)). #4/#7's resume-side overlaps are
+per-piece payment memory rule (RULED C by Adnaan at D0, 2026-08-18,
+superseding this plan's original option-A recommendation): each finding's
+own fix would leave the other's defect half-open (preserving the seal (#1)
+still swallows recovered hours (#18); refusing paid+fix-failed trees (#18)
+still lets a SEALED tree without current paid marks erase its seal (#1)),
+while memory closes both AND supersedes C6's skipped_mixed refusal. #4/#7's resume-side overlaps are
 split: missing row ⇒ refuse (7's severity), changed row ⇒ per-sid skip (4's
 proposal). #9's fix uses set_state VALIDATING→VALIDATING for the death
 marker (stint-anchor-safe) rather than a new events writer. #12 keeps
