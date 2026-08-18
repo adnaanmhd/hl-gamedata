@@ -11,9 +11,9 @@ new rulings (§4, §5).
 
 ## 0. LAUNCH PROTOCOL
 
-Read this document and the files in §2, then reply with a SHORT readiness message
-(what you understand the job to be, anything you think is wrong, and any question you
-must have answered). Then **wait**.
+Read this document and the files in §2, then **wait**. Do not summarise back what you
+read. If something in here is wrong or you have a question only Adnaan can settle, say
+that — otherwise say nothing and wait.
 
 **Work begins only when Adnaan types exactly: `center, form on me and launch attack`**
 
