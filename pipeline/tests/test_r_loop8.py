@@ -134,3 +134,106 @@ def test_truly_bogus_stamps_still_refused_on_zero_events(tmp_path):
     with pytest.raises(fixmod.FixFailed) as e:
         fixmod.retranslate_from_sidecars(work)
     assert "zero events" in str(e.value)
+
+
+# --------- C3 BLOCKER: host carve-out must not re-run an applied plan
+
+_HOST_PARTIAL = {"applied": [{"fix": "FIX_RETRIM_HEAD", "ok": True},
+                             {"fix": "FIX_SESSIONJSON_RECOMPUTE",
+                              "ok": False}],
+                 "children": None,
+                 "error": "FIX_SESSIONJSON_RECOMPUTE: OSError: [Errno 28] "
+                          "No space left on device",
+                 "kind": "host"}
+_HOST_NOTHING = {"applied": [{"fix": "FIX_RETRIM_HEAD", "ok": False}],
+                 "children": None,
+                 "error": "FIX_RETRIM_HEAD: OSError: [Errno 28] "
+                          "No space left on device",
+                 "kind": "host"}
+
+
+def test_cont_host_error_after_applied_step_revalidates(cfg, ledger,
+                                                        monkeypatch):
+    """plan_fixes is pure: a FIX_QUEUED park with reasons untouched
+    re-dispatches the IDENTICAL plan from step 0, re-running the
+    already-succeeded destructive steps. A partially-applied host failure
+    must re-derive from the half-fixed copy instead."""
+    drv = cont.ContinuousDriver(cfg, send_telegram=False)
+    sid = "2026-08-14T10-00-00Z_kamla_c_00000000000000c1"
+    _seed_fix_queued(ledger, cfg, sid, [_R("STR_SENTINELS")])
+    monkeypatch.setattr(fixmod, "apply_fixes",
+                        lambda *a, **kw: dict(_HOST_PARTIAL))
+    assert drv._fix_one(ledger, sid) is False
+    row = ledger.get(sid)
+    assert row["state"] == "REVALIDATING", row["state"]
+    assert row["fix_attempts"] == 0, "the attempt must be refunded"
+
+
+def test_cont_host_error_before_any_step_parks_fix_queued(cfg, ledger,
+                                                          monkeypatch):
+    drv = cont.ContinuousDriver(cfg, send_telegram=False)
+    sid = "2026-08-14T10-00-00Z_kamla_c_00000000000000c2"
+    _seed_fix_queued(ledger, cfg, sid, [_R("STR_SENTINELS")])
+    monkeypatch.setattr(fixmod, "apply_fixes",
+                        lambda *a, **kw: dict(_HOST_NOTHING))
+    assert drv._fix_one(ledger, sid) is False
+    row = ledger.get(sid)
+    assert row["state"] == "FIX_QUEUED", row["state"]
+    assert row["fix_attempts"] == 0
+
+
+def test_batch_host_error_routing_mirrors_the_continuous_driver(
+        cfg, ledger, monkeypatch):
+    """The dormant rollback driver takes the same split — its pass loop
+    could even re-trim within a single run."""
+    monkeypatch.setattr(runmod, "_validate_phase", lambda *a, **kw: None)
+    sid_p = "2026-08-14T10-00-00Z_kamla_c_00000000000000b1"
+    sid_n = "2026-08-14T10-00-00Z_kamla_c_00000000000000b2"
+    _seed_fix_queued(ledger, cfg, sid_p, [_R("STR_SENTINELS")])
+    _seed_fix_queued(ledger, cfg, sid_n, [_R("STR_SENTINELS")])
+    outs = {sid_p: _HOST_PARTIAL, sid_n: _HOST_NOTHING}
+    monkeypatch.setattr(
+        fixmod, "apply_fixes",
+        lambda work, *a, **kw: dict(outs[Path(work).name]))
+    runmod._fix_phase(cfg, ledger, [sid_p, sid_n], [], workers=1)
+    rp, rn = ledger.get(sid_p), ledger.get(sid_n)
+    assert rp["state"] == "REVALIDATING", rp["state"]
+    assert rp["fix_attempts"] == 0
+    assert rn["state"] == "FIX_QUEUED", rn["state"]
+    assert rn["fix_attempts"] == 0
+
+
+def test_host_error_mid_plan_never_reruns_the_destructive_step(
+        cfg, ledger, monkeypatch, tmp_path):
+    """The money shot: retrim succeeded, then the recompute hit ENOSPC.
+    Pre-fix the row went back to FIX_QUEUED with reasons untouched and the
+    next pick re-ran FIX_RETRIM_HEAD on the already-trimmed video —
+    tools/retrim_v2_session.py probes the CURRENT video and removes
+    head_s again on every call (measured 300s→175s over five passes)."""
+    drv = cont.ContinuousDriver(cfg, send_telegram=False)
+    sid = "2026-08-14T10-00-00Z_kamla_c_00000000000000c3"
+    _seed_fix_queued(ledger, cfg, sid,
+                     [_R("CNT_EDGE_NONGAMEPLAY", edge="head",
+                         cut_at_s=12.5)])
+    counter = tmp_path / "retrims"
+    counter.write_text("0")
+
+    def fake_dispatch(fix_id, params, work, game, split_root):
+        if fix_id == "FIX_RETRIM_HEAD":
+            counter.write_text(str(int(counter.read_text()) + 1))
+            return "retrimmed"
+        if fix_id == "FIX_SESSIONJSON_RECOMPUTE":
+            raise OSError(28, "No space left on device")
+        return "ok"
+
+    monkeypatch.setattr(fixmod, "_dispatch", fake_dispatch)
+    assert drv._fix_one(ledger, sid) is False
+    row = ledger.get(sid)
+    assert row["state"] == "REVALIDATING", row["state"]
+    assert row["fix_attempts"] == 0
+    assert counter.read_text() == "1"
+    # a second pick must be a no-op — the row left FIX_QUEUED
+    assert drv._fix_one(ledger, sid) is False
+    assert counter.read_text() == "1", \
+        "the destructive step must not run twice"
+    assert ledger.get(sid)["state"] == "REVALIDATING"

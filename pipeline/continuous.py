@@ -879,20 +879,36 @@ class ContinuousDriver:
             runmod._discard_split_artifacts(self.cfg, led, sid)
             if out.get("kind") == "host":
                 # The machine, not the session. Roll the attempt charge
-                # back, park the row where it was and cool it down —
-                # exactly what the D, V and U lanes already do. Without
-                # this, one disk-full or wedged-ffmpeg episode burned BOTH
-                # attempts back to back (fix -> revalidate -> fix ->
-                # REJECTED within minutes) and finalize_rejected wiped the
-                # media, so recovery meant re-downloading from Drive I.
-                # The stored reasons are all still fixable, so the reject
-                # surfaced as the bare fix-failed marker: an
-                # infrastructure failure reported to the player as a fault
-                # in their footage (r-loop 7 BLOCKER).
+                # back and cool it down — exactly what the D, V and U
+                # lanes already do. Without this, one disk-full or
+                # wedged-ffmpeg episode burned BOTH attempts back to back
+                # and finalize_rejected wiped the media, with the reject
+                # surfacing as the bare fix-failed marker (r-loop 7
+                # BLOCKER). But WHERE the row parks depends on whether any
+                # step already mutated the copy (r-loop 8 BLOCKER):
+                # plan_fixes is pure, so a FIX_QUEUED re-pick re-dispatches
+                # the IDENTICAL plan from step 0 — including
+                # already-succeeded destructive steps (retrim removes
+                # head_s again on EVERY call; measured 300s→175s over five
+                # passes). Park FIX_QUEUED only when nothing was applied.
                 led.update(sid, fix_attempts=row["fix_attempts"])
-                led.set_state(sid, "FIX_QUEUED",
-                              f"host-level fix failure — retrying: "
-                              f"{out['error']}"[:300])
+                if not any(a.get("ok") for a in (out.get("applied") or [])):
+                    # step 0 failed: nothing was mutated, the identical
+                    # plan is safe to re-run
+                    led.set_state(sid, "FIX_QUEUED",
+                                  f"host-level fix failure before any step "
+                                  f"applied — retrying: {out['error']}"[:300])
+                else:
+                    # partially applied: NEVER re-run the plan blind
+                    # (review finding #6) — REVALIDATING re-derives from
+                    # the half-fixed copy. return False (not True): an
+                    # in-runner revalidation would burn a paid sweep while
+                    # the host condition is still live; the cooldown +
+                    # re-pick is the correct pacing.
+                    led.set_state(sid, "REVALIDATING",
+                                  f"host-level fix failure after applied "
+                                  f"step(s) — re-deriving from the current "
+                                  f"copy: {out['error']}"[:300])
                 self.cool.set(sid, C.CONT_RUNNER_CRASH_RETRY_MIN * 60)
                 self.alerts.alert(f"fix hit a host-level error on {sid} "
                                   f"(will retry): {out['error']}")

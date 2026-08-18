@@ -573,15 +573,32 @@ def _fix_phase(cfg, ledger, sids, alerts, *, workers: int,
                 # (review-r4 #5/#19)
                 _discard_split_artifacts(cfg, ledger, sid)
                 if out.get("kind") == "host":
-                    # host-level, not the session: refund the attempt and
-                    # leave the row queued. Same carve-out the continuous
-                    # driver applies; the rollback path must not re-expose
-                    # the r-loop-7 blocker (a disk-full episode burning
-                    # both attempts and rejecting under fix-failed).
+                    # host-level, not the session: refund the attempt.
+                    # Same carve-out the continuous driver applies; the
+                    # rollback path must not re-expose the r-loop-7
+                    # blocker (a disk-full episode burning both attempts
+                    # and rejecting under fix-failed). But park FIX_QUEUED
+                    # only when NOTHING was applied (r-loop 8 BLOCKER):
+                    # plan_fixes is pure, so a re-pick re-dispatches the
+                    # IDENTICAL plan from step 0 including already-
+                    # succeeded destructive steps (retrim removes head_s
+                    # again on every call — and this pass loop would
+                    # re-trim within a single run). A partially-applied
+                    # plan routes through REVALIDATING to re-derive from
+                    # the half-fixed copy (review finding #6).
                     ledger.update(sid, fix_attempts=row["fix_attempts"])
-                    ledger.set_state(sid, "FIX_QUEUED",
-                                     f"host-level fix failure — retrying: "
-                                     f"{out['error']}"[:300])
+                    if not any(a.get("ok")
+                               for a in (out.get("applied") or [])):
+                        ledger.set_state(
+                            sid, "FIX_QUEUED",
+                            f"host-level fix failure before any step "
+                            f"applied — retrying: {out['error']}"[:300])
+                    else:
+                        ledger.set_state(
+                            sid, "REVALIDATING",
+                            f"host-level fix failure after applied "
+                            f"step(s) — re-deriving from the current "
+                            f"copy: {out['error']}"[:300])
                     _alert(cfg, f"fix hit a host-level error on {sid} "
                                 f"(will retry): {out['error']}", alerts)
                     continue
