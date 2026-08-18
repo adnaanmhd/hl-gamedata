@@ -97,3 +97,91 @@ def test_settled_today_refuses_silently_and_doc_resume_survives(
     assert runmod.send_daily_report_if_due(
         cfg, ledger, _send_time(hour=16)) is False
     assert "WEDGED/pending" not in capsys.readouterr().err
+
+
+# ------- r11 #2/#13/#20: the orphan void reconciles against DELIVERED
+# ------- nodes, not id presence
+
+def _paid_tree(tmp_path, player):
+    from pipeline.ledger import Ledger
+    from pipeline.tests.test_payment_split_r6 import _put
+    led = Ledger(tmp_path / "l.db")
+    root = "2026-08-14T09-00-00Z_kamla_c_0000000000000rcv"
+    _put(led, root, state="DISCOVERED", raw=3600.0, player=player)
+    led.update(root, uploaded_reported_at="2026-08-15T00:00:00+00:00")
+    return led, root
+
+
+def test_recut_sibling_of_a_matching_paid_id_is_not_counted(tmp_path,
+                                                            capsys):
+    """Same-level re-cut: the re-run re-creates R-p1 (deterministic
+    cutter ids) over DIFFERENT footage, so the id-presence void never
+    fired — R-p1 printed AMBIGUOUS but R-p2, carrying part of the same
+    already-paid 1700s, was counted IN FULL and stamped, silently."""
+    from pipeline.tests.test_payment_split_r6 import W2, _put, _row, _sheet
+    led, root = _paid_tree(tmp_path, "recut@x.com")
+    led.record_paid_piece(root, f"{root}-p1", 1700.0, None)
+    _put(led, f"{root}-p1", state="DELIVERED", parent=root,
+         delivered=900.0, player="recut@x.com")
+    _put(led, f"{root}-p2", state="DELIVERED", parent=root,
+         delivered=800.0, player="recut@x.com")
+    led.set_state(root, "SPLIT")
+    s = _row(_sheet(led, W2), "recut@x.com")
+    err = capsys.readouterr().err
+    assert "ORPHANED paid-piece memory" in err
+    assert s is None or s["kamla_accepted_hrs"] == 0.0, \
+        "the sibling may contain already-paid footage — never auto-paid"
+    assert led.get(f"{root}-p2")["accepted_reported_at"] is None
+    led.close()
+
+
+def test_nested_resplit_of_a_paid_id_is_not_counted(tmp_path, capsys):
+    """Nested re-split (the EXACT case the r10 comment claimed covered):
+    R-p1 exists again but as a SPLIT node, which the walk never compares
+    against memory — its grandchildren, carrying the already-paid
+    footage, were counted in full and stamped with zero loud lines."""
+    from pipeline.tests.test_payment_split_r6 import W2, _put, _row, _sheet
+    led, root = _paid_tree(tmp_path, "nest@x.com")
+    led.record_paid_piece(root, f"{root}-p1", 1700.0, None)
+    _put(led, f"{root}-p1", state="DISCOVERED", parent=root,
+         player="nest@x.com")
+    led.set_state(f"{root}-p1", "SPLIT")
+    for kid, secs in ((f"{root}-p1-p1", 150.0), (f"{root}-p1-p2", 140.0),
+                      (f"{root}-p2", 200.0)):
+        _put(led, kid, state="DELIVERED",
+             parent=f"{root}-p1" if "-p1-p" in kid else root,
+             delivered=secs, player="nest@x.com")
+    led.set_state(root, "SPLIT")
+    s = _row(_sheet(led, W2), "nest@x.com")
+    err = capsys.readouterr().err
+    assert "ORPHANED paid-piece memory" in err
+    assert s is None or s["kamla_accepted_hrs"] == 0.0, \
+        "grandchildren carry the already-paid footage"
+    for kid in (f"{root}-p1-p1", f"{root}-p1-p2", f"{root}-p2"):
+        assert led.get(kid)["accepted_reported_at"] is None, kid
+    led.close()
+
+
+def test_all_matched_orphan_tree_stays_loud_every_sheet(tmp_path, capsys):
+    """#20's silent half: when every surviving DELIVERED node id-matches
+    memory, no loud line ever printed — the void kept the root
+    re-entering every future sheet, silently, forever. The ROOT now
+    prints one reconcile line per sheet; the re-entry itself pins the
+    void (orphaned-off would suppress the line entirely)."""
+    from pipeline.tests.test_payment_split_r6 import W2, W3, _put, _row, \
+        _sheet
+    led, root = _paid_tree(tmp_path, "allm@x.com")
+    led.record_paid_piece(root, f"{root}-p1", 1700.0, None)
+    led.record_paid_piece(root, f"{root}-p2", 1600.0, None)
+    # only -p1 survives the re-run, id- AND seconds-identical; -p2's
+    # footage was dropped by the new cut
+    _put(led, f"{root}-p1", state="DELIVERED", parent=root,
+         delivered=1700.0, player="allm@x.com")
+    led.set_state(root, "SPLIT")
+    s = _row(_sheet(led, W2), "allm@x.com")
+    assert "ORPHANED paid-piece memory" in capsys.readouterr().err
+    assert s is None or s["kamla_accepted_hrs"] == 0.0
+    _sheet(led, W3)
+    assert "ORPHANED paid-piece memory" in capsys.readouterr().err, \
+        "the reconcile line must repeat until a human reconciles"
+    led.close()

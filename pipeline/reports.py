@@ -414,6 +414,38 @@ def pending_daily_send(cfg) -> str | None:
 _ACCEPTED_STATES = ("DELIVERED", "REJECTED")
 
 
+def _mem_reconcile_failures(root, children: dict, mem: dict) -> list[str]:
+    """Paid-piece memory rows that fail to reconcile against the tree's
+    DELIVERED nodes (r-loop 11 #2/#13/#20). Cutter ids are deterministic
+    ({sid}-p1, {sid}-p1-p1), so an id-PRESENCE check proves nothing: any
+    re-cut re-creates the recorded id over different footage. A memory
+    row reconciles only when its id is a currently-DELIVERED node with
+    the recorded seconds (±1.0s); an id that is absent, now
+    SPLIT/REJECTED/pending, or seconds-mismatched proves the cut changed
+    — which is the entire premise of the memory skip, so the whole
+    tree's match is void."""
+    by_id: dict[str, dict] = {}
+    st = [root]
+    while st:
+        n = st.pop()
+        by_id[n["session_id"]] = n
+        st.extend(children.get(n["session_id"], []))
+    out: list[str] = []
+    for pid, secs in sorted(mem.items()):
+        node = by_id.get(pid)
+        if node is None:
+            out.append(f"{pid} (absent)")
+        elif node["state"] != "DELIVERED":
+            out.append(f"{pid} (now {node['state']})")
+        elif secs is None or \
+                abs((node["duration_delivered_s"] or 0.0) - secs) > 1.0:
+            out.append(f"{pid} (paid "
+                       f"{secs if secs is not None else '?'}s, "
+                       f"re-delivered "
+                       f"{(node['duration_delivered_s'] or 0.0):.0f}s)")
+    return out
+
+
 def _tree_has_uncounted_accepted(root, children: dict,
                                  mem: dict | None = None) -> bool:
     """Does this root's tree hold a DELIVERED/REJECTED node whose accepted
@@ -421,19 +453,15 @@ def _tree_has_uncounted_accepted(root, children: dict,
     re-entry — see mark_accepted_reported. A DELIVERED node in the paid
     -piece memory is treated as counted (r-loop 9, ruling C): without
     this, a memory-skipped node (which never gets a stamp) would re-enter
-    its root on every future sheet forever. With ORPHANED memory rows
-    (r-loop 10 #11) the match is void — every unstamped node keeps the
-    root re-entering so the loud exclusion line repeats until a human
-    reconciles."""
-    orphaned = False
-    if mem:
-        tree_ids = set()
-        st = [root]
-        while st:
-            n_ = st.pop()
-            tree_ids.add(n_["session_id"])
-            st.extend(children.get(n_["session_id"], []))
-        orphaned = any(pid not in tree_ids for pid in mem)
+    its root on every future sheet forever. The match is VOID whenever
+    any memory row fails to reconcile against the tree's DELIVERED nodes
+    (r-loop 10 #11, re-keyed r-loop 11 #2/#13/#20: cutter ids are
+    deterministic, so id PRESENCE proves nothing — a recorded id absent,
+    present as non-DELIVERED, or seconds-mismatched all prove the cut
+    changed) — every unstamped node then keeps the root re-entering so
+    the loud exclusion line repeats until a human reconciles."""
+    orphaned = _mem_reconcile_failures(root, children, mem) if mem \
+        else []
     stack = [root]
     while stack:
         n = stack.pop()
@@ -626,23 +654,26 @@ def build_sheet_rows(ledger: Ledger, day_ist: datetime,
                     (root["duration_raw_s"] or 0.0) / 3600.0
         # recursive walk of the whole tree (root included)
         mem = paid_mem.get(root["session_id"]) or {}
-        orphaned: list[str] = []
-        if mem:
-            tree_ids = set()
-            st = [root]
-            while st:
-                n_ = st.pop()
-                tree_ids.add(n_["session_id"])
-                st.extend(children.get(n_["session_id"], []))
-            # ORPHANED memory (r-loop 10 #11): a paid piece whose id no
-            # longer exists in the tree means the re-run re-delivered the
-            # same footage under DIFFERENT ids (unsplit root, re-cut
-            # -p1-p1 nesting — the EXPECTED refix outcome when rules
-            # loosen). An id-keyed match alone would then silently
-            # double-pay; instead every not-in-memory DELIVERED node of
-            # such a tree is excluded LOUDLY like an id collision, until
-            # a human reconciles the memory rows.
-            orphaned = sorted(pid for pid in mem if pid not in tree_ids)
+        # ORPHANED memory (r-loop 10 #11, re-keyed r-loop 11 #2/#13/#20):
+        # a paid piece that fails to reconcile against the tree's
+        # DELIVERED nodes — id absent, id now SPLIT/REJECTED/pending, or
+        # seconds-mismatched — means the re-run re-cut the same footage
+        # (unsplit root, re-cut siblings, -p1-p1 nesting: the EXPECTED
+        # refix outcomes). Deterministic cutter ids made a bare
+        # id-PRESENCE check silently double-pay: any re-cut re-creates
+        # R-p1, so the void never fired. On any failed reconcile, every
+        # not-in-memory DELIVERED node of the tree is excluded LOUDLY,
+        # and the ROOT prints one reconcile line per sheet even when no
+        # such node exists (#20: all-matched trees re-entered silently
+        # forever), until a human reconciles the memory rows.
+        orphaned = _mem_reconcile_failures(root, children, mem) if mem \
+            else []
+        if orphaned:
+            print(f"[sheet] ORPHANED paid-piece memory under "
+                  f"{root['session_id']}: {'; '.join(orphaned)} — paid "
+                  f"rows failed to reconcile against the tree's "
+                  f"DELIVERED nodes; not-in-memory DELIVERED hours are "
+                  f"withheld; reconcile by hand", file=sys.stderr)
         stack = [root]
         while stack:
             n = stack.pop()
