@@ -373,6 +373,34 @@ def test_pending_daily_send_fails_closed_when_it_cannot_look(cfg):
     assert reports.pending_regen_send(cfg) is None
 
 
+# ------- r12 #14: the F6 producer half pinned (metrics -> worker)
+
+def test_metrics_carries_the_probed_duration():
+    """Deleting the _metrics wiring kept the 674-test gate green while
+    NULL-duration roots silently lost their uploaded hours — the F6
+    backfill tests all faked the worker dict, never the producer."""
+    from pipeline import validate
+    m = validate._metrics({}, {"probed_duration_s": 55.5})
+    assert m["probed_duration_s"] == 55.5
+
+
+def test_validate_worker_forwards_the_probed_duration(cfg, monkeypatch):
+    """The worker-side forwarding link, exercised through the REAL
+    _validate_worker (validate_session stubbed at its import site)."""
+    from pipeline import validate
+    monkeypatch.setattr(
+        validate, "validate_session",
+        lambda *a, **k: validate.MapResult(
+            bin=1, hold_vlm=False, engine_verdict="",
+            metrics={"probed_duration_s": 77.0, "models_used": []}))
+    res = runmod._validate_worker(
+        {"sid": "s-fwd", "work_dir": str(cfg.work / "s-fwd"),
+         "dossier_dir": str(cfg.dossiers / "s-fwd"), "payload": "v2",
+         "expected_game": None, "gemini_key": "", "gemini_model": "",
+         "vlm_rung": 0})
+    assert res["probed_duration_s"] == 77.0, res
+
+
 # ------- r12 #4: the DISCOVERED-media reclaim grace re-arms per reclaim
 
 def test_reclaim_grace_rearms_after_a_sweep(cfg, ledger):
