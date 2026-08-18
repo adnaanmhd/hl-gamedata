@@ -37,6 +37,7 @@ from translator import context as ctxmod                     # noqa: E402
 from translator import rrd                                   # noqa: E402
 from translator.keybind import build_resolver                # noqa: E402
 from translator.keybinds import KEYBINDS, game_key_from_name # noqa: E402
+from translator.translate import resolve_keybind             # noqa: E402
 from translator.v2 import (KEYBIND_PATCHES, V2_FRAME_COLS,   # noqa: E402
                            apply_context_to_rows, key_canonical, key_display,
                            _BTN_DISPLAY, _BTN_DISPLAY_INV)
@@ -83,7 +84,14 @@ def fix_session(session_dir: Path, out_root: Path, date: str,
                 ctx_track[i] = ctx
         ambig = {int(k): v for k, v in (ov.get("ambiguous") or {}).items()}
 
-        kb = dict(KEYBINDS[slug])
+        kbp = session_dir / "raw" / "keybind.json"
+        if kbp.exists():
+            # the session's own keybind is authoritative (r-loop 12
+            # #5/#8, mirroring pipeline/fix.py's F4'd sites)
+            kb = resolve_keybind(keybind_path=kbp, game_name=slug,
+                                 exe_name=None)
+        else:
+            kb = dict(KEYBINDS[slug])
         kb.update(KEYBIND_PATCHES.get(slug, {}))
         summary["context"] = apply_context_to_rows(
             rows, ctx_track, slug, build_resolver(kb), s["fps"],

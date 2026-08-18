@@ -1112,7 +1112,18 @@ def fix_actions_context(work: Path, game: str) -> str:
     track = ctxmod.classify_video(work / "video.mp4", s["fps"], game)
     if len(track) != len(rows):
         raise FixFailed(f"context track {len(track)} != {len(rows)} rows")
-    kb = dict(KEYBINDS[game])
+    kbp = work / "raw" / "keybind.json"
+    if kbp.exists():
+        # the session's own keybind.json is AUTHORITATIVE here exactly as
+        # in fix_key_hygiene (F4) — this step REWRITES input_actions for
+        # every row, so resolving with the built-ins re-labeled every
+        # custom-bound session (interact presses shipped as the built-in
+        # semantic, checker-green) and undid hygiene's correct resolution
+        # one step later in the same plan (r-loop 12 #5/#8).
+        kb = resolve_keybind(keybind_path=kbp, game_name=game,
+                             exe_name=None)
+    else:
+        kb = dict(KEYBINDS[game])
     kb.update(KEYBIND_PATCHES.get(game, {}))
     from translator.v2 import apply_context_to_rows
     summary = apply_context_to_rows(rows, track, game, build_resolver(kb),

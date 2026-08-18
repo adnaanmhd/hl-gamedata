@@ -98,6 +98,61 @@ def test_deferral_adjudicated_new_bytes_still_skip(cfg, ledger,
     assert "SKIPPED" in capsys.readouterr().err
 
 
+# ------- r12 #5/#8: fix_actions_context resolves the session's keybind
+
+def _context_work(tmp_path, monkeypatch, key, keybind: dict | None):
+    from pipeline.tests.test_r_loop7 import make_gate_csv
+    from translator import context as ctxmod
+    work = tmp_path / "C"
+    (work / "raw").mkdir(parents=True)
+    make_gate_csv(work, n=60,
+                  inputs={i: (key, "general_flashlight")
+                          for i in range(10, 16)})
+    (work / "session.json").write_text('{"fps": 30.0}')
+    if keybind is not None:
+        (work / "raw" / "keybind.json").write_text(json.dumps(keybind))
+    monkeypatch.setattr(ctxmod, "available", lambda: True)
+    monkeypatch.setattr(ctxmod, "classify_video",
+                        lambda video, fps, game: ["on_foot"] * 60)
+    return work
+
+
+def test_actions_context_honors_the_sessions_own_keybind(tmp_path,
+                                                         monkeypatch):
+    """F4 fixed hygiene but FIX_ACTIONS_CONTEXT — mandatory after any OW
+    hygiene plan, and an action REWRITER for every row — still resolved
+    with the built-ins: custom-bound presses lost their actions (or were
+    silently re-labeled with the built-in semantic) one step after
+    hygiene resolved them correctly."""
+    from pipeline import fix as fixmod
+    work = _context_work(tmp_path, monkeypatch, "G",
+                         {"general_flashlight": "g"})
+    note = fixmod.fix_actions_context(work, "outer_wilds")
+    header, rows = fixmod._read_csv(work)
+    col = {c: i for i, c in enumerate(header)}
+    carrying = [r for r in rows
+                if "G" in r[col["input_keys"]].split("|")]
+    assert len(carrying) == 6, note
+    assert all("general_flashlight" in r[col["input_actions"]]
+               for r in carrying), \
+        "the custom bind's action must survive the context rewrite"
+
+
+def test_actions_context_without_sidecar_uses_the_builtin(tmp_path,
+                                                          monkeypatch):
+    """Control: no session keybind — the built-in governs unchanged."""
+    from pipeline import fix as fixmod
+    work = _context_work(tmp_path, monkeypatch, "F", None)
+    fixmod.fix_actions_context(work, "outer_wilds")
+    header, rows = fixmod._read_csv(work)
+    col = {c: i for i, c in enumerate(header)}
+    carrying = [r for r in rows
+                if "F" in r[col["input_keys"]].split("|")]
+    assert len(carrying) == 6
+    assert all("general_flashlight" in r[col["input_actions"]]
+               for r in carrying)
+
+
 # ------- r12 #4: the DISCOVERED-media reclaim grace re-arms per reclaim
 
 def test_reclaim_grace_rearms_after_a_sweep(cfg, ledger):
