@@ -306,8 +306,30 @@ def r_countable(root) -> bool:
     return root["duration_raw_s"] is not None
 
 
+def _stamp(ledger: Ledger, sid: str, column: str, now: str,
+           md5s: dict | None) -> bool:
+    """One payment stamp, compare-and-set on the bytes the sheet counted
+    (r-loop 11 #7): when the snapshot carries this sid's md5, the stamp
+    lands only if the row still holds those bytes — a supersede/heal in
+    the stamp window (it spans Telegram sends) otherwise stamped the
+    RESET slot and stranded the corrected re-upload's hours off every
+    future sheet. No snapshot entry (or a NULL one — SQL NULL never
+    equals) keeps today's unconditional stamp."""
+    m = (md5s or {}).get(sid)
+    if m is None:
+        ledger.update(sid, **{column: now})
+        return True
+    if ledger.update_where_md5(sid, m, **{column: now}):
+        return True
+    print(f"[sheet-stamp] {sid}: bytes changed since the sheet counted "
+          f"them (supersede/heal mid-send) — {column} SKIPPED; the new "
+          f"hours stay countable", file=sys.stderr)
+    return False
+
+
 def mark_uploads_reported(ledger: Ledger, lo: str, hi: str,
-                          sids: list[str] | None = None) -> int:
+                          sids: list[str] | None = None,
+                          md5s: dict | None = None) -> int:
     """Stamp uploaded_reported_at on every root the just-generated sheet
     counted. The stamp is what stops a late arrival being counted twice.
     Returns the number stamped.
@@ -317,12 +339,12 @@ def mark_uploads_reported(ledger: Ledger, lo: str, hi: str,
     the D thread, and a root probed between generation and stamping got
     stamped without ever being counted — its hours vanished from every
     sheet (review-r5 #3). The re-derive below survives only as a fallback
-    for callers without a counted list."""
+    for callers without a counted list. `md5s` is build_sheet_rows'
+    md5_out snapshot — see _stamp (r-loop 11 #7)."""
     now = datetime.now(timezone.utc).isoformat(timespec="seconds")
     if sids is not None:
-        for sid in sids:
-            ledger.update(sid, uploaded_reported_at=now)
-        return len(sids)
+        return sum(_stamp(ledger, sid, "uploaded_reported_at", now, md5s)
+                   for sid in sids)
     lo_dt, hi_dt = _parse_ts(lo), _parse_ts(hi)
     if lo_dt is None or hi_dt is None:
         return 0
@@ -341,7 +363,8 @@ def mark_uploads_reported(ledger: Ledger, lo: str, hi: str,
     return n
 
 
-def mark_accepted_reported(ledger: Ledger, sids: list[str]) -> int:
+def mark_accepted_reported(ledger: Ledger, sids: list[str],
+                           md5s: dict | None = None) -> int:
     """Stamp accepted_reported_at on every NODE whose accepted hours (or
     reject labels) the just-generated sheet counted — build_sheet_rows'
     accepted_out. Returns the number stamped.
@@ -357,11 +380,12 @@ def mark_accepted_reported(ledger: Ledger, sids: list[str]) -> int:
 
     Deliberately has NO re-derive fallback: re-deriving the counted set
     raced the pipeline threads and stamped rows the sheet never counted
-    (review-r5 #3). The caller passes what the sheet actually counted."""
+    (review-r5 #3). The caller passes what the sheet actually counted.
+    `md5s` is build_sheet_rows' md5_out snapshot — see _stamp
+    (r-loop 11 #7)."""
     now = datetime.now(timezone.utc).isoformat(timespec="seconds")
-    for sid in sids:
-        ledger.update(sid, accepted_reported_at=now)
-    return len(sids)
+    return sum(_stamp(ledger, sid, "accepted_reported_at", now, md5s)
+               for sid in sids)
 
 
 def _parse_ts(v: str | None) -> datetime | None:
@@ -487,7 +511,8 @@ def _tree_has_uncounted_accepted(root, children: dict,
 def build_sheet_rows(ledger: Ledger, day_ist: datetime,
                      bounds: tuple[str, str] | None = None,
                      counted_out: list[str] | None = None,
-                     accepted_out: list[str] | None = None) -> list[dict]:
+                     accepted_out: list[str] | None = None,
+                     md5_out: dict | None = None) -> list[dict]:
     """One row per (operator, player), COHORT accounting (v4, 08-15):
     every ROOT upload (parent_id IS NULL, not DUPLICATE/QUARANTINED)
     whose drive_ctime falls in the window contributes — to that window —
@@ -526,7 +551,7 @@ def build_sheet_rows(ledger: Ledger, day_ist: datetime,
         "SELECT session_id, game, operator_email, player_email, parent_id,"
         " state, drive_ctime, created_at, duration_raw_s,"
         " duration_delivered_s, reasons_json, uploaded_reported_at,"
-        " accepted_reported_at, tree_sealed_at"
+        " accepted_reported_at, tree_sealed_at, md5_video"
         " FROM sessions WHERE player_email != ''").fetchall()
     children: dict[str, list] = {}
     for r in rows:
@@ -670,6 +695,11 @@ def build_sheet_rows(ledger: Ledger, day_ist: datetime,
             # An accepted-only re-entry never lands here: its uploaded
             # hours were counted (and stamped) by an earlier sheet.
             counted_out.append(root["session_id"])
+            if md5_out is not None:
+                # md5 snapshot from THIS read — the stamp's compare-and-
+                # set key (r-loop 11 #7); a post-build re-query could
+                # already see a superseded row
+                md5_out[root["session_id"]] = root["md5_video"]
         if in_window or late:
             g_root = game_col.get(root["game"] or "")
             if g_root is not None:
@@ -735,6 +765,8 @@ def build_sheet_rows(ledger: Ledger, day_ist: datetime,
                     (n["duration_delivered_s"] or 0.0) / 3600.0
                 if accepted_out is not None:
                     accepted_out.append(n["session_id"])
+                if md5_out is not None:
+                    md5_out[n["session_id"]] = n["md5_video"]
             elif n["state"] == "REJECTED":
                 if sealed or n["accepted_reported_at"]:
                     continue
@@ -746,6 +778,8 @@ def build_sheet_rows(ledger: Ledger, day_ist: datetime,
                 bucket(n)[f"{g}_rej"].append(labels)
                 if accepted_out is not None:
                     accepted_out.append(n["session_id"])
+                if md5_out is not None:
+                    md5_out[n["session_id"]] = n["md5_video"]
             elif n["state"] != "SPLIT":
                 # still in flight (SPLIT itself carries nothing — its
                 # children hold the hours)
@@ -794,7 +828,8 @@ def build_sheet_rows(ledger: Ledger, day_ist: datetime,
 def write_payment_sheet(cfg: C.Config, ledger: Ledger, day_ist: datetime,
                         bounds: tuple[str, str] | None = None,
                         counted_out: list[str] | None = None,
-                        accepted_out: list[str] | None = None
+                        accepted_out: list[str] | None = None,
+                        md5_out: dict | None = None
                         ) -> tuple[Path, Path]:
     """CSV + MD twin under ~/hl-pipeline/reports/YYYY-MM-DD/ (F8)."""
     day = day_ist.strftime("%Y-%m-%d")
@@ -804,7 +839,7 @@ def write_payment_sheet(cfg: C.Config, ledger: Ledger, day_ist: datetime,
     # detail' section below is built from EXACTLY what this sheet counted
     accepted_here: list[str] = []
     rows = build_sheet_rows(ledger, day_ist, bounds, counted_out=counted_out,
-                            accepted_out=accepted_here)
+                            accepted_out=accepted_here, md5_out=md5_out)
     if accepted_out is not None:
         accepted_out.extend(accepted_here)
     csv_path = out / f"payment-{day}.csv"

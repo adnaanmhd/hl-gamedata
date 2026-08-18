@@ -167,16 +167,18 @@ class Ledger:
             (session_id, now, from_state, to_state, detail))
         self.db.commit()
 
+    _UPDATE_ALLOWED = frozenset({
+        "bin", "reasons_json", "fix_attempts",
+        "duration_delivered_s", "duration_raw_s", "rrd_sampled",
+        "delivered_at", "dossier_path", "md5_video", "bytes",
+        "game", "drive_path", "drive_ctime", "parent_id",
+        "operator_email", "player_email", "uploaded_reported_at",
+        "accepted_reported_at", "tree_sealed_at"})
+
     def update(self, session_id: str, **fields) -> None:
         """Update non-state columns (state changes go through set_state)."""
         assert "state" not in fields, "use set_state for state transitions"
-        allowed = {"bin", "reasons_json", "fix_attempts",
-                   "duration_delivered_s", "duration_raw_s", "rrd_sampled",
-                   "delivered_at", "dossier_path", "md5_video", "bytes",
-                   "game", "drive_path", "drive_ctime", "parent_id",
-                   "operator_email", "player_email", "uploaded_reported_at",
-                   "accepted_reported_at", "tree_sealed_at"}
-        bad = set(fields) - allowed
+        bad = set(fields) - self._UPDATE_ALLOWED
         assert not bad, f"unknown ledger fields: {bad}"
         sets = ", ".join(f"{k}=?" for k in fields)
         vals = list(fields.values()) + [_now(), session_id]
@@ -184,6 +186,29 @@ class Ledger:
             f"UPDATE sessions SET {sets}, updated_at=? WHERE session_id=?",
             vals)
         self.db.commit()
+
+    def update_where_md5(self, session_id: str, md5_video: str,
+                         **fields) -> int:
+        """update() with a compare-and-set guard on md5_video (r-loop 11
+        #7). The daily stamps run in hl-H while hl-S concurrently
+        supersedes/heals, and the stamp window spans Telegram sends
+        (minutes) — a stamp landing unconditionally on a reset slot
+        strands the corrected re-upload's hours off every future sheet.
+        supersede and the different-md5 heal both write the new md5
+        atomically WITH their mark clears, so md5 equality is exactly
+        'the bytes this sheet counted'. Returns rows changed (0 = the
+        bytes changed under the caller; skip loudly — the new hours stay
+        countable)."""
+        assert "state" not in fields, "use set_state for state transitions"
+        bad = set(fields) - self._UPDATE_ALLOWED
+        assert not bad, f"unknown ledger fields: {bad}"
+        sets = ", ".join(f"{k}=?" for k in fields)
+        vals = list(fields.values()) + [_now(), session_id, md5_video]
+        cur = self.db.execute(
+            f"UPDATE sessions SET {sets}, updated_at=?"
+            f" WHERE session_id=? AND md5_video=?", vals)
+        self.db.commit()
+        return cur.rowcount
 
     def set_reasons(self, session_id: str, reasons: list[dict],
                     bin_: int | None) -> None:

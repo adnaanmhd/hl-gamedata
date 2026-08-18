@@ -389,11 +389,11 @@ def test_daily_partial_stamp_crash_resumes_never_regenerates(
     calls = {"n": 0}
     real = reports.mark_accepted_reported
 
-    def flaky(led_, sids):
+    def flaky(led_, sids, md5s=None):
         calls["n"] += 1
         if calls["n"] == 1:
             raise sqlite3.OperationalError("database is locked")
-        return real(led_, sids)
+        return real(led_, sids, md5s=md5s)
     monkeypatch.setattr(reports, "mark_accepted_reported", flaky)
     with pytest.raises(sqlite3.OperationalError):
         runmod.send_daily_report_if_due(cfg, ledger, send)

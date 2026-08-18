@@ -131,11 +131,11 @@ def test_daily_resume_survives_ist_midnight(cfg, ledger, monkeypatch):
     calls = {"n": 0}
     real = reports.mark_uploads_reported
 
-    def flaky(led_, lo, hi, sids=None):
+    def flaky(led_, lo, hi, sids=None, md5s=None):
         calls["n"] += 1
         if calls["n"] == 1:
             raise sqlite3.OperationalError("database is locked")
-        return real(led_, lo, hi, sids=sids)
+        return real(led_, lo, hi, sids=sids, md5s=md5s)
     monkeypatch.setattr(reports, "mark_uploads_reported", flaky)
     with pytest.raises(sqlite3.OperationalError):
         runmod.send_daily_report_if_due(cfg, ledger, send)

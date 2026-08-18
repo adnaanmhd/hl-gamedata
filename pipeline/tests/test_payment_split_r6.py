@@ -461,9 +461,9 @@ def test_accepted_mark_is_written_by_the_daily_send_before_the_anchor(
     real_mark = reports.mark_accepted_reported
     seen: list[bool] = []
 
-    def spy(led, sids):
+    def spy(led, sids, md5s=None):
         seen.append(anchor.exists())        # anchor must not exist yet
-        return real_mark(led, sids)
+        return real_mark(led, sids, md5s=md5s)
     monkeypatch.setattr(reports, "mark_accepted_reported", spy)
     assert runmod.send_daily_report_if_due(cfg, ledger, send) is True
     assert seen == [False], "accepted stamp must precede the anchor write"

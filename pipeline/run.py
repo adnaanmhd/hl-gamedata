@@ -1121,12 +1121,17 @@ def _resume_daily_send(cfg: C.Config, ledger: Ledger, now_ist: datetime,
         return False
     # idempotent re-stamps of exactly what the interrupted send counted
     # (minus the deliberately-cleared skips above); ordering
-    # (stamps -> anchor -> marker) preserved from the fresh path
+    # (stamps -> anchor -> marker) preserved from the fresh path. The
+    # record's md5 map rides along as the stamps' compare-and-set key
+    # (r-loop 11 #7) — the _bytes_changed pre-filter above covers the
+    # crash-recovery gap, this covers the stamp window itself.
     stamped = reports.mark_uploads_reported(ledger, lo, hi,
-                                            sids=counted_keep)
+                                            sids=counted_keep,
+                                            md5s=rec.get("md5") or {})
     if stamped:
         print(f"[daily] resume: re-stamped {stamped} root upload(s)")
-    acc_stamped = reports.mark_accepted_reported(ledger, accepted_keep)
+    acc_stamped = reports.mark_accepted_reported(ledger, accepted_keep,
+                                                 md5s=rec.get("md5") or {})
     if acc_stamped:
         print(f"[daily] resume: re-stamped {acc_stamped} accepted node(s)")
     (cfg.reports_dir / ".last_daily_sent").write_text(hi)
@@ -1261,10 +1266,12 @@ def send_daily_report_if_due(cfg: C.Config, ledger: Ledger,
     d = _build_daily_stats(ledger, now_ist, lo, hi)
     counted: list[str] = []
     accepted: list[str] = []
+    md5s: dict[str, str] = {}
     csv_path, _md = reports.write_payment_sheet(cfg, ledger, now_ist,
                                                 bounds=(lo, hi),
                                                 counted_out=counted,
-                                                accepted_out=accepted)
+                                                accepted_out=accepted,
+                                                md5_out=md5s)
     # DURABLE COUNTED RECORD (r-loop 8 BLOCKER), written atomically after
     # the CSV and before anything sends or stamps: nothing between
     # sheet-build and marker used to persist counted/accepted, so any
@@ -1278,12 +1285,14 @@ def send_daily_report_if_due(cfg: C.Config, ledger: Ledger,
     tmp = record.with_name(record.name + f".tmp{os.getpid()}")
     tmp.write_text(json.dumps({
         "lo": lo, "hi": hi, "counted": counted, "accepted": accepted,
-        # per-sid md5 at count time: the resume skips re-stamping any sid
-        # whose bytes changed under the record (supersede/different-md5
-        # heal — the only unguarded mark-clearing flows; r-loop 9 #4,
-        # deviation in plan §9 D5b). "at" is forensic.
-        "md5": {s: (r["md5_video"] if (r := ledger.get(s)) else None)
-                for s in dict.fromkeys(counted + accepted)},
+        # per-sid md5 AT COUNT TIME, from the sheet's own row read
+        # (build_sheet_rows' md5_out — r-loop 11 #7 replaced the
+        # post-build re-query, which could already see a superseded row):
+        # the resume skips re-stamping any sid whose bytes changed under
+        # the record (supersede/different-md5 heal — the only unguarded
+        # mark-clearing flows; r-loop 9 #4, deviation in plan §9 D5b),
+        # and the stamps compare-and-set on it. "at" is forensic.
+        "md5": md5s,
         "at": datetime.now(timezone.utc).isoformat(timespec="seconds")}))
     os.replace(tmp, record)
     msg = reports.build_daily_message(d, p)
@@ -1307,13 +1316,15 @@ def send_daily_report_if_due(cfg: C.Config, ledger: Ledger,
     # first, a kill anywhere in this sequence errs toward an identical or
     # smaller resent sheet — never toward double-counted hours. The
     # stamps are exactly what THIS sheet counted (review-r5 #3).
-    stamped = reports.mark_uploads_reported(ledger, lo, hi, sids=counted)
+    stamped = reports.mark_uploads_reported(ledger, lo, hi, sids=counted,
+                                            md5s=md5s)
     if stamped:
         print(f"[daily] stamped {stamped} root upload(s) as reported")
     # the accepted-side mark rides the SAME pre-anchor position for the
     # same reason: stamped-then-killed errs toward a smaller resent sheet,
     # never toward hours paid twice (RULED split, Adnaan 2026-08-18)
-    acc_stamped = reports.mark_accepted_reported(ledger, accepted)
+    acc_stamped = reports.mark_accepted_reported(ledger, accepted,
+                                                md5s=md5s)
     if acc_stamped:
         print(f"[daily] stamped {acc_stamped} node(s) as accepted-reported")
     anchor.write_text(hi)          # next report's window starts here

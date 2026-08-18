@@ -7,7 +7,7 @@ the pre-fix tree at 1500d95 (session scratchpad), per plan §1.
 from __future__ import annotations
 
 import json
-from datetime import timedelta
+from datetime import timedelta, timezone
 
 import pytest
 
@@ -457,3 +457,48 @@ def test_validate_backfills_null_duration_batch(cfg, ledger, monkeypatch):
                      "probed_duration_s": 99.0})
     runmod._validate_phase(cfg, ledger, [sid], [], workers=1)
     assert ledger.get(sid)["duration_raw_s"] == 99.0
+
+
+# ------- r11 #7: stamps compare-and-set on the counted bytes
+
+def test_stamps_skip_a_root_superseded_mid_send(cfg, ledger, monkeypatch,
+                                                capsys):
+    """The stamps ran unconditionally in hl-H while hl-S concurrently
+    supersedes/heals, and the stamp window spans Telegram sends
+    (minutes): a counted root superseded inside it got the stamps on the
+    RESET slot, stranding the corrected re-upload's hours off every
+    future sheet."""
+    from pipeline.tests.test_r_loop8 import _daily_seed
+    docs: list[bytes] = []
+    send, sid, csv_path, day = _daily_seed(cfg, ledger, monkeypatch,
+                                           docs=docs)
+    done = {"x": False}
+
+    def supersede_mid_send(c, t):
+        # the message send sits between sheet build and the stamps —
+        # exactly the race window
+        if not done["x"]:
+            done["x"] = True
+            ledger.supersede(sid, new_md5="c" * 32, new_bytes=22,
+                             new_ctime=ledger.get(sid)["drive_ctime"],
+                             dossier_root=cfg.dossiers)
+    monkeypatch.setattr(runmod.telegram, "send_message",
+                        supersede_mid_send)
+    assert runmod.send_daily_report_if_due(cfg, ledger, send) is True
+    row = ledger.get(sid)
+    assert row["uploaded_reported_at"] is None, \
+        "the stamp must not land on the reset slot"
+    assert row["accepted_reported_at"] is None
+    assert "SKIPPED" in capsys.readouterr().err
+    # the corrected re-upload delivers; its hours reach the D+1 sheet
+    # exactly once
+    ledger.update(sid, duration_raw_s=3600.0, duration_delivered_s=3600.0,
+                  delivered_at=(send + timedelta(hours=20))
+                  .astimezone(timezone.utc).isoformat(timespec="seconds"))
+    ledger.set_state(sid, "DELIVERED")
+    assert runmod.send_daily_report_if_due(
+        cfg, ledger, send + timedelta(days=1)) is True
+    assert b"p@x.com" in docs[-1], "the new upload's hours must be counted"
+    assert runmod.send_daily_report_if_due(
+        cfg, ledger, send + timedelta(days=2)) is True
+    assert b"p@x.com" not in docs[-1], "and only once"
