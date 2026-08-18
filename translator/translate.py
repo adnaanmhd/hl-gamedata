@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import csv
 import json
+import os
 import shutil
 import sys
 from datetime import datetime, timezone
@@ -55,6 +56,20 @@ def load_events(inputs_path: Path) -> list[dict]:
             if isinstance(ev, dict) and isinstance(ev.get("t"), int):
                 events.append(ev)
     return events
+
+
+def safe_session_id(session_id, bundle_dir: Path) -> str:
+    """Constrain a player-supplied session_id to ONE safe path component,
+    falling back to the bundle folder name exactly like the non-str case
+    (r-loop 11 #12): metadata.json is player-typed, and a session_id of
+    '../../../../ESCAPED_dir' was joined into the output path verbatim —
+    all four delivery files written OUTSIDE out/ (path traversal on the
+    pipeline VM). The r-loop-9 guard closed only the non-str crash."""
+    if isinstance(session_id, str) and session_id not in ("", ".") \
+            and "/" not in session_id and "\\" not in session_id \
+            and os.sep not in session_id and ".." not in session_id:
+        return session_id
+    return Path(bundle_dir).name
 
 
 def resolve_keybind(*, keybind_path: Path | None, game_name: str | None,
@@ -240,11 +255,15 @@ def translate_bundle(bundle_dir: Path, out_root: Path, *, do_trim: bool = True,
     game_info = meta.get("game", {})
     game_name = game_info.get("name") or meta.get("game_name")
     exe_name = game_info.get("exe_name")
-    session_id = meta.get("session_id") or bundle_dir.name
+    session_id = safe_session_id(meta.get("session_id"), bundle_dir)
     game_slug = game_key_from_name(game_name or "", exe_name) or "unknown_game"
 
     date = datetime.now(timezone.utc).strftime("%m-%d-%y")
     out_dir = Path(out_root) / VENDOR / game_slug / date / session_id
+    # defense-in-depth (r-loop 11 #12): whatever the inputs, the output
+    # tree stays inside out_root
+    assert out_dir.resolve().is_relative_to(Path(out_root).resolve()), \
+        out_dir
     out_dir.mkdir(parents=True, exist_ok=True)
 
     src_video = bundle_dir / "video.mp4"

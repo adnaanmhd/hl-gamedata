@@ -30,7 +30,8 @@ from .keybind import (bound_literals, build_resolver, collapse_ambiguous_runs,
                       invert_keybind, resolve_actions)
 from .keybinds import (AMBIGUOUS_PAIRS, CONTEXT_ALLOWED, KEYBINDS,
                        game_key_from_name)
-from .translate import VENDOR, load_events, resolve_keybind
+from .translate import (VENDOR, load_events, resolve_keybind,
+                        safe_session_id)
 
 
 class BundleError(Exception):
@@ -304,15 +305,19 @@ def translate_bundle_v2(bundle_dir: Path, out_root: Path, *,
         # a numeric exe_name reached game_key_from_name's re.sub and
         # crashed untyped (r-loop 9)
         exe_name = None
-    session_id = meta.get("session_id")
-    if not isinstance(session_id, str) or not session_id:
-        # a numeric session_id crashed the Path join untyped (r-loop 9);
-        # the folder name is the established fallback identity
-        session_id = bundle_dir.name
+    # one safe path component or the folder-name fallback: a numeric
+    # session_id crashed the Path join untyped (r-loop 9), and a
+    # traversal one ('../../..') wrote the delivery OUTSIDE out/
+    # (r-loop 11 #12)
+    session_id = safe_session_id(meta.get("session_id"), bundle_dir)
     slug = game_key_from_name(game_name or "", exe_name) or "unknown_game"
 
     date = datetime.now(timezone.utc).strftime("%m-%d-%Y")   # v2: 4-digit year
     out_dir = Path(out_root) / VENDOR / date / slug / session_id
+    # defense-in-depth (r-loop 11 #12): whatever the inputs, the output
+    # tree stays inside out_root
+    assert out_dir.resolve().is_relative_to(Path(out_root).resolve()), \
+        out_dir
     out_dir.mkdir(parents=True, exist_ok=True)
 
     raw_events = load_events(bundle_dir / "inputs.jsonl")
