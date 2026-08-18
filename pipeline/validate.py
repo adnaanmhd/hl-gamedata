@@ -133,6 +133,8 @@ _QA_SKIP = ("frame-sync drift", "controls-to-video sync",
 def _map_qa_issues(issues: list[str], reasons: list[dict],
                    has_raw: bool) -> None:
     seen: set[str] = set()
+    start = len(reasons)
+    unmapped: list[int] = []
     for issue in issues:
         if not issue.startswith("FAIL:"):
             continue
@@ -148,8 +150,32 @@ def _map_qa_issues(issues: list[str], reasons: list[dict],
         else:
             # never silently downgrade an unmapped FAIL; retranslate is the
             # universal strong fix when sidecars exist (R3)
+            unmapped.append(len(reasons))
             reasons.append(_reason("QA_FAIL_UNMAPPED", True, has_raw, {},
                                    msg))
+    # An unmapped FAIL must never UPGRADE a repairable verdict into a
+    # wrongful reject (r-loop 5). QA_FAIL_UNMAPPED is blocking+unfixable
+    # whenever has_raw is False, and one unfixable blocking reason forces
+    # bin 3 -- so a session that also raised a blocking+FIXABLE reason in
+    # this same qa pass was rejected outright with ZERO fix attempts,
+    # although the planned fix would have cleared BOTH FAILs. The
+    # canonical pair is "row count N != frame_count M" (-> STR_ROWS_MISMATCH
+    # -> FIX_ROWS_SURGERY, which truncates the offending tail rows) landing
+    # together with "frame_id column unparseable" on a no-sidecar upload.
+    #
+    # Downgrade to advisory ONLY in that company. Alone, an unmapped FAIL
+    # keeps its blocking verdict, so the r-loop-4 reasoning still holds:
+    # mapping frame_id-unparseable to STR_ROWS_MISMATCH outright would
+    # plan a surgery that no-ops and burn both attempts plus two paid VLM
+    # sweeps before rejecting anyway. This is the narrow middle: run the
+    # repair that was already planned, and let the re-validation decide.
+    if unmapped:
+        repairable = any(r["blocking"] and r["fixable"]
+                         for r in reasons[start:]
+                         if r["code"] != "QA_FAIL_UNMAPPED")
+        if repairable:
+            for i in unmapped:
+                reasons[i]["blocking"] = False
 
 
 _LAG_RE = re.compile(r"video (\d+(?:\.\d+)?)ms")
@@ -864,6 +890,24 @@ def _locked_report_update(report_path: Path, name: str,
     timeout we write anyway — worst case equals the pre-lock behavior."""
     lock = report_path.parent / (report_path.name + ".lock")
     held = False
+    # Owner stamp. The release used to be a bare `os.rmdir(lock)`, which
+    # removes whatever directory is sitting at that PATH -- not
+    # necessarily ours. The staleness breaker below rescinds a lock by
+    # renaming it aside and letting the next waiter mkdir a fresh one, but
+    # the rescinded holder's `held` flag is still True, so its finally
+    # deleted the SUCCESSOR's lock and a third racer walked straight in --
+    # two concurrent read-modify-writes, a lost {"shift_us": ...} entry,
+    # and then translator.v2._applied_shift_us returns 0, qa-v2 re-bins the
+    # raw mouse at head offset 0 and the session takes a spurious
+    # SYN_TS_NOT_PTS: one of only two fix attempts and one paid Gemini
+    # sweep burned on a session with nothing wrong with it. r-loop 3 cut
+    # REPORT_LOCK_STALE_S 120s -> 20s, shrinking the window in which a
+    # live-but-slow holder is judged dead by 6x, and r-loop 4 fixed this
+    # same one-pid-many-racers problem for the grave NAME but not for the
+    # release (r-loop 5). Unique per RACER, like the grave name.
+    token = (f"{os.getpid()}-{threading.get_ident()}-"
+             f"{uuid.uuid4().hex}")
+    owner = lock / "owner"
     # Patience must OUTLAST the staleness threshold (C.REPORT_LOCK_WAIT_S >
     # C.REPORT_LOCK_STALE_S), or the one case that cannot resolve itself —
     # a holder that died mid-section — is also the one case the breaker
@@ -877,6 +921,16 @@ def _locked_report_update(report_path: Path, name: str,
     while time.time() < deadline:
         try:
             os.mkdir(lock)
+            try:
+                owner.write_text(token)
+            except OSError:
+                # cannot stamp it -> cannot prove ownership later; give the
+                # lock straight back rather than hold an unprovable one
+                try:
+                    os.rmdir(lock)
+                except OSError:
+                    pass
+                raise FileExistsError
             held = True
             break
         except FileExistsError:
@@ -926,10 +980,19 @@ def _locked_report_update(report_path: Path, name: str,
         os.replace(tmp, report_path)
     finally:
         if held:
+            # Release ONLY if the lock at that path is still the one we
+            # took. If the breaker rescinded ours, someone else owns the
+            # path now and deleting it would disarm the mutex under them.
             try:
-                os.rmdir(lock)
+                mine = owner.read_text() == token
             except OSError:
-                pass
+                mine = False        # rescinded, or never stamped
+            if mine:
+                try:
+                    owner.unlink()
+                    os.rmdir(lock)
+                except OSError:
+                    pass
 
 
 def _locked_report_remove(report_path: Path, name: str) -> None:

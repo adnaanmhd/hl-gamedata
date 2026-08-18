@@ -196,6 +196,27 @@ def plan_fixes(reasons: list[dict], *, game: str, has_raw: bool) -> dict:
         if tail_cut:
             cuts.append((tail_cut, 1e9))
         _pre_cut_csv_fixes()
+        # Gate BEFORE the cut, never instead of it (r-loop 5). Both cut
+        # exits used to return here with gate_windows silently discarded,
+        # and nothing carried the window forward: the r-loop-4 sidecar was
+        # deliberately reverted, children are inserted with
+        # reasons_json="[]", and cutter.py:173 copies the parent's rows
+        # through verbatim -- so a segment could ship semantic actions
+        # recorded during a CONFIRMED freeze, which is the client complaint
+        # the gate exists to prevent. Re-deriving it in the child is not
+        # equivalent: it costs another paid Gemini sweep and one of the
+        # child's two attempts, and it can MISS -- the VLM samples every 4s,
+        # so a 3s freeze can fall between samples, _map_windows needs
+        # tier=='high', and _build_aux drops scanner statics near the edges.
+        # Gating here is always correct: it blanks in place on the parent's
+        # own timeline, where the window was measured, and the cutter copies
+        # the blanked rows into every child. Safe to run before the cut
+        # because these exits emit no hygiene/context step -- the fixes that
+        # re-derive input_actions and would undo it -- only the structural
+        # repairs _pre_cut_csv_fixes() just emitted, which the gate needs.
+        if gate_windows:
+            steps.append(("FIX_GATE_WINDOW",
+                          {"windows": sorted(gate_windows)}))
         steps.append(("FIX_CUT_SEGMENTS", {"cut": sorted(cuts)}))
         return {"steps": steps, "unfixable": sorted(set(unfixable))}
     if head_cut:
@@ -221,6 +242,10 @@ def plan_fixes(reasons: list[dict], *, game: str, has_raw: bool) -> dict:
         head_step = ("FIX_RETRIM_HEAD", {"head_s": head_cut})
     if tail_cut:
         _pre_cut_csv_fixes()
+        # same as the exit above (r-loop 5)
+        if gate_windows:
+            steps.append(("FIX_GATE_WINDOW",
+                          {"windows": sorted(gate_windows)}))
         steps.append(("FIX_CUT_SEGMENTS", {"cut": [(tail_cut, 1e9)]}))
         return {"steps": steps, "unfixable": sorted(set(unfixable))}
     if gate_windows:
