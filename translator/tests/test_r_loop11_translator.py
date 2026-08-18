@@ -57,3 +57,31 @@ def test_v1_translate_join_is_sanitized(tmp_path):
     assert safe_session_id("../../../evil", tmp_path / "b") == "b"
     assert safe_session_id(12345, tmp_path / "b") == "b"
     assert safe_session_id("ok-id_1.2", tmp_path / "b") == "ok-id_1.2"
+
+
+# ------- F11 (r11 #18): the translate-side motion_track guard has a pin
+
+@needs_ffmpeg
+def test_motion_track_failure_skips_lag_correction_in_translate(
+        tmp_path, monkeypatch):
+    """r10 #10 shipped four guard sites but pinned only the checker's:
+    neutering this one left the whole gate green. A dead opencv must
+    skip lag correction with a warning trail, never crash the
+    translate."""
+    from translator import sync as syncmod
+    if not syncmod.available():
+        pytest.skip("needs numpy + opencv")
+    d = _bundle(tmp_path, {"game": {"name": "Kamla"},
+                           "recording": dict(_GOOD_REC)})
+    evs = [{"t": 100_000 + i * 33_000, "type": "mouse_raw",
+            "dx": 3, "dy": 1} for i in range(20)]
+    (d / "inputs.jsonl").write_text(
+        "\n".join(json.dumps(e) for e in evs))
+
+    def boom(path):
+        raise ValueError(f"could not open video: {path}")
+    monkeypatch.setattr(syncmod, "motion_track", boom)
+    rep = v2.translate_bundle_v2(d, tmp_path / "out", make_rrd=False,
+                                 head_s=0.0, tail_s=0.0, lag_correct=True)
+    assert any("lag correction skipped" in w for w in rep["warnings"]), \
+        rep["warnings"]

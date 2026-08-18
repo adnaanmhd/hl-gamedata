@@ -185,6 +185,23 @@ Replacing the whole fix_v1_to_v2 button-canonicalization block (fix.py:1447-1457
 
 **Finder's proposed fix** (spec of record: plan §11): Add a round-trip test like the fix_key_hygiene one but through fix_v1_to_v2: seed a v1 session with 'left'/'Mouse4'/'LMB' button cells, apply FIX_V1_TO_V2, assert the checker's mouse-button FAIL cannot re-fire and mappable tokens canonicalized rather than dropped.
 
+**Disposition (F11 executor, 2026-08-19, per the degraded-vote caveat):**
+the single completed refuter's evidence (r11-results.json) was read before
+acting. It does NOT show fix_v1_to_v2 unreachable — the opposite: it
+reproduced attempt-1 planning [FIX_V1_TO_V2, FIX_SESSIONJSON_RECOMPUTE]
+on a real v1 payload. What it REFUTED is the harm claim: a fully
+regressed v1 half still converts the session to v2, the foreign tokens
+re-surface as INP_TOKEN_CASE (a DIFFERENT code — never an identical
+re-fire), attempt 2 plans FIX_KEY_HYGIENE (the tested half) and the
+session recovers within the 2-attempt budget. Net harm of a regression is
+one wasted fix attempt/sweep, not a terminal reject. The zero-coverage
+mechanism stands, so the pin was written anyway
+(`test_v1_to_v2_canonicalizes_foreign_button_tokens`,
+mutation-proved against the finder's exact revert); note the real
+vocabulary maps 'left'→'Left' and DROPS 'Mouse4'/'LMB' (unmappable — the
+r10 #7 design), so the test pins canonicalize-or-drop, not
+canonicalize-everything.
+
 ### #20 [MINOR] pipeline/reports.py:657 (tests-coverage, refuters 0/1)
 
 **Orphaned paid-piece memory goes silent when every surviving node id-matches memory; the re-entry void is also unpinned**

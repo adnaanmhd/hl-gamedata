@@ -12,6 +12,7 @@ from datetime import timedelta, timezone
 import pytest
 
 from pipeline import run as runmod
+from pipeline.tests.test_r_loop10 import needs_ffmpeg
 
 
 # ------- r11 #1/#14/#16 BLOCKER: a pending/wedged TODAY must never
@@ -457,6 +458,153 @@ def test_validate_backfills_null_duration_batch(cfg, ledger, monkeypatch):
                      "probed_duration_s": 99.0})
     runmod._validate_phase(cfg, ledger, [sid], [], workers=1)
     assert ledger.get(sid)["duration_raw_s"] == 99.0
+
+
+# ------- r11 #17: the exactly-once gate watermark, pinned on the PARENT
+
+def _gate_plan(tmp_path, monkeypatch, cut_behavior):
+    from pipeline import fix as fixmod
+    from pipeline import gate
+    from pipeline.tests.test_r_loop7 import make_gate_csv
+    work = tmp_path / "W"
+    work.mkdir()
+    make_gate_csv(work, inputs={300: ("Q", "general_cancel"),
+                                301: ("Q", "general_cancel"),
+                                302: ("Q", "general_cancel")})
+    dossier = tmp_path / "dossiers" / "W"
+    real_dispatch = fixmod._dispatch
+
+    def dispatch(fix_id, params, w, game, root):
+        if fix_id == "FIX_GATE_WINDOW":
+            return gate.gate_windows(w, params["windows"])
+        if fix_id == "FIX_CUT_SEGMENTS":
+            return cut_behavior()
+        return real_dispatch(fix_id, params, w, game, root)
+    monkeypatch.setattr(fixmod, "_dispatch", dispatch)
+    out = fixmod.apply_fixes(
+        work, {"steps": [("FIX_GATE_WINDOW", {"windows": [[300.0, 302.0]]}),
+                         ("FIX_CUT_SEGMENTS", {"cut": [[0.0, 1.0]]})]},
+        game="kamla", dossier_dir=dossier)
+    return out, dossier
+
+
+def _assert_single_gate_record(dossier):
+    """The r10 #1 invariant nothing pinned: reverting the post-loop
+    append from applied[persisted:] to applied doubles the gate entry
+    (key_frames 6, two ok records) with the whole gate green."""
+    from pipeline.validate import _gate_destroyed
+    g = _gate_destroyed(dossier)
+    assert g == {"actions": ["general_cancel"], "key_frames": 3}, g
+    log = json.loads((dossier / "fixlog.json").read_text())
+    gates = [e for rec in log for e in rec["fixes"]
+             if e["fix"] == "FIX_GATE_WINDOW" and e.get("ok")]
+    assert len(gates) == 1, gates
+
+
+def test_gate_watermark_single_count_after_failed_cut(tmp_path,
+                                                      monkeypatch):
+    from pipeline import fix as fixmod
+
+    def failing_cut():
+        raise fixmod.FixFailed("cut failed")
+    out, dossier = _gate_plan(tmp_path, monkeypatch, failing_cut)
+    assert out["error"] and out["kind"] == "session"
+    _assert_single_gate_record(dossier)
+
+
+def test_gate_watermark_single_entry_after_success(tmp_path, monkeypatch):
+    out, dossier = _gate_plan(tmp_path, monkeypatch, lambda: {
+        "segments": [{"id": "W-p1", "t0": 0.0, "t1": 200.0},
+                     {"id": "W-p2", "t0": 200.0, "t1": 400.0}],
+        "dropped": []})
+    assert out["error"] is None
+    _assert_single_gate_record(dossier)
+
+
+# ------- r11 #18: the retranslate motion_track guard has a pin
+
+@needs_ffmpeg
+def test_motion_track_failure_skips_lag_in_retranslate(tmp_path,
+                                                       monkeypatch):
+    """r10 #10 shipped four guard sites but pinned only the checker's:
+    neutering this one left the 641-test gate green. A dead opencv must
+    skip lag correction with a trail, never burn the fix attempt."""
+    from pipeline import fix as fixmod
+    from pipeline.tests.test_fix_cut_gate import _make_session
+    from pipeline.tests.test_r_loop8 import _created_at, _sidecars
+    from translator import sync as syncmod
+    if not syncmod.available():
+        pytest.skip("needs numpy + opencv")
+    work = _make_session(tmp_path, seconds=100, name="lagskip")
+    created = _created_at(work)
+    started = created - timedelta(seconds=5.0)
+    evs = [{"t": int((6.0 + i * 0.5) * 1e6), "type": "mouse_raw",
+            "dx": 3, "dy": 1} for i in range(60)]
+    for k, t0 in (("w", 10.0), ("a", 30.0), ("e", 50.0)):
+        evs.append({"t": int(t0 * 1e6), "type": "key", "key": k,
+                    "action": "down"})
+        evs.append({"t": int((t0 + 2.0) * 1e6), "type": "key", "key": k,
+                    "action": "up"})
+    _sidecars(work, started, sorted(evs, key=lambda e: e["t"]))
+
+    def boom(path):
+        raise ValueError(f"could not open video: {path}")
+    monkeypatch.setattr(syncmod, "motion_track", boom)
+    note = fixmod.retranslate_from_sidecars(work)
+    assert "re-translated from sidecars" in note
+    assert "lag correction skipped" in note, note
+
+
+# ------- r11 #19: fix_v1_to_v2's canonicalization has a round trip
+# (its single completed refuter REFUTED the terminal-reject harm — a
+# regressed v1 half surfaces as INP_TOKEN_CASE and the tested
+# FIX_KEY_HYGIENE recovers on attempt 2 — but proved the function IS
+# reachable [attempt-1 plan = FIX_V1_TO_V2] with zero coverage, so the
+# pin stands; disposition recorded in R11_FINDINGS.md)
+
+@needs_ffmpeg
+def test_v1_to_v2_canonicalizes_foreign_button_tokens(tmp_path):
+    import csv as _csv
+
+    from pipeline import fix as fixmod
+    from pipeline.tests.test_fix_cut_gate import _make_session
+    from translator.v2 import check_session_v2
+    d = _make_session(tmp_path, seconds=80)
+    s = json.loads((d / "session.json").read_text())
+    with (d / "frames.csv").open(newline="") as f:
+        rows = list(_csv.reader(f))
+    header, body = rows[0], rows[1:]
+    col = {c: i for i, c in enumerate(header)}
+    v1_header = ["frame_id", "timestamp_ms", "input_keys",
+                 "input_actions", "input_mouse_buttons",
+                 "input_mouse_dx", "input_mouse_dy"]
+    v1_rows = []
+    for i, r in enumerate(body):
+        btn = {5: "left", 6: "Mouse4", 7: "LMB"}.get(i, "")
+        v1_rows.append([r[col["frame_id"]], r[col["timestamp_ms"]],
+                        r[col["input_keys"]], r[col["input_actions"]],
+                        btn, r[col["input_mouse_dx"]],
+                        r[col["input_mouse_dy"]]])
+    with (d / "frames.csv").open("w", newline="") as f:
+        w = _csv.writer(f)
+        w.writerow(v1_header)
+        w.writerows(v1_rows)
+    (d / "session.json").write_text(json.dumps(
+        {"canonical": {"session_id": d.name, "game": "Kamla",
+                       "created_at_utc": s["created_at_utc"]}}))
+    note = fixmod.fix_v1_to_v2(d, "kamla")
+    assert "converted v1 -> v2" in note
+    after = check_session_v2(d)
+    assert not any("mouse button" in i for i in after.issues
+                   if i.startswith("FAIL")), after.issues
+    with (d / "frames.csv").open(newline="") as f:
+        rows2 = list(_csv.reader(f))
+    h2 = {c: i for i, c in enumerate(rows2[0])}
+    cells = [r[h2["input_mouse_buttons"]] for r in rows2[1:]]
+    assert cells[5] == "Left", cells[:10]     # mappable -> v2 display
+    assert cells[6] == "" and cells[7] == "", \
+        "unmappable tokens are dropped (r10 #7) so the set FAIL can " \
+        "never re-fire"
 
 
 # ------- r11 #15: the reset interlock covers the regen's resumable send
