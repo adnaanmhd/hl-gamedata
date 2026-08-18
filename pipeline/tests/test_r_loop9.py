@@ -95,3 +95,92 @@ def test_retranslate_survives_numeric_exe_name(tmp_path):
     (work / "raw" / "metadata.json").write_text(json.dumps(raw_meta))
     note = fixmod.retranslate_from_sidecars(work)
     assert "re-translated from sidecars" in note
+
+
+# ------- D2a (#12): the hard length gates judge the PROBED duration
+
+def test_cnt_short_prefers_the_probed_duration():
+    """A present-but-wrong duration_seconds claim under 70 terminally
+    rejected real >=70s footage (blocking, unfixable, video-independent)
+    while the same verdict planned the rewrite that recomputes the very
+    field."""
+    from pipeline.tests.test_validate_mapper import aux, codes, rep
+    from pipeline.validate import map_reasons
+    res = map_reasons(rep(duration_s=45.0),
+                      aux(probed_duration_s=120.0), "kamla")
+    assert "CNT_SHORT" not in codes(res)
+
+
+def test_cnt_short_fires_on_the_probed_duration_regardless_of_claim():
+    from pipeline.tests.test_validate_mapper import aux, codes, rep
+    from pipeline.validate import map_reasons
+    res = map_reasons(rep(duration_s=120.0),
+                      aux(probed_duration_s=45.0), "kamla")
+    assert "CNT_SHORT" in codes(res) and res.bin == 3
+
+
+def test_cnt_short_falls_back_to_the_claim_without_a_probe():
+    """Control: callers that never probed (hand-built aux, older paths)
+    keep today's claim-based behaviour."""
+    from pipeline.tests.test_validate_mapper import aux, codes, rep
+    from pipeline.validate import map_reasons
+    res = map_reasons(rep(duration_s=50.0), aux(), "kamla")
+    assert "CNT_SHORT" in codes(res)
+
+
+# ------- D2b (#15): typed qa FAILs beat the engine-error quarantine
+
+@needs_ffmpeg
+def test_empty_frames_csv_routes_to_unmapped_not_quarantine(tmp_path):
+    """A 0-byte frames.csv beside intact raw sidecars had its TYPED
+    checker FAIL preempted by a.error -> RuntimeError -> QUARANTINED,
+    although QA_FAIL_UNMAPPED -> FIX_RETRANSLATE rebuilds the file
+    completely (validate.py's own designed routing)."""
+    from dataclasses import asdict
+
+    from pipeline.tests.test_fix_cut_gate import _make_session
+    from pipeline.validate import load_engine, map_reasons
+    work = _make_session(tmp_path, seconds=100, name="emptycsv")
+    created = _created_at(work)
+    started = created - timedelta(seconds=5.0)
+    evs = [{"t": int(6 * 1e6), "type": "key", "key": "w", "action": "down"},
+           {"t": int(8 * 1e6), "type": "key", "key": "w", "action": "up"}]
+    _sidecars(work, started, evs)
+    (work / "frames.csv").write_bytes(b"")
+
+    eng = load_engine()
+    a = eng.analyze(work, {work.name: work / "raw"}, None, 4.0, 1.0)
+    assert a.error == "", a.error
+    assert any(i.startswith("FAIL") for i in a.qa_issues)
+
+    rep = asdict(a)
+    rep["findings"] = []
+    res = map_reasons(rep, {"has_raw": True, "vlm_required": False},
+                      "kamla")
+    unmapped = [r for r in res.reasons if r["code"] == "QA_FAIL_UNMAPPED"]
+    assert unmapped and unmapped[0]["fixable"] is True
+
+
+def test_engine_oserror_is_host_classed_through_validate(tmp_path,
+                                                         monkeypatch):
+    """The OSError type was laundered into the a.error STRING, so
+    run.py's isinstance host/crash split could never see host — a
+    transient I/O error became a terminal quarantine."""
+    import types
+
+    from pipeline import validate as valmod
+
+    class _A:
+        error = "frames.csv unreadable: OSError"
+        error_kind = "host"
+
+    stub = types.SimpleNamespace(analyze=lambda *a, **k: _A())
+    monkeypatch.setattr(valmod, "_ENGINE", stub)
+    d = tmp_path / "s"
+    d.mkdir()
+    # a real (tiny, junk) video is not needed: monkeypatch the probe too
+    monkeypatch.setattr(
+        "translator.video.probe",
+        lambda p: types.SimpleNamespace(duration_s=100.0))
+    with pytest.raises(OSError):
+        valmod.validate_session(d, tmp_path / "dossier", skip_vlm=True)

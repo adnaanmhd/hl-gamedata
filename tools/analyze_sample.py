@@ -147,6 +147,10 @@ class SessionAnalysis:
     verdict_reasons: list = field(default_factory=list)
     pending_human: list = field(default_factory=list)
     error: str = ""
+    # "host" when `error` came from an OSError: the string laundering hid
+    # the exception type from run.py's host/crash split, turning transient
+    # I/O errors into terminal quarantines (r-loop 9 #15)
+    error_kind: str = ""
 
 
 # ---------------------------------------------------------------- §0 format
@@ -1346,7 +1350,25 @@ def analyze(sdir: Path, raw_by_sid: dict, gem: Gemini | None,
             header = next(reader)
             rows = list(reader)
     except (OSError, UnicodeDecodeError, csv.Error, StopIteration) as e:
+        if any(i.startswith("FAIL") for i in a.qa_issues):
+            # check_session_v2 above already produced TYPED FAILs for
+            # exactly this file (empty/unreadable frames.csv) whose
+            # designed route is QA_FAIL_UNMAPPED -> FIX_RETRANSLATE when
+            # sidecars exist (validate.py's own mapping comment). Setting
+            # a.error here PREEMPTED map_reasons — the engine error raised
+            # out of validate_session and terminally QUARANTINED a session
+            # the pipeline can repair (r-loop 9 #15). Keep the qa verdict,
+            # skip the inventory/VLM sections, return a normal analysis.
+            a.qa_issues.append(
+                f"WARN: inventory skipped (frames.csv unreadable: "
+                f"{type(e).__name__}) — the structural FAILs above carry "
+                f"the actionable story")
+            build_verdict(a, vlm_ran=False)
+            write_report(a, out_dir)
+            return a
         a.error = f"frames.csv unreadable: {type(e).__name__}"
+        if isinstance(e, OSError):
+            a.error_kind = "host"
         a.verdict = "error"
         write_report(a, out_dir)
         return a

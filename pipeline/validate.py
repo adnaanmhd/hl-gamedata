@@ -557,13 +557,21 @@ def map_reasons(rep: dict, aux: dict,
         _map_flags(rep, aux, reasons, advisories)
 
     # duration / actions / drops (§10.4 escalations)
-    if dur and dur < C.MIN_CLIP_S:
+    # CNT_SHORT and the soft-max advisory judge the PROBED video duration
+    # when the wrapper supplies it: `dur` is session.json's CLAIMED
+    # duration_seconds, and a present-but-wrong claim under 70 terminally
+    # rejected real >=70s footage (blocking, unfixable, video-independent)
+    # while the SAME verdict planned the rewrite that recomputes the very
+    # field (r-loop 9 #12). The claim stays the fallback for callers that
+    # never probed. _map_windows geometry deliberately unchanged this pass.
+    dur_true = float(aux.get("probed_duration_s") or 0) or dur
+    if dur_true and dur_true < C.MIN_CLIP_S:
         reasons.append(_reason("CNT_SHORT", True, False,
-                               {"duration_s": round(dur, 1)},
-                               f"clip {dur:.1f}s under the hard "
+                               {"duration_s": round(dur_true, 1)},
+                               f"clip {dur_true:.1f}s under the hard "
                                f"{C.MIN_CLIP_S:.0f}s minimum"))
-    elif dur > C.SESSION_SOFT_MAX_S:
-        advisories.append(f"clip {dur / 60:.0f} min exceeds the 30 min "
+    elif dur_true > C.SESSION_SOFT_MAX_S:
+        advisories.append(f"clip {dur_true / 60:.0f} min exceeds the 30 min "
                           f"guidance — accepted with note (R16)")
     if inv and inv.get("distinct_actions", 99) < C.MIN_DISTINCT_ACTIONS:
         # Blind to rows the PIPELINE blanked (r-loop 5). FIX_GATE_WINDOW
@@ -786,7 +794,7 @@ def validate_session(work_dir: Path, dossier_dir: Path, *,
 
     from translator import video as V
     try:
-        V.probe(work_dir / "video.mp4")
+        probed_info = V.probe(work_dir / "video.mp4")
     except Exception as e:
         res = MapResult(bin=2, hold_vlm=False, engine_verdict="",
                         reasons=[_reason(
@@ -831,6 +839,12 @@ def validate_session(work_dir: Path, dossier_dir: Path, *,
                                              {}, analysis.error)])
             _write_verdict(dossier_dir, work_dir.name, res)
             return res
+        # a host-kind engine error (an OSError laundered into the error
+        # string) must stay host-classed for the r-loop-6 carve-out:
+        # re-raise as OSError so _validate_worker's isinstance split sees
+        # host — cooldown, not terminal quarantine (r-loop 9 #15)
+        if getattr(analysis, "error_kind", "") == "host":
+            raise OSError(f"engine error: {analysis.error}")
         # anything else: hard failure — the orchestrator quarantines with
         # an alert instead of holding forever
         raise RuntimeError(f"engine error: {analysis.error}")
@@ -846,6 +860,9 @@ def validate_session(work_dir: Path, dossier_dir: Path, *,
     aux["has_raw"] = bool(raw_by_sid)
     aux["vlm_required"] = True
     aux["gate_destroyed"] = _gate_destroyed(dossier_dir)
+    # the probed duration is the truth source for the hard length gates;
+    # the engine's duration_s is session.json's CLAIM (r-loop 9 #12)
+    aux["probed_duration_s"] = probed_info.duration_s
     if seed_notes:
         aux.setdefault("notes", []).extend(seed_notes)
     # every (key tag, model) that answered — R23 flag trail into the verdict
