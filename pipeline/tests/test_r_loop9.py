@@ -275,6 +275,53 @@ def test_kill_between_marker_and_document_resends_document_only(
         cfg, ledger, _send_time(hour=17)) is False
 
 
+# ------- D6 (#5): identical-md5 heal preserves payment stamps
+
+def test_identical_md5_heal_preserves_payment_stamps(cfg, ledger,
+                                                     monkeypatch):
+    """An operator fixing a folder-name typo re-paths the sessions under
+    it — same bytes, new path. The heal cleared the payment stamps
+    unconditionally, so an already-counted root re-entered via the
+    late-arrival guard and its uploaded hours landed on a SECOND sent
+    sheet (probe broke d3's counted-exactly-once invariant: 2.0 counted
+    for 1.0 uploaded). The existing r6/r8 heal tests seed md5 'old' and
+    keep pinning the different-md5 full clear."""
+    from pipeline import ingest
+    from pipeline.tests.conftest import make_session_entries
+    sid = "2026-08-14T10-00-00Z_kamla_c_0123456789abcdef"
+    same_md5 = "d41d8cd98f00b204e9800998ecf8427e"   # the builder default
+    ledger.insert_session(
+        session_id=sid, game="kamla", operator_email="op@x.com",
+        player_email="p1@x.com", drive_path="kamla/BADPATH",
+        drive_ctime="2026-08-14T10:00:00.000Z", md5_video=same_md5,
+        bytes_=1, state="DISCOVERED")
+    ledger.set_state(sid, "QUARANTINED", "work copy missing")
+    ledger.update(sid, uploaded_reported_at="2026-08-15T00:00:00+00:00",
+                  accepted_reported_at="2026-08-15T00:00:00+00:00",
+                  duration_raw_s=3600.0)
+    entries = make_session_entries(sid=sid)
+    monkeypatch.setattr(ingest, "list_drive", lambda _c: entries)
+    ingest.scan(cfg, ledger, entries)
+    row = ledger.get(sid)
+    assert row["state"] == "DISCOVERED"          # the heal itself happened
+    assert row["drive_path"] != "kamla/BADPATH"
+    assert row["uploaded_reported_at"], "same bytes — stamp must survive"
+    assert row["accepted_reported_at"]
+    assert row["duration_raw_s"] == 3600.0, \
+        "same bytes — hours must not be re-countable on re-probe"
+    # conservation: the next payment sheet must NOT count this root again
+    monkeypatch.setattr(runmod.telegram, "send_message", lambda c, t: None)
+    docs: list[bytes] = []
+    monkeypatch.setattr(
+        runmod.telegram, "send_document",
+        lambda c, p, caption="": docs.append(
+            __import__("pathlib").Path(p).read_bytes()))
+    from pipeline.tests.test_review_r5_driver import _send_time
+    assert runmod.send_daily_report_if_due(cfg, ledger, _send_time()) is True
+    assert docs and b"p1@x.com" not in docs[-1], \
+        "an already-counted root must stay off post-heal sheets"
+
+
 # ------- D2a (#12): the hard length gates judge the PROBED duration
 
 def test_cnt_short_prefers_the_probed_duration():

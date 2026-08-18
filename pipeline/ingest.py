@@ -267,6 +267,22 @@ def scan(cfg: C.Config, ledger: Ledger,
                     # bytes, with no separator — and a payment dispute is
                     # adjudicated against that record.
                     ledger.archive_dossier(ds.session_id, cfg.dossiers)
+                    # Payment stamps + duration_raw_s clear ONLY when the
+                    # bytes actually changed (the supersede rule: new md5
+                    # = genuinely new hours). An IDENTICAL-md5 path heal —
+                    # an operator fixing a folder-name typo, documented
+                    # routine — is the SAME footage: clearing the stamps
+                    # re-entered an already-counted root via the
+                    # late-arrival guard and its uploaded hours landed on
+                    # a SECOND sent sheet, breaking d3's counted-once
+                    # invariant (r-loop 9 #5). The sibling pre-download
+                    # move-heal already preserves stamps on the same
+                    # rename.
+                    clears = dict(duration_raw_s=None,
+                                  uploaded_reported_at=None,
+                                  accepted_reported_at=None,
+                                  tree_sealed_at=None) \
+                        if vmd5 != existing["md5_video"] else {}
                     ledger.update(ds.session_id,
                                   drive_path=ds.drive_path,
                                   drive_ctime=ds.ctime, md5_video=vmd5,
@@ -274,12 +290,9 @@ def scan(cfg: C.Config, ledger: Ledger,
                                   operator_email=ds.operator_email,
                                   player_email=ds.player_email,
                                   game=ds.game, fix_attempts=0,
-                                  duration_raw_s=None,
                                   duration_delivered_s=None,
                                   rrd_sampled=0, delivered_at=None,
-                                  uploaded_reported_at=None,
-                                  accepted_reported_at=None,
-                                  tree_sealed_at=None)
+                                  **clears)
                     # the INT_PATH reasons died with the bad path — left
                     # in place, a LATER re-quarantine (download/validation
                     # crash) put this session on the folder-issues bad_path
