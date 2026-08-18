@@ -64,7 +64,7 @@ def _locked_main(cfg) -> int:
         "SELECT session_id, game, rrd_sampled, duration_delivered_s, "
         "delivered_at FROM sessions WHERE state='DELIVERED'").fetchall()
     stuck = ledger.db.execute(
-        "SELECT session_id, state FROM sessions WHERE state IN "
+        "SELECT session_id, state, game FROM sessions WHERE state IN "
         "('PACKAGED','UPLOADED')").fetchall()
     for r in stuck:
         defects.append(f"stuck mid-delivery: {r['session_id']} "
@@ -137,6 +137,31 @@ def _locked_main(cfg) -> int:
         if ev is not None:
             inflight[ev["detail"][len("verified at "):].strip()] = (
                 r["session_id"], r["state"])
+            continue
+        # No UPLOADED event at all — which is EXACTLY the case the
+        # carve-out was written for (r-loop 5). deliver_session sets
+        # PACKAGED and only writes the UPLOADED event AFTER
+        # upload_and_verify returns, so a session interrupted during its
+        # FIRST upload has none; the r-loop-4 fix therefore covered only
+        # rows already UPLOADED and re-deliveries, and still branded a
+        # first-time PACKAGED session's partial remote dir STALE — whose
+        # documented meaning is "listed for cleanup", immediately before
+        # the runbook's last destructive act. Reconstruct the path from
+        # the audit trail instead: the PACKAGED detail is
+        # "staged <date> rrd_sampled=<b>" and deliver.py builds
+        # <prefix>/<date>/<game>/<sid> from that same date.
+        pev = ledger.db.execute(
+            "SELECT detail FROM events WHERE session_id=? AND "
+            "to_state='PACKAGED' AND detail LIKE 'staged %' "
+            "ORDER BY ts DESC LIMIT 1", (r["session_id"],)).fetchone()
+        if pev is None or not r["game"]:
+            continue
+        parts = pev["detail"].split()
+        if len(parts) < 2:
+            continue
+        date = parts[1]
+        inflight[f"humynlabs/{date}/{r['game']}/{r['session_id']}"] = (
+            r["session_id"], r["state"])
     for rd in sorted(set(actual) - set(expected)):
         if rd in inflight:
             sid, st = inflight[rd]
