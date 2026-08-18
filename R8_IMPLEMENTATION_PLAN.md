@@ -56,8 +56,8 @@ the first unchecked item.
 - [x] F10 reset interlock covers the regen's resumable send (#15) — fail-first 1/1; Mac 669 green; commit 5696205
 - [x] F11 tests-only: watermark pin, guard pins, fix_v1_to_v2 round trip (#17/#18/#19) — refuter evidence read FIRST (function reachable, harm refuted → pin written, disposition in R11_FINDINGS.md); mutation-proof 5/5 vs the finders' exact mutations; Mac 674 green; commit 2f5ca04
 - [x] Post-F11: SUITE_FLOOR 670 pinned (674−4, commit 09cbf20); gates green BOTH hosts at the F set — Mac 674 (120s), VM side checkout 674 (375s), both floor 670; tree-verify (diff/status/MUTATION) clean; usage-credit headroom confirmed by Adnaan before iteration 12
-- [ ] Review iteration 12 (fix-in-iteration per §5; regressions lane targets the F-commits) — WARRANTED by Adnaan 2026-08-19
-- [ ] Review iteration 13 (confirmation pass, runs regardless of 12's verdict) — WARRANTED by Adnaan 2026-08-19; if 13 is not quiet: STOP, hand Adnaan the list
+- [x] Review iteration 12 RAN (2026-08-19, `tools/review/flip-review-iter12.js`, 37 agents, 0 errors, workflow wf_f17c544b-52a) — pre-fix **NOT quiet: 15 raised → 15 confirmed (0 blockers), 0 killed** (R12_FINDINGS.md); ALL 15 FIXED IN-ITERATION (986368f..0ad8747: behavioural fail-first 14/14 at 11af5a0 + pins mutation-proof 8/8; floor 692 pinned at 6b87023) → **QUIET per R5_TRIAGE §7** (judged AFTER fixing; gates Mac 696 + VM 696, floor 692). Iteration 13 runs regardless per the re-ruling
+- [ ] Review iteration 13 — RE-RULED by Adnaan 2026-08-19 (this session, reverting his same-day amendment): runs REGARDLESS of 12's verdict, as a confirmation pass; if 13 is not quiet: STOP, hand Adnaan the list
 - [ ] Independent REAL e2e verification (verdict relayed VERBATIM)
 - [ ] FLIP §5 canary (kill matrix, autoscale, digest; `_pipeline_test/` purged)
 - [ ] FLIP §6 (stop units → resize → deploy False-interlock → refix reset → arm → first hour)
@@ -1264,11 +1264,13 @@ of record: `R11_FINDINGS.md` (degraded-vote caveat on #19/#20 recorded
 there — two refuters died on usage-credit exhaustion). Finding numbers
 (#N) refer to R11_FINDINGS.md. **SEQUENCE RULED BY ADNAAN 2026-08-19:
 fix ALL of these (F1–F11) → review iterations 12 AND 13 (two more,
-warranted by 11 not being quiet) → e2e → flip.** Executor's reading of
-the two-iteration warrant, flag to Adnaan if wrong: 12 runs
-fix-in-iteration per §5 discipline; 13 runs as a confirmation pass
-regardless of 12's verdict; if 13 is not quiet → STOP, hand Adnaan the
-list.
+warranted by 11 not being quiet) → e2e → flip.** The prior executor's
+reading ("13 runs as a confirmation pass regardless of 12's verdict")
+was flagged to Adnaan per this note; he first amended it 2026-08-19
+("if 12 is quiet, 13 is not required") and then REVERTED that amendment
+the same day, mid-iteration-12 fixes: **iteration 13 RUNS REGARDLESS of
+12's verdict**, as a confirmation pass; if 13 is not quiet → STOP, hand
+Adnaan the list.
 
 Execution order: F1 first (BLOCKER), then F2–F10, F11 (tests-only) last.
 Same per-commit discipline as C-/D-loops: implement → fail-first proof in
