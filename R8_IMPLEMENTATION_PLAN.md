@@ -31,8 +31,17 @@ the first unchecked item.
 - [x] C8 STR_SJ_INVALID rewrite validates — 7/7 classes fail-first through the real fix chain; naive-ts control green; Mac 581 green
 - [x] C9 suite knob-independence + SUITE_FLOOR 578 + doc corrections — repro CONFIRMED on the pinned runbook invocation (14 failed/567 passed at pre-C9 HEAD; 11→14 = the three new C5 send-path tests); green at BOTH knob values (582/582)
 - [x] Full gate green on Mac AND VM at final r8-fix HEAD b694456 — Mac 582 (61s), VM side checkout 582 (251s), both floor 578; tree-verify (diff/status/MUTATION) clean
-- [ ] Review iteration 9 (fix-in-iteration; quiet-judged)
-- [ ] Review iteration 10 (only if 9 not quiet)
+- [x] Review iteration 9 RAN (2026-08-18, workflow `tools/review/flip-review-iter9.js`, 53 agents) — **NOT QUIET: 23 confirmed (14 major / 9 minor / 0 blockers), 0 killed**; findings of record in `R9_FINDINGS.md`; fixes synthesized into §9 as D1–D8 (Adnaan redirected the r8 session to hand off instead of fixing in-iteration)
+- [ ] D1 translator hardening (#2 carried-only rebase guard, #3/#16 v2 untyped crashes, #17 falsy-key binding) — §9
+- [ ] D2 validation truth sources (#12 CNT_SHORT from probed duration, #15 analyze() typed-FAIL path) — §9
+- [ ] D3 driver host classes (#9 BrokenProcessPool first-death=host, #10 U-lane CalledProcessError) — §9
+- [ ] D4 gate-record clock rebasing + adoption propagation (#11/#20, #14, #22 tests) — §9
+- [ ] D5 daily-send resume robustness (#6/#21 day-agnostic, #4 conditional re-stamp, #8 doc_sent) — §9
+- [ ] D6 quarantine heal md5-conditional stamp clearing (#5) — §9
+- [ ] D7 refix tool payment-evidence refusal + pending-record interlock + lsf honesty (#1/#18, #7, #19) — §9 — OBSERVABLE payment-behaviour change, surface to Adnaan
+- [ ] D8 C8 leftovers (#13 parse-and-regex re-emit, #23 conv_other test) — §9
+- [ ] Post-D8: new SUITE_FLOOR measured+pinned; full gate green Mac AND VM; tree-verify
+- [ ] Review iteration 10 (fix-in-iteration; quiet-judged; accepted-list additions 21–28 from §9)
 - [ ] Review iteration 11 (only if 10 not quiet) — if still not quiet: STOP, hand Adnaan the list
 - [ ] Independent REAL e2e verification (verdict relayed VERBATIM)
 - [ ] FLIP §5 canary (kill matrix, autoscale, digest; `_pipeline_test/` purged)
@@ -747,3 +756,413 @@ Verdict-first, per phase. For C6 include the before/after of the two rewritten
 tests (deferral + refix seal) so Adnaan sees exactly which observable payment
 behaviours changed and why each is the hole itself, not a side effect. Label
 every mixed-methodology comparison as such. Relay verifier verdicts verbatim.
+
+## 9. R-LOOP 9 FINDINGS → fix specifications D1–D8 (added 2026-08-18 by the r8 executor)
+
+**Iteration 9 ran and was NOT quiet: 23 raised → 23 confirmed (14 major, 9
+minor, 0 blockers), 0 killed.** Evidence of record: `R9_FINDINGS.md` (every
+claim reproduced by both refuters against the real code). Workflow used:
+`tools/review/flip-review-iter9.js` (committed snapshot of the script actually
+run). These specs were written after reading all 23 claims TOGETHER — where a
+spec deviates from a finding's own proposed fix, the deviation is deliberate
+and explained inline. Finding numbers (#N) refer to R9_FINDINGS.md.
+
+Execution order: D1→D8, same per-commit discipline as C1–C9 (implement →
+fail-first proof in a scratch copy OUTSIDE the repo → suite green on Mac →
+path-scoped commit; VM gate once after D8; locate by SYMBOL, never by
+remembered line numbers). Rationale: D1/D2/D3/D6 are independent leaves;
+D5 before D7 (D7's interlock reads D5's record semantics, incl. the new
+`doc_sent` key); D4 independent; D8 tiny, last-but-one. After D8: bump
+SUITE_FLOOR to (new passed − 4) in `tools/run_suite.sh` + FLIP_RUNBOOK §6b
+(measure, don't guess), re-run BOTH host gates, then review iteration 10.
+
+### D1 — translator hardening (#2, #3, #16, #17) — `translator/{trim,v2,keybind}.py`, `pipeline/fix.py`
+
+**D1a (#3+#16, one fix)** `translator/v2.py`:
+- `_px`: except tuple gains `OverflowError` (json.loads accepts
+  Infinity/1e999 → `int(inf)` escapes — the exact class C1 closed in
+  `raw_int`).
+- `build_session_json`: wrap the `created = started + timedelta(...)` and
+  `ended = created + timedelta(...)` arithmetic in try/except `OverflowError`
+  → `BundleError("recording.started_at_utc unusable (out of range): …")` —
+  a parseable-but-extreme stamp (`9999-12-31T23:59:59Z`) currently crashes
+  untyped AFTER the full trim+bin+sync wall-clock.
+- `translate_bundle_v2`: `session_id` — keep only `isinstance(str)` and
+  non-empty, else fall back to `bundle_dir.name` (a numeric session_id
+  currently crashes the Path join untyped). `exe_name` — treat non-str as
+  None at the `game_info.get("exe_name")` read (a numeric exe_name reaches
+  `keybinds.game_key_from_name`'s `re.sub` and crashes untyped). Mirror the
+  same two guards in `pipeline/fix.py retranslate_from_sidecars` where it
+  reads `game_info.get("exe_name")` (same provenance, same crash).
+
+**D1b (#17)** `translator/keybind.py _binding_groups` dict branch: the
+whole-binding-unusable rule is gated behind `if key:` — a PRESENT-but-falsy
+key (`""`, `0`, `null`) skips it and emits the bare-modifier group the C1
+comment explicitly forbids (probe: `{'crouch': {'modifier':'ctrl','key':''}}`
+puts ctrl in bound_literals and fires 'crouch' on every ctrl-hold — ships
+silently, qa-v2 cannot see it). Fix: enter the key path whenever
+`"key" in value`; inside it, a key whose `normalize_literal` is empty (which
+covers None/0/""/junk) voids the WHOLE binding (`return out`). The
+modifier-only fallthrough survives ONLY for a genuinely ABSENT key field.
+Extend `test_vk_number_key_makes_the_whole_binding_unusable` with the falsy
+cases.
+
+**D1c (#2, MAJOR)** the C2 zero-events guard is defeated by the r-loop-4
+held-key carry: with bogus stamps (head_s beyond the whole recording), every
+unmatched 'down' in the sidecar (keys held when capture stopped) is re-pressed
+at t=0, so `events` is non-empty and the guard passes — the binner then holds
+that key on EVERY row of a clip the stamps do not describe (fabricated input,
+terminal unfixable reject with player-blaming coaching, or worse: shipped).
+Fix: `trim.rebase_events` gains an optional `carried_out: list | None = None`
+kwarg (append the synthetic re-presses there too; return value unchanged —
+backward compatible for translate.py/v2.py callers). In
+`retranslate_from_sidecars`: pass `carried_out=carried` and refuse when
+`raw_events and len(events) == len(carried)` (every survivor is a carry).
+KEEP the phrase "leaves zero events" in the message (the existing r8 test
+greps it); extend it, e.g. "leaves zero events beyond N held-key carries".
+Ruling 13 (zero-events shape, no clip duration in the test) still holds — a
+legitimate split child always retains in-band events. Tests: bogus-stamp
+sidecar whose only survivors are carries → FixFailed; split child WITH a
+held key across its cut AND in-band events → still succeeds (protects both
+C2 and the r-loop-4 carry).
+
+### D2 — validation truth sources (#12, #15) — `pipeline/validate.py`, `tools/analyze_sample.py`
+
+**D2a (#12, MAJOR)** `map_reasons` computes `dur` from the ENGINE's
+`duration_s`, which `analyze()` fills from session.json's CLAIMED
+`duration_seconds` — a present-but-wrong claim under 70 on a real ≥70s clip
+emits CNT_SHORT (blocking, UNFIXABLE, `_VIDEO_INDEPENDENT` so it beats
+HOLD_VLM) → bin 3 → terminal reject with zero fix attempts, while the SAME
+verdict carries a fixable STR_SJ_INVALID whose planned rewrite recomputes the
+very field. Fix: `validate_session` already probes the video (the
+STR_VIDEO_UNREADABLE check) — thread `info.duration_s` into aux (e.g.
+`aux["probed_duration_s"]`) and have `map_reasons` prefer it for the
+CNT_SHORT / SESSION_SOFT_MAX tests, falling back to `rep["duration_s"]` only
+when the probe failed. Do NOT touch `_map_windows` geometry in this pass
+(bounded scope; the VLM-sweep-samples-to-claimed-duration amplifier is noted
+in R9_FINDINGS #12 for a later loop). Tests: hand-built rep with claimed 45s
++ aux probed 120s → no CNT_SHORT (and the reverse: probed 45s → CNT_SHORT
+regardless of claim).
+
+**D2b (#15, MAJOR)** `tools/analyze_sample.py analyze()`: when its OWN
+inventory re-read of frames.csv fails (StopIteration/csv.Error/OSError) it
+sets `a.error` → `validate_session` raises RuntimeError("engine error…") →
+QUARANTINED "validation crashed" — although `check_session_v2` already
+produced the TYPED early-return FAIL ("frames.csv is empty…"/"unreadable…")
+whose designed route (validate.py's own comment) is QA_FAIL_UNMAPPED →
+FIX_RETRANSLATE when sidecars exist. Fix in `analyze()`: when the inventory
+read fails AND `a.qa_issues` already contains FAILs, do NOT set `a.error` —
+keep qa_status/qa_issues, skip the inventory/VLM sections, return a normal
+analysis (map_reasons applies the designed routing). Preserve the host split:
+when the failed read was an OSError and there are NO qa FAILs to fall back
+on, keep `a.error` but ALSO set `a.error_kind = "host"`, and have
+`validate.py` re-raise it as an OSError (or thread the kind through) so
+`run._validate_worker`'s host classifier still sees host. Tests: 0-byte
+frames.csv beside intact raw sidecars → reasons contain QA_FAIL_UNMAPPED
+fixable=True (has_raw), never a quarantine; engine-level OSError path stays
+host-classed.
+
+### D3 — driver host classes (#9, #10) — `pipeline/continuous.py`, `pipeline/run.py`
+
+**D3a (#9, MAJOR)** `_validate_one`'s BrokenProcessPool branch (stop unset)
+builds a res dict with NO "kind", so an externally SIGKILLed worker — the
+ONLY way kernel-OOM/systemd-oomd/cgroup kills present — takes the terminal
+QUARANTINED path, bypassing the r-loop-6 host carve-out (MemoryError never
+propagates through a SIGKILL). One OOM burst can terminally quarantine every
+in-flight validation (up to CONT_POOL_MAX sessions) and the 48h sweep then
+deletes their media. Fix: on BrokenProcessPool with stop unset, count prior
+worker-deaths for this sid from the events audit (write a
+`VALIDATING→VALIDATING` event with a distinct detail marker, e.g.
+"validation worker died (host-suspect)" via `led.set_state(sid, "VALIDATING",
+…)`; count events with that detail). First death → treat as host: cooldown
+`CONT_RUNNER_CRASH_RETRY_MIN`, alert, return None (row stays VALIDATING —
+the stint-based stuck list keeps aging it correctly since
+VALIDATING→VALIDATING does not move the stint anchor). Second death for the
+same sid → today's QUARANTINED (a session whose bytes reproducibly kill the
+decoder still terminates). Tests: fake worker death twice via a _WORKER_FN
+that SIGKILLs itself is not needed — drive the branch by monkeypatching the
+pool result path; assert first death leaves VALIDATING+cooldown+no
+quarantine, second death quarantines.
+
+**D3b (#10, MAJOR)** the U-lane host tuple omits
+`subprocess.CalledProcessError`: an rrd child (the ~20% R17-sampled
+sessions) dying on ENOSPC/OOM/broken-pin exits non-zero →
+CalledProcessError → generic except → terminal QUARANTINED for a
+FULLY-VALIDATED session, during exactly the disk-low incident the lane's own
+r-loop-3 comment documents (a hung rrd child is already host-classed —
+inconsistent). Fix: add `subprocess.CalledProcessError` to the host tuple in
+`continuous._deliver_one` AND the mirrored `run._deliver_phase` (delivery
+lane ONLY — the fix-lane's CalledProcessError="session" classification is
+RULED, accepted item 11, and stays). Tests: deliver_session raising
+CalledProcessError → state stays READY, cooldown set, no quarantine, in both
+drivers.
+
+### D4 — gate-record clock rebasing + adoption propagation (#11, #20, #14, #22) — `pipeline/fix.py`, `pipeline/run.py`, `pipeline/continuous.py`
+
+**D4a (#11+#20, MAJOR, one root cause)** every span in a gate record is on
+the clock of the frames.csv AT GATE TIME, but two fixes shift that clock:
+`cutter._cut_loop` rebases child rows to the segment's own PTS, and
+`FIX_RETRIM_HEAD` rebases the parent's surviving rows. `_gate_entry_touches`
+/ `_entries_for_segment` compare stored spans verbatim against CURRENT-clock
+bounds, so: (i) a level-2 split drops the record from ALL grandchildren
+(wrongful unfixable reject of the one holding the blanked rows — the
+r-loop-6 blocker shape one level down; grandchildren exist in production);
+(ii) after a retrim, an attempt-2 cut WITHHOLDS the record from the segment
+that contains the blanked rows and WRONGLY hands it to the sibling (the
+r-loop-7 harm, resurrected). Fix (rebase-at-write, chosen over
+offset-annotation for reasoning simplicity):
+1. In `_propagate_gate_record`, before selecting/writing entries for a
+   segment, compute the entry's spans on the CURRENT parent clock: walk the
+   parent fixlog for `FIX_RETRIM_HEAD` `ok:true` entries that come AFTER the
+   gate entry and subtract the cumulative ACTUAL cut (`note.head_cut_s` —
+   the retrim tool returns it; fall back to `params.head_s`).
+2. When writing a child's inherited entry (synthetic per-window AND legacy
+   whole-entry alike), rebase every span into the CHILD's clock: subtract
+   the segment's `t0` and clamp at 0 (the child's row 0 sits at parent-clock
+   t0; `src_pts[i0]` is what cutter used and `t0 = round(start,3)` is its
+   second-precision twin — accept the ≤1ms skew, the spans are
+   pad-widened). Legacy entries therefore become copies with adjusted
+   `note.windows`/`params.windows`; the never-drop doctrine is preserved
+   (unreadable spans still propagate whole and unadjusted).
+3. `validate._gate_destroyed` is unaffected (reads only `destroyed`).
+Tests (extend the C7 real-writer pattern in test_r_loop7/test_r_loop8):
+level-2 — real gate on a parent, real propagation to an i0>0 child
+(segments with t0>0), then propagate AGAIN with child-clock segments →
+the grandchild holding the blanked rows inherits its share, the sibling
+does not; retrim — gate, then a FIX_RETRIM_HEAD fixlog entry, then
+propagate with post-trim bounds → correct segment inherits.
+
+**D4b (#14)** two silent-loss holes for the same artifact: (i) BOTH mid-split
+crash-adoption paths (`run._fix_phase` done-branch, `continuous._fixing_triage`)
+complete the SPLIT without ever calling `_propagate_gate_record` — a kill
+between the cutter's manifest write and the propagation loop ships children
+with no inherited record. Fix: call `fix._propagate_gate_record(parent_dossier,
+dossier_root, [], segments)` in both adoption sites before the SPLIT commit
+(the earlier-attempt entries are read from the parent fixlog; `applied` may
+be empty). Segments' t0/t1: parse from each child's ledger `detail`
+("split segment {t0}-{t1}s") where present; adopted-child inserts whose
+detail lacks bounds pass t0=None → propagate-whole (never drop; dup-over-drop
+is the doctrine). (ii) the per-child `_append_fixlog` is wrapped in
+`except OSError: pass` — ENOSPC silently ships a child without its record.
+Fix: let the OSError propagate out of `_propagate_gate_record`; apply_fixes'
+existing except classifies OSError as HOST, the C3 carve-out discards the
+rescinded cut artifacts and re-derives — correct, and already tested
+machinery. Tests: adoption path propagates (seed parent fixlog with a gate
+entry, drive `_fixing_triage` adoption, assert child fixlog); OSError from
+the child write → apply_fixes returns kind=host.
+
+**D4c (#22, tests only)** the applied-span-vs-requested preference is
+suite-invisible at BOTH sites (mutation-proved: reverting it leaves 582
+green). Add one test per site where a segment overlaps only the PAD-widened
+applied span, not the requested window (gate a window ending exactly at a
+cut boundary so pad rows spill into the next segment) — legacy path via
+`_gate_entry_touches`, per-window path via `_entries_for_segment`.
+
+### D5 — daily-send resume robustness (#6/#21, #4, #8, #7-resume-side) — `pipeline/run.py`
+
+**D5a (#6≡#21, MAJOR)** the resume record is looked up under TODAY's key
+only — an interruption that outlives IST midnight strands the stamped
+cohort's uploaded hours off every sheet ever delivered (the stamps exclude
+them from all future sheets; the only CSV carrying them is never sent).
+Fix: at the top of `send_daily_report_if_due` (after the interlock + hour
+gates, BEFORE today's marker check), scan `cfg.reports_dir/*/` for any
+`.daily-counted.json` whose sibling `.sent` is absent; if found, resume the
+OLDEST such day first via `_resume_daily_send(cfg, ledger, now_ist, that_day,
+record, that_marker)` and RETURN its result (one send per tick; the next
+tick opens today). `_resume_daily_send` already takes the day string — no
+signature change. Alert (via the caller's normal print/stderr path) when the
+resumed day is not today. Tests: partial-stamp kill on day D → call with
+now_ist = D+1 14:0x → day-D CSV document-sent and day-D marker lands, no
+D+1 fresh generation on that tick; conservation across the sends.
+
+**D5b (#4 + #7's resume half)** the resume re-stamps its recorded sids
+blindly — over a supersede/heal/recal reset that legitimately cleared the
+marks in the crash-recovery gap, and even over DELETED rows (silent no-ops).
+Fix: write the record with a stamp-time field (`"at": <utc iso>`). On
+resume: for each counted/accepted sid — row MISSING → the ledger changed
+under the record (a recal tool ran): print a LOUD
+"[daily] resume: counted row <sid> no longer exists — REFUSING; reconcile
+by hand" to stderr and return False (same doctrine as the unreadable
+record; the D7 interlock makes this near-unreachable). Row present with
+`updated_at > record.at` AND its mark now NULL → a supersede/heal
+deliberately cleared it: SKIP stamping that sid (loud per-sid line), stamp
+the rest, continue the send (the CSV is authoritative for what was counted;
+the new bytes' hours must stay countable). Backward compat: a record
+without "at" stamps unconditionally (today's behaviour) — note it in the
+code. Tests: supersede-between-kill-and-resume → resumed send does NOT
+re-stamp that sid, its new upload's hours reach a later sheet exactly once;
+deleted-row record → refusal, sheet untouched.
+
+**D5c (#8)** `.sent` is touched before the document goes out; a kill in
+between suppresses the CSV forever with a dangling "attached" message.
+Fix: extend the durable record with `"doc_sent": true`, written (atomic
+rewrite of the record) only AFTER `_send_sheet_document` returns on BOTH
+paths. The marker-exists early return becomes: marker present AND
+(record absent OR record.doc_sent) → False; marker present but record says
+doc unsent → re-send ONLY the document (+ set doc_sent). Note
+`_send_sheet_document` swallows TelegramError by design (alert path) — set
+doc_sent only on the no-exception return, accepting that an in-flight
+Telegram outage leaves it unset and the next tick retries the document
+(dup-over-silence, consistent with the digest doctrine). Tests: kill
+between marker and document (simulate: marker exists, doc_sent absent) →
+next call re-sends the document only; steady state → False.
+
+### D6 — quarantine heal must not wipe counted stamps (#5, MAJOR) — `pipeline/ingest.py`
+
+The QUARANTINED-path heal clears
+`uploaded_reported_at/accepted_reported_at/tree_sealed_at` + `duration_raw_s`
+UNCONDITIONALLY — but unlike supersede there is no new-bytes evidence: on an
+IDENTICAL-md5 path heal (operator fixed a folder-name typo — routine), a
+root already counted on a sent sheet re-enters via the late-arrival guard
+and its uploaded hours land on a SECOND sheet (probe broke d3's conservation
+invariant: 2.0 counted for 1.0 uploaded). The sibling pre-download move-heal
+already preserves stamps on the same rename. Fix: in the heal branch,
+compare the newly listed video md5 (`vmd5`) against the stored `md5_video`:
+DIFFERENT → today's full clear (genuinely new bytes — the supersede rule);
+IDENTICAL → preserve `uploaded_reported_at`, `accepted_reported_at`,
+`tree_sealed_at` AND `duration_raw_s` (keep the rest of the heal — attempts
+reset, reasons cleared, dossier archived, state DISCOVERED — unchanged).
+Tests: identical-md5 heal of a counted root → stamps survive, sheet
+conservation holds across the heal; different-md5 heal → stamps cleared
+(existing r6/r8 tests keep passing — check
+`test_quarantine_heal_clears_the_accepted_mark` and
+`test_quarantine_heal_clears_the_tree_seal`: they use
+`make_session_entries(sid=sid)` whose md5 differs from the seeded "old" —
+verify, and if the seeded md5 matches, adjust THEIR seeds so they pin the
+different-md5 case, citing r-loop 9).
+
+### D7 — refix tool: payment-evidence refusal + probe honesty (#1, #18, #19, #7-tool-side) — `tools/recal_refix_reset.py`, `tools/recal_rebuild_reset.py`
+
+**D7a (#1+#18, MAJOR, one coherent rule)** two seal defects with one root:
+the tool's plan-time paid/unpaid computation reads only per-node accepted
+marks. (#18) a fully-paid tree seals and re-runs, but its recovered
+fix-failed child's hours can then NEVER reach a sheet — the seal swallows
+the exact money the refix path exists to recover — while NOT sealing would
+double-pay the re-delivered paid child: the same "no automatable answer"
+dilemma C6 ruled must go to a human. (#1) a SEALED tree re-selected on a
+later pass (its re-run child fix-failed again) recomputes paid=[] — the
+seal itself suppresses new accepted marks — and the teardown OVERWRITES the
+seal with NULL, re-opening already-paid footage for a second payment with
+`sealed_roots: []` hiding it. One rule fixes both: **the tool proceeds ONLY
+on trees with ZERO payment evidence** — refuse (into `skipped_mixed`, with
+paid_nodes / unpaid_delivered_nodes / an existing `tree_sealed_at` listed)
+any plan root where `paid` is non-empty OR the root's `tree_sealed_at` is
+already set. Consequences: the seal-writing branch becomes unreachable
+(keep `tree_sealed_at=None` on the proceeding UPDATE — proceeding trees
+have no payment evidence by construction; the column, its reports-side
+honor logic and its clears all STAY as defense-in-depth for the sealed
+trees refused here and any historical rows). This is an OBSERVABLE
+payment-behaviour change to C6's "fully-paid tree proceeds and seals" rule —
+rewrite `test_refix_seal_only_fires_where_hours_were_actually_counted`
+(tree B now lands in skipped_mixed with its rows untouched; A and C still
+proceed) and `test_refix_fully_paid_tree_never_recounted_end_to_end`
+(refused, not sealed; assert its rows/hours untouched and it appears in
+skipped_mixed), citing r-loop 9 — and SURFACE both rewrites to Adnaan in
+the final report exactly as the C6 changes were. NOTE for production: no
+sealed trees exist yet (nothing is deployed; the flip's refix run is the
+first), so no migration concern.
+
+**D7b (#7, MAJOR)** the already-reported guard is blind to a PENDING daily
+send: with `.daily-counted.json` written but stamps not yet applied
+(Telegram outage window), the tool sees zero reported roots, tears the
+cohort down, the later resume sends the STALE sheet crediting deleted rows
+and the re-run's same-id children get counted AGAIN. Fix: both
+`recal_refix_reset._locked_main` and `recal_rebuild_reset.main` refuse to
+run (rc=2, loud JSON naming the day) while ANY
+`reports/<day>/.daily-counted.json` exists without BOTH its `.sent` marker
+and `doc_sent` (D5c) — same doctrine as their run-lock check. (The
+resume-side sid verification is D5b.) Tests: pending record → tool refuses
+before any Drive/DB action; record+marker+doc_sent → proceeds.
+
+**D7c (#19)** `rclone lsf` failure ≠ absence: only rc==3 (and rc==4) mean
+"directory not found"; today ANY non-zero rc (network outage = rc 1) prints
+"remote dir absent", SKIPS the compensating moveto, and the teardown
+proceeds — the re-run then re-delivers a duplicate to the client, violating
+the tool's abort-before-DB contract. Fix: `rclone(...)` already returns
+(rc, tail); treat rc in (3, 4) as absent-skip; any OTHER non-zero rc →
+print the captured stderr and abort pre-DB with rc=3 exactly like the
+moveto branch. Tests: monkeypatched rclone returning rc=1 on lsf → abort,
+no DB change; rc=3 → skip-and-proceed (today's behaviour).
+
+### D8 — C8 leftovers (#13, #23) — `pipeline/fix.py` + tests
+
+**D8a (#13)** the rewrite keeps a `created_at_utc` that MATCHES `_TS_RE` but
+does not PARSE (hour 25, month 13 — regex checks digit shapes only), so the
+checker re-FAILs "timestamps unparseable" and both attempts burn. Fix: track
+`parsed_ok` from the existing try in `fix_sessionjson_recompute`; the
+canonical re-emit condition becomes
+`not parsed_ok or not isinstance(created_raw, str) or not _TS_RE.match(created_raw)`
+(mirroring the checker's regex+parse acceptance). Add a round-trip
+parametrization row (`"2026-08-18T25:30:00Z"`, id="regex_valid_unparseable_ts").
+
+**D8b (#23, test only)** `_conv_valid`'s maps_to='other' branch is unpinned
+(mutation-proved). Add the parametrization row: `{"maps_to": "other",
+"dx_positive": "not_applicable", …all not_applicable…}` (no `maps_to_other`),
+id="conv_other_missing_label".
+
+### After D8 — close-out and iteration 10
+
+1. Measure the new passed count; set `SUITE_FLOOR` default = passed − 4 in
+   `tools/run_suite.sh` AND FLIP_RUNBOOK §6b (part of the D-commit that
+   lands last, or a sibling).
+2. Full gate green on Mac AND the VM side checkout (sync recipe §1; use the
+   BARE instance name with gcloud — `gcloud compute scp … hl-pipeline-vm:…
+   --zone=asia-south1-a --project=hl-gamedata-pipeline`; the dotted alias is
+   for plain ssh only and gcloud REJECTS it).
+3. Tree-verify discipline (§1 traps), update §0.
+4. Review iteration 10: copy `tools/review/flip-review-iter9.js` → scratchpad
+   `flip-review-iter10.js`; retarget the regressions lane at the D1–D8
+   commits; refresh suite numbers; APPEND to the accepted list (keeping ALL
+   existing entries):
+   21. The refix tool refuses ANY tree with payment evidence (paid nodes or
+       an existing tree_sealed_at) into skipped_mixed; the seal-write branch
+       is intentionally unreachable; tree_sealed_at stays honored
+       defensively (D7).
+   22. The daily resume is day-agnostic (oldest pending record first, one
+       send per tick); resume refuses loudly on a missing counted row and
+       skips (loudly) re-stamping rows whose marks were cleared after the
+       record's `at`; `doc_sent` in the record gates document-only resends
+       (D5).
+   23. BrokenProcessPool with stop unset is host-suspect on the FIRST death
+       (VALIDATING + cooldown, events-audit marker) and terminal on the
+       second; U-lane host tuple includes CalledProcessError — the fix-lane
+       CalledProcessError="session" ruling is unchanged (D3).
+   24. Gate-record spans are rebased at propagation time (retrim offsets
+       from the parent fixlog via note.head_cut_s; child clock via segment
+       t0); adoption paths propagate with detail-parsed bounds, t0=None ⇒
+       propagate-whole; _append_fixlog OSError is host-kind, never
+       swallowed (D4).
+   25. The quarantine heal clears payment stamps ONLY on a changed md5;
+       identical-md5 heals preserve stamps + duration_raw_s (D6).
+   26. CNT_SHORT (and the soft-max advisory) judge the PROBED duration when
+       available; the claimed duration is only a fallback (D2).
+   27. analyze()'s engine error is suppressed when typed qa FAILs already
+       exist (QA_FAIL_UNMAPPED routing); engine OSError carries
+       error_kind=host (D2).
+   28. rebase_events reports carried re-presses via carried_out; the
+       retranslate refuses carried-only rebases — "zero events beyond N
+       held-key carries" (D1).
+   Then run 10 (and 11 if 10 is not quiet) per §5's unchanged discipline —
+   fix-in-iteration, quiet judged AFTER fixing, stop at first quiet, STOP
+   and hand Adnaan the list if 11 is not quiet. Then §6 e2e → §7 flip.
+
+**Deviations from finder proposals, recorded:** #1/#18 are unified into the
+zero-payment-evidence refusal (each finding's own fix would leave the other's
+defect half-open: preserving the seal (#1) still swallows recovered hours
+(#18); refusing paid+fix-failed trees (#18) still lets a SEALED tree without
+current paid marks erase its seal (#1)). #4/#7's resume-side overlaps are
+split: missing row ⇒ refuse (7's severity), changed row ⇒ per-sid skip (4's
+proposal). #9's fix uses set_state VALIDATING→VALIDATING for the death
+marker (stint-anchor-safe) rather than a new events writer. #12 keeps
+_map_windows out of scope (bounded change before the flip). #14's fixlog
+OSError re-raise deliberately reuses the C3 host machinery instead of a new
+alert path.
+
+## 10. Status after iteration 9 (for the incoming executor)
+
+- Fix phase C1–C9: DONE, committed `c3eab1b..b694456`, gates green both
+  hosts at 582 (floor 578). Close-out commit `1e3320f`.
+- Review iteration 9: DONE, NOT quiet — 23 confirmed (R9_FINDINGS.md);
+  fixes NOT yet applied (Adnaan redirected the r8 session to hand off).
+- Next: D1–D8 above → both gates → iteration 10 → (11) → e2e → flip,
+  all per the unchanged §5/§6/§7 discipline and ground rules.
