@@ -860,9 +860,11 @@ def send_daily_report_if_due(cfg: C.Config, ledger: Ledger,
         # folder-issues message minutes later
         folder_issues=len(reports.build_folder_issues(ledger)))
     counted: list[str] = []
+    accepted: list[str] = []
     csv_path, _md = reports.write_payment_sheet(cfg, ledger, now_ist,
                                                 bounds=(lo, hi),
-                                                counted_out=counted)
+                                                counted_out=counted,
+                                                accepted_out=accepted)
     msg = reports.build_daily_message(d, p)
     if window_clamped:
         msg += ("\n\n⚠️ Window note: the stored anchor was older than 48 h "
@@ -887,6 +889,12 @@ def send_daily_report_if_due(cfg: C.Config, ledger: Ledger,
     stamped = reports.mark_uploads_reported(ledger, lo, hi, sids=counted)
     if stamped:
         print(f"[daily] stamped {stamped} root upload(s) as reported")
+    # the accepted-side mark rides the SAME pre-anchor position for the
+    # same reason: stamped-then-killed errs toward a smaller resent sheet,
+    # never toward hours paid twice (RULED split, Adnaan 2026-08-18)
+    acc_stamped = reports.mark_accepted_reported(ledger, accepted)
+    if acc_stamped:
+        print(f"[daily] stamped {acc_stamped} node(s) as accepted-reported")
     anchor.write_text(hi)          # next report's window starts here
     marker.parent.mkdir(parents=True, exist_ok=True)
     marker.touch()

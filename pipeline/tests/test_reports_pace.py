@@ -165,14 +165,17 @@ def test_sheet_cohort_attributes_late_outcome_to_upload_window(tmp_path):
                    "WHERE session_id=?", (sid,))
     led.db.commit()
     counted: list = []
+    accepted: list = []
     upload_window = reports.build_sheet_rows(
         led, datetime.now(C.IST),
         bounds=("2026-08-15T00:00:00+00:00", "2026-08-16T00:00:00+00:00"),
-        counted_out=counted)
+        counted_out=counted, accepted_out=accepted)
     assert upload_window[0]["kamla_rejection_reasons"] == "no-mouse"
-    # the STAMP is the once-only mechanism (r5): stamp what was counted,
-    # then no later window may re-count it
+    # the STAMPS are the once-only mechanism (r5, and the 08-18 split):
+    # stamp what was counted — uploaded hours AND the accepted-side nodes
+    # whose hours/labels landed — then no later window may re-count it
     reports.mark_uploads_reported(led, "", "", sids=counted)
+    reports.mark_accepted_reported(led, accepted)
     later_window = reports.build_sheet_rows(
         led, datetime.now(C.IST),
         bounds=("2026-08-16T00:00:00+00:00", "2026-08-17T00:00:00+00:00"))
@@ -446,11 +449,17 @@ def _mk_root(led, sid, ctime, raw=None, player="late@x.com"):
 
 def _sheet_and_mark(led, bounds):
     """Generation + stamping exactly as production wires them (r5 #3:
-    stamp what the sheet counted, never a re-derive)."""
+    stamp what the sheet counted, never a re-derive). BOTH marks since the
+    ruled uploaded/accepted split (Adnaan 2026-08-18) — stamping only the
+    uploaded side here would let already-counted accepted hours re-enter
+    the next sheet, which is not what the send site does."""
     counted: list = []
+    accepted: list = []
     rows = reports.build_sheet_rows(
-        led, datetime.now(C.IST), bounds=bounds, counted_out=counted)
+        led, datetime.now(C.IST), bounds=bounds, counted_out=counted,
+        accepted_out=accepted)
     reports.mark_uploads_reported(led, *bounds, sids=counted)
+    reports.mark_accepted_reported(led, accepted)
     return rows
 
 

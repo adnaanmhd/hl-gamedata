@@ -45,11 +45,15 @@ def _mk_root(led, sid, ctime, raw=None, state="DISCOVERED",
 
 
 def _sheet_and_mark(led, bounds):
-    """Generation + stamping exactly as production wires them (r5 #3)."""
+    """Generation + stamping exactly as production wires them (r5 #3).
+    BOTH marks since the ruled uploaded/accepted split (Adnaan 08-18)."""
     counted: list = []
+    accepted: list = []
     rows = reports.build_sheet_rows(
-        led, datetime.now(C.IST), bounds=bounds, counted_out=counted)
+        led, datetime.now(C.IST), bounds=bounds, counted_out=counted,
+        accepted_out=accepted)
     reports.mark_uploads_reported(led, *bounds, sids=counted)
+    reports.mark_accepted_reported(led, accepted)
     return rows
 
 

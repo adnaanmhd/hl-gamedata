@@ -263,11 +263,24 @@ def _locked_main(cfg, args) -> int:
         # superseded-refix-*/ so the first copy is gone from Drive II.
         # (ledger.supersede clears it correctly, because there the md5 is
         # new and the hours genuinely are new.)
+        # accepted_reported_at MIRRORS the uploaded stamp (RULED split,
+        # Adnaan 2026-08-18). Unreported root (the flip case —
+        # recal_rebuild_reset nulled the whole cohort): clear it, so the
+        # re-run's genuinely new delivered hours reach a sheet; the root's
+        # old value is a leftover from having been REJECTED, and left in
+        # place it would seal the re-run out of every future sheet.
+        # Already-reported root (--allow-reported): SEAL the tree, which
+        # reproduces the preserved-uploaded-stamp doctrine on the accepted
+        # side — this root's subtree is torn down and re-delivered, and
+        # without the seal the same footage would be counted a second time
+        # on a later sheet. Nothing is paid twice either way; the sheet of
+        # record and Drive II disagree until reconciled.
         ledger.db.execute(
             "UPDATE sessions SET state='DISCOVERED', bin=NULL,"
             " reasons_json='[]', fix_attempts=0, duration_delivered_s=NULL,"
-            " rrd_sampled=0, delivered_at=NULL,"
-            " updated_at=? WHERE session_id=?", (now, root))
+            " rrd_sampled=0, delivered_at=NULL, accepted_reported_at=?,"
+            " updated_at=? WHERE session_id=?",
+            (now if row["uploaded_reported_at"] else None, now, root))
         ledger.db.execute(
             "INSERT INTO events(session_id, ts, from_state, to_state,"
             " detail) VALUES(?,?,?,?,?)",

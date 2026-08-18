@@ -210,8 +210,8 @@ def test_daily_resend_after_kill_before_marker_no_double_count(cfg, ledger,
     sheets = []
     real_rows = reports.build_sheet_rows
 
-    def spy_rows(led_, day, bounds=None, counted_out=None):
-        rows = real_rows(led_, day, bounds, counted_out=counted_out)
+    def spy_rows(led_, day, bounds=None, **kw):
+        rows = real_rows(led_, day, bounds, **kw)
         sheets.append(rows)
         return rows
     monkeypatch.setattr(reports, "build_sheet_rows", spy_rows)

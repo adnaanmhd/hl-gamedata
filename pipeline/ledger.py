@@ -74,11 +74,20 @@ class Ledger:
         # sheet has COUNTED — the late-arrival guard keys on its absence
         # (d3/review-r4: any session becoming countable after its cohort
         # window was reported would otherwise be dropped forever)
+        # accepted_reported_at marks a node whose ACCEPTED hours (or reject
+        # labels) a payment sheet has counted. It is a SECOND, independent
+        # mark: uploaded_reported_at used to do both jobs, and a root
+        # stamped while its split children were still in flight could never
+        # re-enter a sheet, so footage that shipped to the client was never
+        # paid for (RULED, Adnaan 2026-08-18)
         cols = {r["name"] for r in
                 self.db.execute("PRAGMA table_info(sessions)")}
         if "uploaded_reported_at" not in cols:
             self.db.execute("ALTER TABLE sessions "
                             "ADD COLUMN uploaded_reported_at TEXT NULL")
+        if "accepted_reported_at" not in cols:
+            self.db.execute("ALTER TABLE sessions "
+                            "ADD COLUMN accepted_reported_at TEXT NULL")
         self.db.commit()
 
     def close(self) -> None:
@@ -143,7 +152,8 @@ class Ledger:
                    "duration_delivered_s", "duration_raw_s", "rrd_sampled",
                    "delivered_at", "dossier_path", "md5_video", "bytes",
                    "game", "drive_path", "drive_ctime", "parent_id",
-                   "operator_email", "player_email", "uploaded_reported_at"}
+                   "operator_email", "player_email", "uploaded_reported_at",
+                   "accepted_reported_at"}
         bad = set(fields) - allowed
         assert not bad, f"unknown ledger fields: {bad}"
         sets = ", ".join(f"{k}=?" for k in fields)
@@ -204,13 +214,17 @@ class Ledger:
             "UPDATE sessions SET md5_video=?, bytes=?, drive_ctime=?,"
             " fix_attempts=0, bin=NULL, reasons_json='[]',"
             " duration_delivered_s=NULL, duration_raw_s=NULL, rrd_sampled=0,"
-            " delivered_at=NULL, uploaded_reported_at=NULL, updated_at=?"
+            " delivered_at=NULL, uploaded_reported_at=NULL,"
+            " accepted_reported_at=NULL, updated_at=?"
             " WHERE session_id=?",
             (new_md5, new_bytes, new_ctime, now, session_id))
         # uploaded_reported_at cleared above: the stamp belonged to the
         # OLD upload's sheet — inherited, it blocked the corrected
         # re-upload's hours from the late-arrival guard on every future
-        # sheet (review-r5 #7)
+        # sheet (review-r5 #7). accepted_reported_at goes with it for the
+        # same reason: the new bytes' delivered hours are genuinely new,
+        # and an inherited accepted mark would seal them out of every
+        # future sheet (the §4 bug in its other form)
         self.db.execute(
             "INSERT INTO events(session_id, ts, from_state, to_state, detail)"
             " VALUES(?,?,?,?,?)",

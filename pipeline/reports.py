@@ -341,6 +341,29 @@ def mark_uploads_reported(ledger: Ledger, lo: str, hi: str,
     return n
 
 
+def mark_accepted_reported(ledger: Ledger, sids: list[str]) -> int:
+    """Stamp accepted_reported_at on every NODE whose accepted hours (or
+    reject labels) the just-generated sheet counted — build_sheet_rows'
+    accepted_out. Returns the number stamped.
+
+    This is the second half of the RULED split (Adnaan, 2026-08-18).
+    `uploaded_reported_at` used to mean both "uploaded hours counted" and
+    "this root is finished, never look again"; the second meaning is what
+    lost the money — a root stamped while its children were still being
+    validated could never re-enter a sheet, so hours that shipped to the
+    client were never paid. Uploaded is still counted exactly once (d3's
+    conservation invariant holds); accepted is now counted exactly once
+    too, per node, whenever it lands.
+
+    Deliberately has NO re-derive fallback: re-deriving the counted set
+    raced the pipeline threads and stamped rows the sheet never counted
+    (review-r5 #3). The caller passes what the sheet actually counted."""
+    now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    for sid in sids:
+        ledger.update(sid, accepted_reported_at=now)
+    return len(sids)
+
+
 def _parse_ts(v: str | None) -> datetime | None:
     """Normalize the ledger's two timestamp dialects to aware datetimes:
     drive_ctime is RFC3339 with millis + Z ('…T11:08:34.413Z') while
@@ -354,9 +377,36 @@ def _parse_ts(v: str | None) -> datetime | None:
         return None
 
 
+# game -> the sheet's column prefix. Module level so the accepted-side
+# re-entry test below filters exactly like the tree walk does: a node in a
+# game with no column can never be counted, so it must never be able to
+# pull its root back onto every future sheet either.
+GAME_COL = {"kamla": "kamla", "outer_wilds": "ow"}
+
+# accepted-side terminal states: the only nodes that ever carry accepted
+# hours or reject labels onto a sheet.
+_ACCEPTED_STATES = ("DELIVERED", "REJECTED")
+
+
+def _tree_has_uncounted_accepted(root, children: dict) -> bool:
+    """Does this root's tree hold a DELIVERED/REJECTED node whose accepted
+    hours (or labels) no sheet has counted yet? Drives the accepted-side
+    re-entry — see mark_accepted_reported."""
+    stack = [root]
+    while stack:
+        n = stack.pop()
+        stack.extend(children.get(n["session_id"], []))
+        if n["state"] in _ACCEPTED_STATES \
+                and not n["accepted_reported_at"] \
+                and GAME_COL.get(n["game"] or "") is not None:
+            return True
+    return False
+
+
 def build_sheet_rows(ledger: Ledger, day_ist: datetime,
                      bounds: tuple[str, str] | None = None,
-                     counted_out: list[str] | None = None) -> list[dict]:
+                     counted_out: list[str] | None = None,
+                     accepted_out: list[str] | None = None) -> list[dict]:
     """One row per (operator, player), COHORT accounting (v4, 08-15):
     every ROOT upload (parent_id IS NULL, not DUPLICATE/QUARANTINED)
     whose drive_ctime falls in the window contributes — to that window —
@@ -378,14 +428,24 @@ def build_sheet_rows(ledger: Ledger, day_ist: datetime,
     - uploaded != accepted+pending+rejected by design: head/tail trim and
       dropped segments are legitimate loss.
     Rows with no activity in the window are suppressed. Hours only, no
-    money (R11)."""
+    money (R11).
+
+    TWO independent marks decide re-entry (RULED, Adnaan 2026-08-18):
+    `uploaded_reported_at` on the root means only "uploaded hours counted";
+    `accepted_reported_at` per NODE means "that node's accepted hours /
+    labels counted". A root stamped while its children were still in
+    flight therefore comes BACK on a later sheet carrying accepted hours
+    with uploaded 0 — an intended reading, not a defect. Before the split
+    one mark did both jobs and every such root was sealed out of every
+    future sheet, so footage that shipped was never paid for."""
     lo, hi = bounds or _day_bounds_utc(day_ist)
     lo_dt, hi_dt = _parse_ts(lo), _parse_ts(hi)
     day = day_ist.strftime("%Y-%m-%d")
     rows = ledger.db.execute(
         "SELECT session_id, game, operator_email, player_email, parent_id,"
         " state, drive_ctime, created_at, duration_raw_s,"
-        " duration_delivered_s, reasons_json, uploaded_reported_at"
+        " duration_delivered_s, reasons_json, uploaded_reported_at,"
+        " accepted_reported_at"
         " FROM sessions WHERE player_email != ''").fetchall()
     children: dict[str, list] = {}
     for r in rows:
@@ -401,7 +461,7 @@ def build_sheet_rows(ledger: Ledger, day_ist: datetime,
             "kamla_pending_hrs": 0.0, "ow_pending_hrs": 0.0,
             "kamla_rej": [], "ow_rej": []})
 
-    game_col = {"kamla": "kamla", "outer_wilds": "ow"}
+    game_col = GAME_COL
     for root in rows:
         if root["parent_id"] is not None or \
                 root["state"] in ("DUPLICATE", "QUARANTINED"):
@@ -432,7 +492,22 @@ def build_sheet_rows(ledger: Ledger, day_ist: datetime,
         late = (not in_window and up < lo_dt
                 and (r_countable(root) or root["state"] == "REJECTED")
                 and not root["uploaded_reported_at"])
-        if not in_window and not late:
+        # ACCEPTED-SIDE RE-ENTRY (RULED, Adnaan 2026-08-18). The uploaded
+        # stamp means ONLY "uploaded hours counted". A root stamped while
+        # its split children were still validating recorded accepted_hrs=0
+        # and was then invisible to both guards above forever — the player
+        # was paid nothing for footage that shipped to the client
+        # (measured: 135 of 309 countable roots, 16.84 h, on the 08-18
+        # rebuild dump). It now comes back carrying accepted hours only,
+        # with uploaded 0. `up < hi_dt` keeps a root whose cohort window
+        # has not opened yet out of this sheet; the root-level accepted
+        # mark is a whole-tree SEAL, applied only by recal_refix_reset
+        # when it tears down an already-reported tree.
+        sealed = bool(root["accepted_reported_at"])
+        accepted_due = (up < hi_dt and not sealed
+                        and bool(root["uploaded_reported_at"])
+                        and _tree_has_uncounted_accepted(root, children))
+        if not in_window and not late and not accepted_due:
             continue
         if late:
             # settling (review-r5 #29): the in-window path gets
@@ -459,16 +534,19 @@ def build_sheet_rows(ledger: Ledger, day_ist: datetime,
                   f"{root['drive_ctime'] or root['created_at']} — its "
                   f"window was already reported; counted in the current "
                   f"sheet (conservation)", file=sys.stderr)
-        if counted_out is not None and \
+        if (in_window or late) and counted_out is not None and \
                 (r_countable(root) or root["state"] == "REJECTED"):
             # exactly what mark_uploads_reported must stamp: counted
             # roots only — an in-window root still awaiting its download
-            # stays unstamped so the late guard can pick its hours up
+            # stays unstamped so the late guard can pick its hours up.
+            # An accepted-only re-entry never lands here: its uploaded
+            # hours were counted (and stamped) by an earlier sheet.
             counted_out.append(root["session_id"])
-        g_root = game_col.get(root["game"] or "")
-        if g_root is not None:
-            bucket(root)[f"{g_root}_hrs_uploaded"] += \
-                (root["duration_raw_s"] or 0.0) / 3600.0
+        if in_window or late:
+            g_root = game_col.get(root["game"] or "")
+            if g_root is not None:
+                bucket(root)[f"{g_root}_hrs_uploaded"] += \
+                    (root["duration_raw_s"] or 0.0) / 3600.0
         # recursive walk of the whole tree (root included)
         stack = [root]
         while stack:
@@ -478,15 +556,24 @@ def build_sheet_rows(ledger: Ledger, day_ist: datetime,
             if g is None:
                 continue     # never dump an unknown game into a column
             if n["state"] == "DELIVERED":
+                # counted once, ever: its own mark, or the root-level seal
+                if sealed or n["accepted_reported_at"]:
+                    continue
                 bucket(n)[f"{g}_accepted_hrs"] += \
                     (n["duration_delivered_s"] or 0.0) / 3600.0
+                if accepted_out is not None:
+                    accepted_out.append(n["session_id"])
             elif n["state"] == "REJECTED":
+                if sealed or n["accepted_reported_at"]:
+                    continue
                 try:
                     labels = session_reject_labels(
                         json.loads(n["reasons_json"] or "[]"), daily=True)
                 except json.JSONDecodeError:
                     labels = [UNREADABLE_MARKER]
                 bucket(n)[f"{g}_rej"].append(labels)
+                if accepted_out is not None:
+                    accepted_out.append(n["session_id"])
             elif n["state"] != "SPLIT":
                 # still in flight (SPLIT itself carries nothing — its
                 # children hold the hours)
@@ -534,13 +621,15 @@ def build_sheet_rows(ledger: Ledger, day_ist: datetime,
 
 def write_payment_sheet(cfg: C.Config, ledger: Ledger, day_ist: datetime,
                         bounds: tuple[str, str] | None = None,
-                        counted_out: list[str] | None = None
+                        counted_out: list[str] | None = None,
+                        accepted_out: list[str] | None = None
                         ) -> tuple[Path, Path]:
     """CSV + MD twin under ~/hl-pipeline/reports/YYYY-MM-DD/ (F8)."""
     day = day_ist.strftime("%Y-%m-%d")
     out = cfg.reports_dir / day
     out.mkdir(parents=True, exist_ok=True)
-    rows = build_sheet_rows(ledger, day_ist, bounds, counted_out=counted_out)
+    rows = build_sheet_rows(ledger, day_ist, bounds, counted_out=counted_out,
+                            accepted_out=accepted_out)
     csv_path = out / f"payment-{day}.csv"
     with csv_path.open("w", newline="") as f:
         w = csv.DictWriter(f, fieldnames=SHEET_COLS)

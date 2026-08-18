@@ -313,14 +313,24 @@ def _locked_main(cfg) -> int:
         lo_dt, hi_dt = reports._parse_ts(lo), reports._parse_ts(hi)
 
         if send and counted_file.exists():
-            counted = json.loads(counted_file.read_text())
+            # the record carries BOTH marks since the RULED accepted/
+            # uploaded split (Adnaan 2026-08-18); a bare list is a
+            # pre-split record, whose accepted side was never stamped
+            rec = json.loads(counted_file.read_text())
+            if isinstance(rec, dict):
+                counted = rec.get("counted", [])
+                accepted = rec.get("accepted", [])
+            else:
+                counted, accepted = rec, []
             csv_path = day_dir / f"payment-{day}.csv"
             md_path = day_dir / f"payment-{day}.md"
             resumed = True
         else:
             counted = []
+            accepted = []
             csv_path, md_path = reports.write_payment_sheet(
-                cfg, ledger, day_dt, bounds=(lo, hi), counted_out=counted)
+                cfg, ledger, day_dt, bounds=(lo, hi), counted_out=counted,
+                accepted_out=accepted)
             # pass the EXACT set the sheet counted, so the '## Reject
             # detail' section describes the same population as the columns
             # above it — late arrivals included (r-loop 5)
@@ -342,16 +352,19 @@ def _locked_main(cfg) -> int:
                 # already counted instead of re-counting them as late
                 # arrivals
                 reports.mark_uploads_reported(ledger, lo, hi, sids=counted)
+                reports.mark_accepted_reported(ledger, accepted)
                 csv_path, md_path = pv_csv, pv_md
             else:
                 tmp = counted_file.with_suffix(".tmp")
-                tmp.write_text(json.dumps(counted))
+                tmp.write_text(json.dumps({"counted": counted,
+                                           "accepted": accepted}))
                 tmp.replace(counted_file)
 
         if send:
             if not counted_file.exists():
                 tmp = counted_file.with_suffix(".tmp")
-                tmp.write_text(json.dumps(counted))
+                tmp.write_text(json.dumps({"counted": counted,
+                                           "accepted": accepted}))
                 tmp.replace(counted_file)
             caption = (f"SUPERSEDES {day} sheet — methodology v2 "
                        f"(black-frozen recalibration). Old {day} sheet is "
@@ -367,6 +380,7 @@ def _locked_main(cfg) -> int:
                 return 3
             stamped = reports.mark_uploads_reported(ledger, lo, hi,
                                                     sids=counted)
+            reports.mark_accepted_reported(ledger, accepted)
             anchor.write_text(hi)
             marker = day_dir / ".sent"
             if not marker.exists():        # preserve mtime evidence
@@ -375,6 +389,7 @@ def _locked_main(cfg) -> int:
             done.write_text(datetime.now(C.IST).isoformat())
             out.append({"day": day, "lo": lo, "hi": hi,
                         "counted": len(counted), "stamped": stamped,
+                        "accepted_stamped": len(accepted),
                         "resumed": resumed, "csv": str(csv_path)})
         else:
             out.append({"day": day, "lo": lo, "hi": hi,
