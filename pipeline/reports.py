@@ -383,23 +383,63 @@ def _parse_ts(v: str | None) -> datetime | None:
 # pull its root back onto every future sheet either.
 GAME_COL = {"kamla": "kamla", "outer_wilds": "ow"}
 
+def pending_daily_send(cfg) -> str | None:
+    """The day name of any daily send whose durable record has not fully
+    settled (missing .sent marker, or .sent without doc_sent), else None.
+    The recal tools REFUSE to run while one exists (r-loop 9 #7): tearing
+    rows down under a pending record makes the later resume send a STALE
+    sheet crediting deleted rows, and the re-run's deterministic same-id
+    children then get counted a second time."""
+    try:
+        day_dirs = sorted(p for p in Path(cfg.reports_dir).iterdir()
+                          if p.is_dir())
+    except OSError:
+        return None
+    for d in day_dirs:
+        rec = d / ".daily-counted.json"
+        if not rec.is_file():
+            continue
+        if not (d / ".sent").exists():
+            return d.name
+        try:
+            if not json.loads(rec.read_text()).get("doc_sent"):
+                return d.name
+        except (OSError, json.JSONDecodeError):
+            return d.name
+    return None
+
+
 # accepted-side terminal states: the only nodes that ever carry accepted
 # hours or reject labels onto a sheet.
 _ACCEPTED_STATES = ("DELIVERED", "REJECTED")
 
 
-def _tree_has_uncounted_accepted(root, children: dict) -> bool:
+def _tree_has_uncounted_accepted(root, children: dict,
+                                 mem: dict | None = None) -> bool:
     """Does this root's tree hold a DELIVERED/REJECTED node whose accepted
     hours (or labels) no sheet has counted yet? Drives the accepted-side
-    re-entry — see mark_accepted_reported."""
+    re-entry — see mark_accepted_reported. A DELIVERED node in the paid
+    -piece memory is treated as counted (r-loop 9, ruling C): without
+    this, a memory-skipped node (which never gets a stamp) would re-enter
+    its root on every future sheet forever."""
     stack = [root]
     while stack:
         n = stack.pop()
         stack.extend(children.get(n["session_id"], []))
-        if n["state"] in _ACCEPTED_STATES \
-                and not n["accepted_reported_at"] \
-                and GAME_COL.get(n["game"] or "") is not None:
-            return True
+        if n["state"] not in _ACCEPTED_STATES \
+                or n["accepted_reported_at"] \
+                or GAME_COL.get(n["game"] or "") is None:
+            continue
+        if n["state"] == "DELIVERED" and mem and n["session_id"] in mem:
+            secs = mem[n["session_id"]]
+            cur = n["duration_delivered_s"] or 0.0
+            if secs is not None and abs(cur - secs) <= 1.0:
+                # a MATCHED paid piece counts as counted (pre-teardown)
+                continue
+            # an id COLLISION stays "uncounted" on purpose: the root
+            # keeps re-entering so build_sheet_rows prints its AMBIGUOUS
+            # line on every sheet until a human reconciles
+        return True
     return False
 
 
@@ -451,6 +491,18 @@ def build_sheet_rows(ledger: Ledger, day_ist: datetime,
     for r in rows:
         if r["parent_id"]:
             children.setdefault(r["parent_id"], []).append(r)
+    # per-piece payment memory (RULED C, Adnaan 2026-08-18; r-loop 9
+    # #1/#18): pieces recal_refix_reset recorded as already-paid before
+    # tearing their tree down. A re-delivered same-id piece matching its
+    # record is skipped exactly like an accepted-stamped node; a matching
+    # id with DIFFERENT seconds is an id COLLISION (the re-run cut
+    # differently) — excluded LOUDLY, never auto-paid: a withheld hour is
+    # hand-recoverable, a double-pay is not.
+    paid_mem: dict[str, dict] = {}
+    for r in ledger.db.execute(
+            "SELECT root_id, session_id, seconds FROM paid_pieces"):
+        paid_mem.setdefault(r["root_id"], {})[r["session_id"]] = \
+            r["seconds"]
     per_key: dict[tuple[str, str], dict] = {}
 
     def bucket(r):
@@ -510,7 +562,9 @@ def build_sheet_rows(ledger: Ledger, day_ist: datetime,
         sealed = bool(root["tree_sealed_at"])
         accepted_due = (up < hi_dt and not sealed
                         and bool(root["uploaded_reported_at"])
-                        and _tree_has_uncounted_accepted(root, children))
+                        and _tree_has_uncounted_accepted(
+                            root, children,
+                            paid_mem.get(root["session_id"])))
         if not in_window and not late and not accepted_due:
             continue
         if late:
@@ -568,6 +622,22 @@ def build_sheet_rows(ledger: Ledger, day_ist: datetime,
             if n["state"] == "DELIVERED":
                 # counted once, ever: its own mark, or the root-level seal
                 if sealed or n["accepted_reported_at"]:
+                    continue
+                mem = paid_mem.get(root["session_id"]) or {}
+                if n["session_id"] in mem:
+                    secs = mem[n["session_id"]]
+                    cur = n["duration_delivered_s"] or 0.0
+                    if secs is not None and abs(cur - secs) <= 1.0:
+                        print(f"[sheet] paid-piece memory: "
+                              f"{n['session_id']} ({cur:.0f}s) was paid "
+                              f"before its refix teardown — not counted "
+                              f"again", file=sys.stderr)
+                    else:
+                        print(f"[sheet] AMBIGUOUS re-delivered piece "
+                              f"{n['session_id']}: paid memory "
+                              f"{secs if secs is not None else '?'}s, "
+                              f"re-delivered {cur:.0f}s — NOT counted; "
+                              f"reconcile by hand", file=sys.stderr)
                     continue
                 bucket(n)[f"{g}_accepted_hrs"] += \
                     (n["duration_delivered_s"] or 0.0) / 3600.0

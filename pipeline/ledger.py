@@ -49,6 +49,19 @@ CREATE TABLE IF NOT EXISTS events(
 CREATE TABLE IF NOT EXISTS incomplete(
   drive_path TEXT PRIMARY KEY, first_seen TEXT, last_seen TEXT, missing_json TEXT
 );
+-- Per-piece payment memory (RULED C, Adnaan 2026-08-18 at D0; r-loop 9
+-- #1/#18): which pieces of a torn-down tree were already paid on a sent
+-- sheet. Written by recal_refix_reset BEFORE teardown; read by
+-- build_sheet_rows to exclude a re-delivered same-id piece's hours while
+-- the recovered fix-failed hours stay payable. NEVER auto-deleted —
+-- supersede/heal/rebuild leave it alone; evidence of money moved
+-- outlives byte changes (a stale id collision surfaces LOUDLY on the
+-- sheet side instead of paying twice or silently swallowing).
+CREATE TABLE IF NOT EXISTS paid_pieces(
+  root_id TEXT, session_id TEXT, seconds REAL NULL, seg TEXT NULL,
+  recorded_at TEXT,
+  PRIMARY KEY(root_id, session_id)
+);
 CREATE INDEX IF NOT EXISTS idx_sessions_state ON sessions(state);
 CREATE INDEX IF NOT EXISTS idx_sessions_md5 ON sessions(md5_video);
 CREATE INDEX IF NOT EXISTS idx_events_sid ON events(session_id);
@@ -179,6 +192,30 @@ class Ledger:
             " WHERE session_id=?",
             (json.dumps(reasons), bin_, _now(), session_id))
         self.db.commit()
+
+    # ---------------------------------------------- per-piece payment memory
+    def record_paid_piece(self, root_id: str, session_id: str,
+                          seconds: float | None, seg: str | None) -> None:
+        """Remember that `session_id`'s delivered hours were counted on a
+        sent sheet before its tree was torn down (RULED C, Adnaan
+        2026-08-18; r-loop 9 #1/#18). INSERT OR IGNORE: the first record
+        describes the payment that actually happened — later passes never
+        overwrite it. `seconds` is the piece's duration_delivered_s at
+        record time (the sheet-side match key); `seg` is forensic (the
+        child's split-segment detail when known)."""
+        self.db.execute(
+            "INSERT OR IGNORE INTO paid_pieces"
+            "(root_id, session_id, seconds, seg, recorded_at)"
+            " VALUES(?,?,?,?,?)",
+            (root_id, session_id, seconds, seg, _now()))
+        self.db.commit()
+
+    def paid_pieces_for(self, root_id: str) -> dict:
+        """{session_id: seconds} of the pieces already paid under this
+        root. Never auto-cleared — see the schema comment."""
+        return {r["session_id"]: r["seconds"] for r in self.db.execute(
+            "SELECT session_id, seconds FROM paid_pieces WHERE root_id=?",
+            (root_id,))}
 
     # ------------------------------------------------------------ supersede
     def archive_dossier(self, session_id: str, dossier_root: Path) -> None:

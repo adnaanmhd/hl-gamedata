@@ -348,14 +348,13 @@ FIXABLE = [{"code": "SYN_TS_NOT_PTS", "blocking": True,
 
 def test_refix_seal_only_fires_where_hours_were_actually_counted(
         cfg, monkeypatch):
-    """The seal exists for ONE job: this subtree is torn down and
-    re-delivered, so hours already on a SENT sheet must not be counted
-    twice. Keying it on the UPLOADED stamp was wrong (r-loop 7) — this
-    tool selects fix-failed REJECTED trees, which contributed accepted_hrs
-    0.00 to the sheet that stamped them, so the seal protected nothing and
-    permanently blocked the re-run's genuinely new hours. That is the loss
-    the split was written to close, on the very path that recovers the
-    08-16 recalibration's false-positive rejects."""
+    """REWRITTEN under ruling C (Adnaan 2026-08-18 at D0; r-loop 9
+    #1/#18): the tool no longer seals AT ALL — it records the paid
+    pieces in ledger.paid_pieces and proceeds, so the recovered
+    fix-failed hours stay payable while build_sheet_rows excludes the
+    re-delivered paid pieces. The name is kept for plan traceability;
+    the assertion is now: memory rows exist exactly where hours were
+    actually counted, and tree_sealed_at is written nowhere."""
     led = Ledger(cfg.ledger_path)
     try:
         # A: fix-failed root, uploaded-counted, NEVER paid an accepted hour
@@ -392,19 +391,19 @@ def test_refix_seal_only_fires_where_hours_were_actually_counted(
         got = {r["session_id"]: r for r in
                led.db.execute("SELECT session_id, accepted_reported_at, "
                               "tree_sealed_at FROM sessions")}
-        # r-loop 8: the seal lives in its OWN column; the root's
-        # accepted_reported_at goes back to meaning only "this root
-        # node's own count" and is cleared on every reset
-        assert got[a]["tree_sealed_at"] is None, \
-            "a tree that was never paid an accepted hour must re-open"
-        assert got[a]["accepted_reported_at"] is None
-        assert got[b]["tree_sealed_at"], \
-            "a tree with counted DELIVERED hours must stay sealed"
-        assert got[b]["accepted_reported_at"] is None, \
-            "the seal must live in tree_sealed_at, not the node mark"
-        assert got[c]["tree_sealed_at"] is None, \
-            "an uncounted DELIVERED child is not a reason to seal"
-        assert got[c]["accepted_reported_at"] is None
+        # ruling C: nobody seals; the root's accepted_reported_at means
+        # only "this root node's own count" and is cleared on every reset
+        for sid in (a, b, c):
+            assert got[sid]["tree_sealed_at"] is None, \
+                "ruling C: the tool never writes a whole-tree seal"
+            assert got[sid]["accepted_reported_at"] is None
+        # memory rows exist EXACTLY where accepted hours were counted
+        assert led.paid_pieces_for(a) == {}, \
+            "a tree never paid an accepted hour leaves no memory"
+        assert led.paid_pieces_for(b) == {f"{b}-p1": 1700.0}, \
+            "the paid piece (and only it) is remembered with its seconds"
+        assert led.paid_pieces_for(c) == {}, \
+            "an uncounted DELIVERED child is not a paid piece"
     finally:
         led.close()
 

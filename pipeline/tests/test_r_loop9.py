@@ -322,6 +322,227 @@ def test_identical_md5_heal_preserves_payment_stamps(cfg, ledger,
         "an already-counted root must stay off post-heal sheets"
 
 
+# ------- D7 (#1/#18 ruling C, #7, #19): refix per-piece payment memory
+
+def _refix_rc(cfg, monkeypatch, rclone=None):
+    from pipeline.tests.test_payment_split_r6 import _load
+    refix = _load("recal_refix_reset")
+    monkeypatch.setattr(refix, "rclone", rclone or (lambda args: (0, "")))
+
+    class _Args:
+        yes = True
+        allow_reported = True
+    return refix._locked_main(cfg, _Args)
+
+
+def test_refix_refuses_a_sealed_root_and_preserves_the_seal(
+        cfg, monkeypatch, capsys):
+    """#1's second-pass erasure: the teardown used to overwrite an
+    existing tree_sealed_at with NULL, re-opening already-paid footage.
+    Ruling C: a sealed root (r-loop-8-era) is REFUSED into
+    skipped_sealed — the seal is never touched."""
+    from pipeline.ledger import Ledger
+    from pipeline.tests.test_payment_split_r6 import FIXABLE, _put
+    led = Ledger(cfg.ledger_path)
+    root = "2026-08-14T09-00-00Z_kamla_c_0000000000000sl1"
+    try:
+        _put(led, root, state="SPLIT", raw=3600.0, player="sealed@x.com")
+        _put(led, f"{root}-p1", state="DELIVERED", parent=root,
+             raw=1800.0, delivered=1700.0, player="sealed@x.com")
+        _put(led, f"{root}-p2", state="REJECTED", parent=root, raw=1800.0,
+             player="sealed@x.com", reasons=FIXABLE)
+        led.update(root, tree_sealed_at="2026-08-15T00:00:00+00:00",
+                   uploaded_reported_at="2026-08-15T00:00:00+00:00")
+    finally:
+        led.close()
+    assert _refix_rc(cfg, monkeypatch) == 0
+    out = capsys.readouterr().out
+    assert "REFUSED (sealed tree)" in out
+    led = Ledger(cfg.ledger_path)
+    try:
+        assert led.get(root)["state"] == "SPLIT"           # untouched
+        assert led.get(root)["tree_sealed_at"], "seal must survive"
+        assert led.get(f"{root}-p1") is not None
+    finally:
+        led.close()
+
+
+def test_refix_second_pass_never_double_pays(cfg, monkeypatch):
+    """#1's substance under ruling C: the paid piece stays excluded
+    across a SECOND refix pass (memory is durable, INSERT OR IGNORE),
+    and the recovered sibling's hours are counted exactly once in the
+    whole history."""
+    from pipeline.ledger import Ledger
+    from pipeline.tests.test_payment_split_r6 import (FIXABLE, W2, W3,
+                                                      _put, _row, _sheet)
+    led = Ledger(cfg.ledger_path)
+    root = "2026-08-14T09-00-00Z_kamla_c_0000000000000p21"
+    try:
+        _put(led, root, state="SPLIT", raw=3600.0, player="pp@x.com")
+        _put(led, f"{root}-p1", state="DELIVERED", parent=root,
+             raw=1800.0, delivered=1700.0, player="pp@x.com")
+        led.update(f"{root}-p1",
+                   accepted_reported_at="2026-08-15T00:00:00+00:00")
+        _put(led, f"{root}-p2", state="REJECTED", parent=root, raw=1800.0,
+             player="pp@x.com", reasons=FIXABLE)
+        led.update(root, uploaded_reported_at="2026-08-15T00:00:00+00:00")
+    finally:
+        led.close()
+    assert _refix_rc(cfg, monkeypatch) == 0            # pass 1
+
+    led = Ledger(cfg.ledger_path)
+    try:
+        # re-run: p1 re-delivers (unpaid — the memory skip never stamps);
+        # p2 fix-fails AGAIN
+        _put(led, f"{root}-p1", state="DELIVERED", parent=root,
+             raw=1800.0, delivered=1700.0, player="pp@x.com")
+        _put(led, f"{root}-p2", state="REJECTED", parent=root, raw=1800.0,
+             player="pp@x.com", reasons=FIXABLE)
+        led.set_state(root, "SPLIT")
+    finally:
+        led.close()
+    assert _refix_rc(cfg, monkeypatch) == 0            # pass 2 proceeds
+
+    led = Ledger(cfg.ledger_path)
+    try:
+        assert led.paid_pieces_for(root) == {f"{root}-p1": 1700.0}, \
+            "memory survives every pass — the #1 erasure is closed"
+        assert led.get(root)["tree_sealed_at"] is None
+        # re-run 2: p1 re-delivers again, p2 finally recovers
+        _put(led, f"{root}-p1", state="DELIVERED", parent=root,
+             raw=1800.0, delivered=1700.0, player="pp@x.com")
+        _put(led, f"{root}-p2", state="DELIVERED", parent=root,
+             raw=1800.0, delivered=1500.0, player="pp@x.com")
+        led.set_state(root, "SPLIT")
+        s2 = _row(_sheet(led, W2), "pp@x.com")
+        assert s2 is not None
+        assert s2["kamla_accepted_hrs"] == round(1500 / 3600.0, 2), \
+            "recovered hours once; the paid piece never again"
+        assert _row(_sheet(led, W3), "pp@x.com") is None
+    finally:
+        led.close()
+
+
+def test_id_collision_with_different_seconds_is_excluded_loudly(
+        tmp_path, capsys):
+    """Deterministic -pN ids make collisions the thing to get right
+    (ruling C): a re-run that cut DIFFERENTLY re-creates a paid piece's
+    id with different seconds. Money-safe: excluded, never auto-paid,
+    LOUD for a human."""
+    from pipeline.ledger import Ledger
+    from pipeline.tests.test_payment_split_r6 import W2, _put, _row, _sheet
+    led = Ledger(tmp_path / "l.db")
+    root = "2026-08-14T09-00-00Z_kamla_c_0000000000000ic1"
+    _put(led, root, state="SPLIT", raw=3600.0, player="coll@x.com")
+    led.update(root, uploaded_reported_at="2026-08-15T00:00:00+00:00")
+    led.record_paid_piece(root, f"{root}-p1", 1700.0, None)
+    _put(led, f"{root}-p1", state="DELIVERED", parent=root, raw=1800.0,
+         delivered=900.0, player="coll@x.com")        # different geometry
+    s = _row(_sheet(led, W2), "coll@x.com")
+    err = capsys.readouterr().err
+    assert "AMBIGUOUS re-delivered piece" in err
+    assert s is None or s["kamla_accepted_hrs"] == 0.0, \
+        "a colliding id must never be auto-paid"
+    assert led.get(f"{root}-p1")["accepted_reported_at"] is None
+    led.close()
+
+
+def test_recal_tools_refuse_while_a_daily_send_is_pending(cfg, monkeypatch,
+                                                          capsys):
+    """#7: with .daily-counted.json durable but stamps not yet applied,
+    the tools saw zero reported roots and tore the cohort down — the
+    later resume then credited deleted rows and the re-run's same-id
+    children were counted again."""
+    import sys as _sys
+
+    from pipeline.ledger import Ledger
+    from pipeline.tests.test_payment_split_r6 import FIXABLE, _load, _put
+    led = Ledger(cfg.ledger_path)
+    sid = "2026-08-14T09-00-00Z_kamla_c_0000000000000il1"
+    try:
+        _put(led, sid, state="REJECTED", raw=3600.0, reasons=FIXABLE)
+    finally:
+        led.close()
+    day_dir = cfg.reports_dir / "2026-08-17"
+    day_dir.mkdir(parents=True)
+    (day_dir / ".daily-counted.json").write_text(
+        json.dumps({"lo": "x", "hi": "y", "counted": [sid],
+                    "accepted": []}))
+
+    assert _refix_rc(cfg, monkeypatch) == 2
+    assert "pending resume" in capsys.readouterr().out
+    led = Ledger(cfg.ledger_path)
+    assert led.get(sid)["state"] == "REJECTED", "no action before refusal"
+    led.close()
+
+    reset = _load("recal_rebuild_reset")
+    parachute = cfg.home / "parachute.db"
+    parachute.write_bytes(b"x" * 2048)
+    monkeypatch.setenv("HL_PIPELINE_HOME", str(cfg.home))
+    monkeypatch.setattr(_sys, "argv", ["recal_rebuild_reset.py", "--yes",
+                                       "--backup", str(parachute)])
+    assert reset.main() == 2
+    assert "pending resume" in capsys.readouterr().out
+
+    # settled day (marker + doc_sent) -> both proceed
+    (day_dir / ".sent").touch()
+    rec = json.loads((day_dir / ".daily-counted.json").read_text())
+    rec["doc_sent"] = True
+    (day_dir / ".daily-counted.json").write_text(json.dumps(rec))
+    assert _refix_rc(cfg, monkeypatch) == 0
+    led = Ledger(cfg.ledger_path)
+    assert led.get(sid)["state"] == "DISCOVERED"
+    led.close()
+
+
+def test_lsf_failure_aborts_instead_of_skipping(cfg, monkeypatch, capsys):
+    """#19: only rc 3/4 mean 'not found'. Any other non-zero lsf rc
+    (network outage = 1) used to print 'remote dir absent', skip the
+    compensating moveto, and proceed to teardown — the re-run then
+    re-delivered a duplicate to the client."""
+    from pipeline.ledger import Ledger
+    from pipeline.tests.test_payment_split_r6 import FIXABLE, _put
+
+    def seed(tag):
+        led = Ledger(cfg.ledger_path)
+        root = f"2026-08-14T09-00-00Z_kamla_c_000000000000{tag}"
+        try:
+            _put(led, root, state="SPLIT", raw=3600.0, player="ls@x.com")
+            _put(led, f"{root}-p1", state="DELIVERED", parent=root,
+                 raw=1800.0, delivered=1700.0, player="ls@x.com")
+            led.db.execute(
+                "INSERT INTO events(session_id, ts, from_state, to_state,"
+                " detail) VALUES(?,?,?,?,?)",
+                (f"{root}-p1", "2026-08-15T00:00:00+00:00", "PACKAGED",
+                 "UPLOADED", f"verified at humynlabs/kamla/x/{root}-p1"))
+            _put(led, f"{root}-p2", state="REJECTED", parent=root,
+                 raw=1800.0, player="ls@x.com", reasons=FIXABLE)
+            led.db.commit()
+        finally:
+            led.close()
+        return root
+
+    root = seed("0lf1")
+    rc = _refix_rc(cfg, monkeypatch,
+                   rclone=lambda args: (1, "network unreachable")
+                   if args[0] == "lsf" else (0, ""))
+    assert rc == 3, "an lsf FAILURE must abort pre-DB"
+    assert "not an absence" in capsys.readouterr().out
+    led = Ledger(cfg.ledger_path)
+    assert led.get(root)["state"] == "SPLIT", "no DB change on abort"
+    assert led.get(f"{root}-p1") is not None
+    led.close()
+
+    # rc=3 (genuinely absent) keeps today's skip-and-proceed
+    rc = _refix_rc(cfg, monkeypatch,
+                   rclone=lambda args: (3, "directory not found")
+                   if args[0] == "lsf" else (0, ""))
+    assert rc == 0
+    led = Ledger(cfg.ledger_path)
+    assert led.get(root)["state"] == "DISCOVERED"
+    led.close()
+
+
 # ------- D2a (#12): the hard length gates judge the PROBED duration
 
 def test_cnt_short_prefers_the_probed_duration():

@@ -644,17 +644,20 @@ def test_late_root_with_hold_vlm_node_is_not_deferred(tmp_path, capsys):
     led.close()
 
 
-def test_refix_mixed_tree_is_refused_with_both_lists(cfg, monkeypatch,
-                                                     capsys):
-    """A tree holding BOTH paid and unpaid DELIVERED nodes has no
-    automatable answer (sealing swallows unpaid hours; not sealing
-    double-pays; teardown deletes the per-node fidelity). Refused before
-    any Drive move, both lists reported, other roots proceed."""
+def test_refix_mixed_tree_proceeds_with_paid_piece_memory(cfg, monkeypatch,
+                                                          capsys):
+    """REWRITTEN under ruling C (Adnaan 2026-08-18 at D0; supersedes the
+    r-loop-8 skipped_mixed refusal — its reason, 'no per-node fidelity
+    survives teardown', is gone): a mixed tree PROCEEDS. The paid piece
+    is remembered; the previously-unpaid delivered node re-delivers and
+    its hours land exactly once; the paid piece's re-delivery never
+    counts again."""
     from pipeline.ledger import Ledger
-    from pipeline.tests.test_payment_split_r6 import FIXABLE, _put, _refix
+    from pipeline.tests.test_payment_split_r6 import (FIXABLE, W2, W3,
+                                                      _put, _refix, _row,
+                                                      _sheet)
     led = Ledger(cfg.ledger_path)
     m = "2026-08-14T09-00-00Z_kamla_c_0000000000000sm1"
-    o = "2026-08-14T09-00-00Z_kamla_c_0000000000000so1"
     try:
         _put(led, m, state="SPLIT", raw=3600.0, player="mixed@x.com")
         _put(led, f"{m}-p1", state="DELIVERED", parent=m, raw=1800.0,
@@ -666,35 +669,43 @@ def test_refix_mixed_tree_is_refused_with_both_lists(cfg, monkeypatch,
         _put(led, f"{m}-p3", state="REJECTED", parent=m, raw=100.0,
              player="mixed@x.com", reasons=FIXABLE)
         led.update(m, uploaded_reported_at="2026-08-15T00:00:00+00:00")
-        _put(led, o, state="REJECTED", raw=3600.0, player="plain@x.com",
-             reasons=FIXABLE)
-        led.update(o, uploaded_reported_at="2026-08-15T00:00:00+00:00")
     finally:
         led.close()
 
     _refix(cfg, monkeypatch)
     out = capsys.readouterr().out
-    assert "REFUSED (mixed tree)" in out
-    assert '"skipped_mixed"' in out
-    assert f"{m}-p1" in out and f"{m}-p2" in out
+    assert '"skipped_mixed": []' in out
+    assert "REFUSED" not in out
 
     led = Ledger(cfg.ledger_path)
     try:
-        assert led.get(m)["state"] == "SPLIT"          # untouched
-        p2 = led.get(f"{m}-p2")
-        assert p2 is not None and p2["state"] == "DELIVERED"
-        assert p2["duration_delivered_s"] == 1600.0    # hours untouched
-        assert p2["accepted_reported_at"] is None      # still payable
-        assert led.get(o)["state"] == "DISCOVERED"     # others proceeded
+        assert led.get(m)["state"] == "DISCOVERED"     # torn down
+        assert led.get(f"{m}-p2") is None              # subtree deleted
+        assert led.paid_pieces_for(m) == {f"{m}-p1": 1700.0}
+        assert led.get(m)["tree_sealed_at"] is None
+        # the re-run re-delivers BOTH pieces (deterministic ids)
+        _put(led, f"{m}-p1", state="DELIVERED", parent=m, raw=1800.0,
+             delivered=1700.0, player="mixed@x.com")   # paid: excluded
+        _put(led, f"{m}-p2", state="DELIVERED", parent=m, raw=1800.0,
+             delivered=1600.0, player="mixed@x.com")   # unpaid: payable
+        led.set_state(m, "SPLIT")
+        s2 = _row(_sheet(led, W2), "mixed@x.com")
+        assert s2 is not None
+        assert s2["kamla_accepted_hrs"] == round(1600 / 3600.0, 2), \
+            "exactly the previously-unpaid piece's hours — no more, no less"
+        assert _row(_sheet(led, W3), "mixed@x.com") is None, "and only once"
     finally:
         led.close()
 
 
 def test_refix_fully_paid_tree_never_recounted_end_to_end(cfg,
                                                           monkeypatch):
-    """The seal's one legitimate job, end-to-end through the sheet: a
-    fully-paid torn-down tree re-delivers, and no sheet ever counts it
-    again — via tree_sealed_at, with the root's own accepted mark clear."""
+    """REWRITTEN under ruling C (Adnaan 2026-08-18 at D0; r-loop 9 #18):
+    the fully-paid tree PROCEEDS (no seal). End-to-end through the
+    sheet: the re-delivered same-id/same-seconds paid piece is never
+    counted again, AND the recovered fix-failed sibling's hours reach a
+    sheet exactly once — the money the refix path exists to recover,
+    which the r-loop-8 seal swallowed forever."""
     from pipeline.ledger import Ledger
     from pipeline.tests.test_payment_split_r6 import (FIXABLE, W2, W3,
                                                       _put, _refix, _row,
@@ -718,14 +729,21 @@ def test_refix_fully_paid_tree_never_recounted_end_to_end(cfg,
     led = Ledger(cfg.ledger_path)
     try:
         row = led.get(root)
-        assert row["tree_sealed_at"], "fully-paid tree must seal"
+        assert row["tree_sealed_at"] is None, "ruling C: never seal"
         assert row["accepted_reported_at"] is None
-        # the re-run re-delivers the root itself
-        led.update(root, duration_delivered_s=3400.0,
-                   delivered_at="2026-08-15T10:00:00+00:00")
-        led.set_state(root, "DELIVERED")
-        assert _row(_sheet(led, W2), "fp@x.com") is None
-        assert _row(_sheet(led, W3), "fp@x.com") is None
+        assert led.paid_pieces_for(root) == {f"{root}-p1": 1700.0}
+        # the re-run re-delivers the SAME paid piece and RECOVERS p2
+        _put(led, f"{root}-p1", state="DELIVERED", parent=root,
+             raw=1800.0, delivered=1700.0, player="fp@x.com")
+        _put(led, f"{root}-p2", state="DELIVERED", parent=root,
+             raw=1800.0, delivered=1500.0, player="fp@x.com")
+        led.set_state(root, "SPLIT")
+        s2 = _row(_sheet(led, W2), "fp@x.com")
+        assert s2 is not None, \
+            "the recovered hours must reach a sheet (the #18 loss)"
+        assert s2["kamla_accepted_hrs"] == round(1500 / 3600.0, 2), \
+            "recovered p2 counted; re-delivered paid p1 excluded"
+        assert _row(_sheet(led, W3), "fp@x.com") is None, "exactly once"
     finally:
         led.close()
 

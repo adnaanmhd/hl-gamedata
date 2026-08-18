@@ -132,6 +132,25 @@ def main() -> int:
 
 
 def _locked_main(cfg, args) -> int:
+    # PENDING-DAILY interlock (r-loop 9 #7): a durable .daily-counted.json
+    # without its settled markers means an interrupted send WILL resume.
+    # Tearing rows down under it makes that resume send a STALE sheet
+    # crediting deleted rows, and the re-run's deterministic same-id
+    # children then get counted a second time. Same doctrine as the
+    # run-lock check: refuse, loudly, before any Drive/DB action.
+    from pipeline.reports import pending_daily_send
+    pending_day = pending_daily_send(cfg)
+    if pending_day:
+        print(json.dumps({
+            "ABORT": "a daily send is pending resume",
+            "day": pending_day,
+            "why": ("reports/<day>/.daily-counted.json exists without its "
+                    "settled .sent+doc_sent markers — the resume would "
+                    "credit rows this tool is about to delete"),
+            "how": ("let the driver finish the resume (or reconcile the "
+                    "day by hand), then re-run"),
+        }, indent=1))
+        return 2
     ledger = Ledger(cfg.ledger_path)
     now = datetime.now(timezone.utc).isoformat(timespec="seconds")
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
@@ -170,30 +189,46 @@ def _locked_main(cfg, args) -> int:
                     print(f"WARN: {sid} state={row['state']} but no "
                           f"UPLOADED event — verify manually")
         plan.append((root, kids, moves))
-    # MIXED trees are REFUSED, before any Drive move (r-loop 8): a tree
-    # holding BOTH paid (accepted-counted) and unpaid DELIVERED nodes has
-    # no automatable answer — sealing swallows the unpaid delivered hours,
-    # not sealing double-pays the counted ones, and the teardown DELETEs
-    # the child rows so no per-node fidelity survives to reconcile with
-    # later. A human reconciles; every other root proceeds.
-    skipped_mixed: list[dict] = []
+    # RULING C (Adnaan 2026-08-18 at D0; r-loop 9 #1/#18): per-piece
+    # payment memory replaces the r-loop-8 seal-or-refuse logic. Paid and
+    # even MIXED trees PROCEED — the tool records WHICH pieces were paid
+    # (ledger.paid_pieces, durable, never auto-deleted) before teardown,
+    # and build_sheet_rows excludes exactly those pieces' re-delivered
+    # hours while the recovered fix-failed hours stay payable. The old
+    # skipped_mixed refusal is superseded (its reason — no per-node
+    # fidelity survives teardown — is gone); the key stays in the output
+    # JSON, now always [], for schema stability. The ONLY refusal left is
+    # an already-SEALED root (r-loop-8-era tree_sealed_at): per-piece
+    # fidelity never existed for old seals, the seal is NEVER overwritten
+    # (#1), and a human reconciles. Production today has zero seals and
+    # post-D7 nothing writes new ones.
+    skipped_mixed: list[dict] = []          # superseded; kept for schema
+    skipped_sealed: list[dict] = []
     kept_plan = []
     for root, kids, moves in plan:
-        delivered = [(s, n) for s in [root] + kids
-                     if (n := ledger.get(s)) is not None
-                     and n["state"] == "DELIVERED"]
-        paid = [s for s, n in delivered if n["accepted_reported_at"]]
-        unpaid = [(s, (n["duration_delivered_s"] or 0.0) / 3600.0)
-                  for s, n in delivered if not n["accepted_reported_at"]]
-        if paid and unpaid:
-            skipped_mixed.append({
-                "root": root, "paid_nodes": paid,
-                "unpaid_delivered_nodes": [
-                    {"sid": s, "hours": round(h, 2)} for s, h in unpaid]})
-            print(f"REFUSED (mixed tree): {root} holds paid node(s) "
-                  f"{paid} AND unpaid delivered node(s) "
-                  f"{[s for s, _ in unpaid]} — reconcile by hand; "
-                  f"other roots proceed")
+        rootrow = ledger.get(root)
+        # (sid, seconds, seg-detail) per accepted-counted DELIVERED node
+        paid = []
+        for s in [root] + kids:
+            n = ledger.get(s)
+            if n is None or n["state"] != "DELIVERED" \
+                    or not n["accepted_reported_at"]:
+                continue
+            segrow = ledger.db.execute(
+                "SELECT detail FROM events WHERE session_id=? AND "
+                "detail LIKE 'split segment %' ORDER BY ts LIMIT 1",
+                (s,)).fetchone()
+            paid.append((s, n["duration_delivered_s"],
+                         segrow["detail"] if segrow else None))
+        if rootrow is not None and rootrow["tree_sealed_at"]:
+            skipped_sealed.append({
+                "root": root, "tree_sealed_at": rootrow["tree_sealed_at"],
+                "paid_nodes": [s for s, _, _ in paid]})
+            print(f"REFUSED (sealed tree): {root} carries an r-loop-8-era "
+                  f"whole-tree seal ({rootrow['tree_sealed_at']}) — "
+                  f"per-piece payment fidelity never existed for it; "
+                  f"reconcile by hand, the seal is preserved; other "
+                  f"roots proceed")
             continue
         kept_plan.append((root, kids, moves, paid))
     plan = kept_plan
@@ -224,6 +259,12 @@ def _locked_main(cfg, args) -> int:
         "roots": [p[0] for p in plan],
         "already_reported_roots": stamped,
         "skipped_mixed": skipped_mixed,
+        "skipped_sealed": skipped_sealed,
+        "paid_pieces_to_record": [
+            {"root": p[0],
+             "pieces": [{"sid": s, "seconds": secs}
+                        for s, secs, _seg in p[3]]}
+            for p in plan if p[3]],
         "subtree_rows": sum(len(p[1]) for p in plan),
         "drive_moves": [m for p in plan for m in
                         [f"{s} -> {d}" for s, d in p[2]]],
@@ -243,10 +284,21 @@ def _locked_main(cfg, args) -> int:
                 print(f"skip move {sid}: path {rd!r} not under humynlabs/ "
                       f"(pre-rebuild path, already superseded)")
                 continue
-            rc, _ = rclone(["lsf", f"{REMOTE}{rd}"])
-            if rc != 0:
+            rc, err = rclone(["lsf", f"{REMOTE}{rd}"])
+            if rc in (3, 4):
+                # rclone: 3/4 = directory/file not found — genuinely absent
                 print(f"skip move {sid}: remote dir absent ({rd})")
                 continue
+            if rc != 0:
+                # any OTHER non-zero rc (network outage = 1) is FAILURE,
+                # not absence: skipping the compensating moveto here let
+                # the teardown proceed and the re-run re-delivered a
+                # duplicate to the client (r-loop 9 #19). Abort pre-DB,
+                # exactly like a failed moveto.
+                print(f"ABORT: rclone lsf failed for {sid} "
+                      f"(rc={rc}, not an absence): {err}")
+                print(f"moved so far (reconcile manually): {moved}")
+                return 3
             dest = f"superseded-refix-{stamp}/{rd[len('humynlabs/'):]}"
             rc, err = rclone(["moveto", f"{REMOTE}{rd}", f"{REMOTE}{dest}"])
             if rc != 0:
@@ -258,7 +310,8 @@ def _locked_main(cfg, args) -> int:
     # 2) filesystem + DB, per root
     reset = 0
     deleted = 0
-    sealed_roots: list = []
+    sealed_roots: list = []     # always [] since ruling C — schema stability
+    paid_recorded: list = []
     for root, kids, _moves, paid_nodes in plan:
         row = ledger.get(root)
         for sid in [root] + kids:
@@ -292,33 +345,49 @@ def _locked_main(cfg, args) -> int:
         # superseded-refix-*/ so the first copy is gone from Drive II.
         # (ledger.supersede clears it correctly, because there the md5 is
         # new and the hours genuinely are new.)
-        # SEAL via tree_sealed_at, its OWN column (r-loop 8; RULED split
-        # Adnaan 2026-08-18, corrected r-loop 7). The seal exists for one
-        # job — this subtree is torn down and re-delivered, so hours
-        # already ON A SENT SHEET must not be counted a second time. It
-        # fires only for a FULLY-PAID tree (paid DELIVERED nodes, no
-        # unpaid ones — the mixed case was refused at plan time above); a
-        # never-paid tree re-opens completely. The root's own
-        # accepted_reported_at is cleared in BOTH cases: it now means only
-        # "this root node's own count", and the re-run's root may itself
-        # deliver genuinely new hours. A REJECTED node carrying an
-        # accepted mark had its LABELS counted, not hours — it neither
-        # seals nor blocks.
+        # PER-PIECE PAYMENT MEMORY, not a seal (RULING C, Adnaan
+        # 2026-08-18 at D0; r-loop 9 #1/#18). The r-loop-8 whole-tree seal
+        # was wrong in both directions: it swallowed the recovered
+        # fix-failed hours of a paid tree forever (#18), and a second pass
+        # over a sealed tree recomputed paid=[] and NULLed the seal,
+        # re-opening already-paid footage for a second payment (#1).
+        # Instead, each accepted-counted DELIVERED piece is recorded in
+        # ledger.paid_pieces (INSERT OR IGNORE — first record wins;
+        # durable across passes, never auto-deleted) and build_sheet_rows
+        # excludes exactly those pieces' re-delivered hours. The root's
+        # own accepted_reported_at is cleared: it means only "this root
+        # node's own count", and the re-run's root may itself deliver
+        # genuinely new hours (if the root NODE was itself paid, its
+        # memory row excludes the same-seconds re-delivery). A REJECTED
+        # node carrying an accepted mark had its LABELS counted, not
+        # hours — it is not a paid piece. tree_sealed_at is never written
+        # here any more; the column and its reports-side honor logic stay
+        # as defense-in-depth for historical rows.
+        for psid, secs, seg in paid_nodes:
+            ledger.record_paid_piece(root, psid, secs, seg)
         if paid_nodes:
-            sealed_roots.append({"root": root, "paid_nodes": paid_nodes})
+            paid_recorded.append({
+                "root": root,
+                "pieces": [{"sid": s, "seconds": secs}
+                           for s, secs, _seg in paid_nodes]})
         ledger.db.execute(
             "UPDATE sessions SET state='DISCOVERED', bin=NULL,"
             " reasons_json='[]', fix_attempts=0, duration_delivered_s=NULL,"
             " rrd_sampled=0, delivered_at=NULL, accepted_reported_at=NULL,"
-            " tree_sealed_at=?, updated_at=? WHERE session_id=?",
-            (now if paid_nodes else None, now, root))
+            " tree_sealed_at=NULL, updated_at=? WHERE session_id=?",
+            (now, root))
+        paid_note = ""
+        if paid_nodes:
+            paid_note = ("; paid pieces remembered: "
+                         + json.dumps([{"sid": s, "seconds": secs}
+                                       for s, secs, _seg in paid_nodes]))
         ledger.db.execute(
             "INSERT INTO events(session_id, ts, from_state, to_state,"
             " detail) VALUES(?,?,?,?,?)",
             (root, now, row["state"], "DISCOVERED",
              f"fix-failed selective re-run under 08-16 tolerances; "
              f"{len(kids)} subtree rows torn down; delivered segments "
-             f"moved to superseded-refix-{stamp}/"))
+             f"moved to superseded-refix-{stamp}/" + paid_note))
         for sid in kids:
             ledger.db.execute("DELETE FROM sessions WHERE session_id=?",
                               (sid,))
@@ -326,12 +395,15 @@ def _locked_main(cfg, args) -> int:
         deleted += len(kids)
     ledger.db.commit()
     print(json.dumps({"roots_reset": reset, "subtree_rows_deleted": deleted,
-                      # sealed = accepted hours already on a SENT sheet for
-                      # this tree; its re-delivered hours are deliberately
-                      # NOT counted again, so sheet and Drive II disagree
-                      # until a human reconciles them
+                      # ruling C: no whole-tree seals are written any more
+                      # (sealed_roots stays [] for schema stability); the
+                      # recorded pieces' re-delivered hours are excluded
+                      # by build_sheet_rows via the paid_pieces memory,
+                      # while recovered fix-failed hours stay payable
                       "sealed_roots": sealed_roots,
+                      "paid_pieces_recorded": paid_recorded,
                       "skipped_mixed": skipped_mixed,
+                      "skipped_sealed": skipped_sealed,
                       "drive_dirs_moved": moved,
                       "superseded_refix_prefix":
                           f"superseded-refix-{stamp}/",

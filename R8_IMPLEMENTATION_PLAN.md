@@ -37,8 +37,8 @@ the first unchecked item.
 - [x] D2 validation truth sources (#12 CNT_SHORT from probed duration, #15 analyze() typed-FAIL path) — fail-first 4/4; Mac 601 green; commit 3199091
 - [x] D3 driver host classes (#9 BrokenProcessPool first-death=host, #10 U-lane CalledProcessError) — fail-first 3/3; r3 quarantine test re-seeded to two deaths (cited); Mac 604 green
 - [x] D4 gate-record clock rebasing + adoption propagation (#11/#20, #14, #22 tests) — fail-first 4/4 + 2/2 mutation-proof (D4c); adoption-site calls loud-not-blocking (deviation recorded in commit c5a145c); Mac 610 green
-- [ ] D5 daily-send resume robustness (#6/#21 day-agnostic, #4 conditional re-stamp, #8 doc_sent) — §9
-- [ ] D6 quarantine heal md5-conditional stamp clearing (#5) — §9
+- [x] D5 daily-send resume robustness (#6/#21 day-agnostic, #4 conditional re-stamp, #8 doc_sent) — fail-first 4/4 + churn control; skip discriminator is md5 not updated_at (deviation recorded in §9 D5b); r1 sheet-failure test updated (document retries, message never duplicated); Mac 615 green
+- [x] D6 quarantine heal md5-conditional stamp clearing (#5) — fail-first 1/1; existing r6/r8 heal tests verified to pin the different-md5 branch; Mac 616 green
 - [ ] D7 refix tool per-piece payment memory (RULED C, Adnaan 2026-08-18) + pending-record interlock + lsf honesty (#1/#18, #7, #19) — §9 — OBSERVABLE payment-behaviour change, surface to Adnaan
 - [ ] D8 C8 leftovers (#13 parse-and-regex re-emit, #23 conv_other test) — §9
 - [ ] Post-D8: new SUITE_FLOOR measured+pinned; full gate green Mac AND VM; tree-verify
@@ -728,8 +728,9 @@ grep -n "CONT_DIGEST_RETRY_S" pipeline/config.py pipeline/continuous.py # C4
 ```
 
 If any check fails, the rsync did not ship what was tested — stop and fix
-before arming) → `recal_refix_reset` dry-run → review JSON (now includes
-`skipped_mixed`) → `--yes` → `vm_setup.sh --enable-continuous` → watch the
+before arming) → `recal_refix_reset` dry-run → review JSON (ruling C: check
+`paid_pieces_to_record` + `skipped_sealed`; `skipped_mixed`/`sealed_roots`
+stay `[]`) → `--yes` → `vm_setup.sh --enable-continuous` → watch the
 first hour (429 rate in `~/hl-pipeline/logs/vlm-pressure.jsonl`, autoscale in
 journald, disk, first digest) → §7 payment endgame (driver stopped →
 `recal_regen_sheets.py` preview → sanity-read BOTH sheets → `--send`; final

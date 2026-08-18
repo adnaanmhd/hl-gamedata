@@ -152,10 +152,20 @@ c. **Pre-deploy config edit on the Mac (committed): `CONT_DAILY_REPORTS =
    grep -n "tree_sealed_at" pipeline/ledger.py pipeline/reports.py tools/recal_refix_reset.py
    grep -n "per_window" pipeline/gate.py pipeline/fix.py                   # C7
    grep -n "CONT_DIGEST_RETRY_S" pipeline/config.py pipeline/continuous.py # C4
+   # r-loop 9 markers:
+   grep -n "paid_pieces" pipeline/ledger.py pipeline/reports.py tools/recal_refix_reset.py  # D7 ruling C
+   grep -n "pending_daily_send" pipeline/reports.py tools/recal_refix_reset.py tools/recal_rebuild_reset.py  # D7b interlock
+   grep -n "carried_out" translator/trim.py pipeline/fix.py           # D1c
    ```
 d. `tools/recal_refix_reset.py` dry-run → review the JSON plan → `--yes`.
    The tool now ACQUIRES the run lock (stale-reclaim included). Any rclone
-   moveto failure aborts pre-DB (rc=3) — reconcile manually before retry.
+   moveto OR lsf failure (rc other than 3/4) aborts pre-DB (rc=3) —
+   reconcile manually before retry. It also refuses (rc=2) while any
+   daily send is pending resume (r-loop 9 #7). Review
+   `paid_pieces_to_record` / `skipped_sealed` in the plan JSON (ruling
+   C, Adnaan 08-18: paid and mixed trees proceed with per-piece
+   payment memory; `skipped_mixed`/`sealed_roots` stay [] — at the
+   flip both are expected empty, zero payment stamps exist).
 e. `bash tools/vm_setup.sh --enable-continuous` (arms hl-continuous.service
    + hl-backup.timer; verifies `is-enabled`). Watch the first hour: 429
    rate in `~/hl-pipeline/logs/vlm-pressure.jsonl`, autoscale decisions in

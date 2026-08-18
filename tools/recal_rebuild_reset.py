@@ -42,7 +42,33 @@ def main() -> int:
     if not bk.exists() or bk.stat().st_size < 1024:
         print(f"ABORT: backup {bk} missing/empty — take the parachute first")
         return 2
+    # PENDING-DAILY interlock (r-loop 9 #7) — same rationale and shape as
+    # recal_refix_reset: never tear rows down under a resumable send.
+    from pipeline.reports import pending_daily_send
+    pending_day = pending_daily_send(cfg)
+    if pending_day:
+        print(json.dumps({
+            "ABORT": "a daily send is pending resume",
+            "day": pending_day,
+            "why": ("reports/<day>/.daily-counted.json exists without its "
+                    "settled .sent+doc_sent markers — the resume would "
+                    "credit rows this tool is about to reset/delete"),
+            "how": ("let the driver finish the resume (or reconcile the "
+                    "day by hand), then re-run"),
+        }, indent=1))
+        return 2
     ledger = Ledger(cfg.ledger_path)
+    n_mem = ledger.db.execute(
+        "SELECT COUNT(*) c FROM paid_pieces").fetchone()["c"]
+    if n_mem:
+        # paid_pieces is payment evidence and is deliberately PRESERVED
+        # across the rebuild reset (ruling C, r-loop 9): a stale id
+        # collision surfaces loudly on the sheet side rather than a
+        # silent double-pay. Say so, so the operator knows it is there.
+        print(f"NOTE: {n_mem} paid-piece memory row(s) are PRESERVED "
+              f"across this reset (payment evidence is never auto-"
+              f"deleted); ambiguous re-deliveries will surface loudly "
+              f"on future sheets")
     now = datetime.now(timezone.utc).isoformat(timespec="seconds")
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
 
