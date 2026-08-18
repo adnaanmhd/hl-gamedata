@@ -39,9 +39,9 @@ the first unchecked item.
 - [x] D4 gate-record clock rebasing + adoption propagation (#11/#20, #14, #22 tests) — fail-first 4/4 + 2/2 mutation-proof (D4c); adoption-site calls loud-not-blocking (deviation recorded in commit c5a145c); Mac 610 green
 - [x] D5 daily-send resume robustness (#6/#21 day-agnostic, #4 conditional re-stamp, #8 doc_sent) — fail-first 4/4 + churn control; skip discriminator is md5 not updated_at (deviation recorded in §9 D5b); r1 sheet-failure test updated (document retries, message never duplicated); Mac 615 green
 - [x] D6 quarantine heal md5-conditional stamp clearing (#5) — fail-first 1/1; existing r6/r8 heal tests verified to pin the different-md5 branch; Mac 616 green
-- [ ] D7 refix tool per-piece payment memory (RULED C, Adnaan 2026-08-18) + pending-record interlock + lsf honesty (#1/#18, #7, #19) — §9 — OBSERVABLE payment-behaviour change, surface to Adnaan
-- [ ] D8 C8 leftovers (#13 parse-and-regex re-emit, #23 conv_other test) — §9
-- [ ] Post-D8: new SUITE_FLOOR measured+pinned; full gate green Mac AND VM; tree-verify
+- [x] D7 refix tool per-piece payment memory (RULED C, Adnaan 2026-08-18) + pending-record interlock + lsf honesty (#1/#18, #7, #19) — fail-first 8/8; two named tests + the mixed-tree test rewritten per the ruling (surface to Adnaan); Mac 621 green
+- [x] D8 C8 leftovers (#13 parse-and-regex re-emit, #23 conv_other test) — fail-first 1/1 + 1/1 mutation-proof; Mac 623 green
+- [ ] Post-D8: SUITE_FLOOR 619 pinned (run_suite.sh + FLIP_RUNBOOK §6b, commit 55cc759); Mac 623/623 at floor 619; VM gate + tree-verify pending
 - [ ] Review iteration 10 (fix-in-iteration; quiet-judged; accepted-list additions 21–28 from §9)
 - [ ] Review iteration 11 (only if 10 not quiet) — if still not quiet: STOP, hand Adnaan the list
 - [ ] Independent REAL e2e verification (verdict relayed VERBATIM)
