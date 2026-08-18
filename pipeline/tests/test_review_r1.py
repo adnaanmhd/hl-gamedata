@@ -112,9 +112,11 @@ def test_payment_sheet_hours_only_and_grouped_by_player(cfg, ledger):
 
 def test_daily_report_sheet_failure_does_not_resend_message(cfg, ledger,
                                                             monkeypatch):
-    """review-r1 #30/#20/#26: the marker lands right after the MESSAGE —
-    a payment-sheet send failure must not re-send the whole report on the
-    next run."""
+    """review-r1 #30/#20/#26: a payment-sheet send failure must never
+    re-send the report MESSAGE. Since r-loop 9 (#8) the DOCUMENT half
+    retries until it lands (doc_sent in the durable record,
+    dup-over-silence) — pre-r9 the marker alone suppressed the CSV
+    forever behind a dangling 'attached' message."""
     sent = []
     monkeypatch.setattr(runmod.telegram, "send_message",
                         lambda cfg_, text: sent.append(text))
@@ -122,12 +124,26 @@ def test_daily_report_sheet_failure_does_not_resend_message(cfg, ledger,
     def doc_fail(cfg_, path, caption=""):
         raise telegram.TelegramError("document too large")
     monkeypatch.setattr(runmod.telegram, "send_document", doc_fail)
+
+    def reports_sent():
+        return sum(1 for t in sent
+                   if "payment sheet attachment failed" not in t)
     now = datetime.now(C.IST).replace(hour=C.DAILY_REPORT_HOUR_IST)
     assert runmod.send_daily_report_if_due(cfg, ledger, now) is True
     # the report message + the sheet-failure alert (review-r2 #46) — but
     # never a duplicate report
     assert len(sent) == 2
     assert "payment sheet attachment failed" in sent[1]
-    # second invocation: marker present, nothing re-sent
+    # second invocation: marker present, document still undelivered —
+    # document-only retry (fails again -> one more alert), report message
+    # NOT duplicated (r-loop 9 #8)
+    assert runmod.send_daily_report_if_due(cfg, ledger, now) is True
+    assert reports_sent() == 1
+    # the outage clears: the document lands and doc_sent settles the day
+    docs = []
+    monkeypatch.setattr(runmod.telegram, "send_document",
+                        lambda cfg_, path, caption="": docs.append(path))
+    assert runmod.send_daily_report_if_due(cfg, ledger, now) is True
+    assert len(docs) == 1
     assert runmod.send_daily_report_if_due(cfg, ledger, now) is False
-    assert len(sent) == 2
+    assert len(docs) == 1 and reports_sent() == 1

@@ -7,11 +7,12 @@ from __future__ import annotations
 
 import csv
 import json
-from datetime import timedelta
+from datetime import timedelta, timezone
 
 import pytest
 
 from pipeline import fix as fixmod
+from pipeline import run as runmod
 from pipeline.tests.test_r_loop8 import (_created_at, _sidecars,
                                          needs_ffmpeg)
 
@@ -95,6 +96,183 @@ def test_retranslate_survives_numeric_exe_name(tmp_path):
     (work / "raw" / "metadata.json").write_text(json.dumps(raw_meta))
     note = fixmod.retranslate_from_sidecars(work)
     assert "re-translated from sidecars" in note
+
+
+# ------- D5 (#6/#21, #4, #8): daily-send resume robustness
+
+def _interrupt_before_stamps(cfg, ledger, monkeypatch, send):
+    """Drive the fresh path to write its durable record, then die at the
+    message (record present, ZERO stamps) — the widest resume gap."""
+    from pipeline import telegram as tgmod
+
+    calls = {"n": 0}
+
+    def flaky_msg(c, t):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise tgmod.TelegramError("outage")
+    monkeypatch.setattr(runmod.telegram, "send_message", flaky_msg)
+    assert runmod.send_daily_report_if_due(cfg, ledger, send) is False
+    monkeypatch.setattr(runmod.telegram, "send_message", lambda c, t: None)
+
+
+def test_daily_resume_survives_ist_midnight(cfg, ledger, monkeypatch):
+    """The resume record was looked up under TODAY's key only — an
+    interruption outliving IST midnight stranded the whole stamped
+    cohort's hours off every sheet ever delivered."""
+    import sqlite3
+
+    from pipeline import reports
+    from pipeline.tests.test_r_loop8 import _daily_seed
+    from pipeline.tests.test_review_r5_driver import _send_time
+    docs: list[bytes] = []
+    send, sid, csv_path, day = _daily_seed(cfg, ledger, monkeypatch,
+                                           docs=docs)
+    calls = {"n": 0}
+    real = reports.mark_uploads_reported
+
+    def flaky(led_, lo, hi, sids=None):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise sqlite3.OperationalError("database is locked")
+        return real(led_, lo, hi, sids=sids)
+    monkeypatch.setattr(reports, "mark_uploads_reported", flaky)
+    with pytest.raises(sqlite3.OperationalError):
+        runmod.send_daily_report_if_due(cfg, ledger, send)
+    first = csv_path.read_bytes()
+
+    next_day = send + timedelta(days=1)
+    day2 = next_day.strftime("%Y-%m-%d")
+    # tick on D+1 resumes DAY D first — document sent, marker lands, and
+    # no D+1 generation happens on this tick
+    assert runmod.send_daily_report_if_due(cfg, ledger, next_day) is True
+    assert (cfg.reports_dir / day / ".sent").exists()
+    assert docs and docs[-1] == first
+    assert not (cfg.reports_dir / day2 / ".daily-counted.json").exists()
+    row = ledger.get(sid)
+    assert row["uploaded_reported_at"] and row["accepted_reported_at"]
+    # conservation: the NEXT tick opens D+1 fresh, without the stamped root
+    assert runmod.send_daily_report_if_due(cfg, ledger, next_day) is True
+    assert b"p@x.com" not in docs[-1]
+
+
+def test_resume_skips_superseded_sid_and_new_bytes_count_once(
+        cfg, ledger, monkeypatch):
+    """A supersede in the crash-recovery gap deliberately cleared the
+    marks (new bytes = new hours); the blind resume re-stamp made the new
+    upload's hours stamped-but-never-counted — invisible to every future
+    sheet."""
+    from pipeline.tests.test_r_loop8 import _daily_seed
+    from pipeline.tests.test_review_r5_driver import _send_time
+    docs: list[bytes] = []
+    send, sid, csv_path, day = _daily_seed(cfg, ledger, monkeypatch,
+                                           docs=docs)
+    _interrupt_before_stamps(cfg, ledger, monkeypatch, send)
+    first = csv_path.read_bytes()
+    ledger.supersede(sid, new_md5="b" * 32, new_bytes=11,
+                     new_ctime=ledger.get(sid)["drive_ctime"],
+                     dossier_root=cfg.dossiers)
+
+    assert runmod.send_daily_report_if_due(
+        cfg, ledger, _send_time(hour=15)) is True
+    assert csv_path.read_bytes() == first
+    assert ledger.get(sid)["uploaded_reported_at"] is None, \
+        "a superseded sid must NOT be re-stamped from the stale record"
+
+    # the new bytes re-deliver; their hours reach the D+1 sheet once and
+    # the D+2 sheet not at all
+    ledger.update(sid, duration_raw_s=3600.0, duration_delivered_s=3600.0,
+                  delivered_at=(send + timedelta(hours=20))
+                  .astimezone(timezone.utc).isoformat(timespec="seconds"))
+    ledger.set_state(sid, "DELIVERED")
+    assert runmod.send_daily_report_if_due(
+        cfg, ledger, send + timedelta(days=1)) is True
+    assert b"p@x.com" in docs[-1], "the new upload's hours must be counted"
+    assert runmod.send_daily_report_if_due(
+        cfg, ledger, send + timedelta(days=2)) is True
+    assert b"p@x.com" not in docs[-1], "and only once"
+
+
+def test_resume_still_stamps_an_innocently_updated_root(cfg, ledger,
+                                                        monkeypatch):
+    """Control for the D5b deviation (md5 discriminator, plan §9): roots
+    are counted while still in flight, so plain state churn between kill
+    and resume must NOT suppress the stamp — that would double-count the
+    root via the late-arrival guard."""
+    from pipeline.tests.test_r_loop8 import _daily_seed
+    from pipeline.tests.test_review_r5_driver import _send_time
+    send, sid, csv_path, day = _daily_seed(cfg, ledger, monkeypatch)
+    _interrupt_before_stamps(cfg, ledger, monkeypatch, send)
+    ledger.update(sid, rrd_sampled=1)          # updated_at bumps, same md5
+    assert runmod.send_daily_report_if_due(
+        cfg, ledger, _send_time(hour=15)) is True
+    assert ledger.get(sid)["uploaded_reported_at"], \
+        "same-bytes churn must not suppress the resume stamp"
+
+
+def test_resume_refuses_when_a_counted_row_was_deleted(cfg, ledger,
+                                                       monkeypatch,
+                                                       capsys):
+    """A deleted counted row means a recal tool tore the cohort down
+    under the record — a blind resume sent a stale sheet crediting
+    deleted rows and let the re-run's same-id children be counted
+    again."""
+    from pipeline.tests.test_r_loop8 import _daily_seed
+    from pipeline.tests.test_review_r5_driver import _send_time
+    docs: list[bytes] = []
+    send, sid, csv_path, day = _daily_seed(cfg, ledger, monkeypatch,
+                                           docs=docs)
+    _interrupt_before_stamps(cfg, ledger, monkeypatch, send)
+    first = csv_path.read_bytes()
+    ledger.db.execute("DELETE FROM sessions WHERE session_id=?", (sid,))
+    ledger.db.commit()
+
+    assert runmod.send_daily_report_if_due(
+        cfg, ledger, _send_time(hour=15)) is False
+    assert "no longer exists" in capsys.readouterr().err
+    assert not (cfg.reports_dir / day / ".sent").exists()
+    assert docs == [] and csv_path.read_bytes() == first
+
+
+def test_kill_between_marker_and_document_resends_document_only(
+        cfg, ledger, monkeypatch):
+    """.sent was touched BEFORE the document went out, so a kill in
+    between suppressed the payment CSV forever behind a dangling
+    'attached' message."""
+    import json as _json
+
+    from pipeline import reports
+    from pipeline.tests.test_r_loop8 import _daily_seed
+    from pipeline.tests.test_review_r5_driver import _send_time
+    docs: list[bytes] = []
+    send, sid, csv_path, day = _daily_seed(cfg, ledger, monkeypatch,
+                                           docs=docs)
+    assert runmod.send_daily_report_if_due(cfg, ledger, send) is True
+    record = cfg.reports_dir / day / ".daily-counted.json"
+    rec = _json.loads(record.read_text())
+    assert rec.get("doc_sent") is True
+    # steady state: fully settled day -> False
+    assert runmod.send_daily_report_if_due(
+        cfg, ledger, _send_time(hour=15)) is False
+
+    # simulate the kill window: marker present, document never delivered
+    del rec["doc_sent"]
+    record.write_text(_json.dumps(rec))
+    n_docs = len(docs)
+    msgs = []
+    monkeypatch.setattr(runmod.telegram, "send_message",
+                        lambda c, t: msgs.append(t))
+    builds = []
+    monkeypatch.setattr(reports, "build_sheet_rows",
+                        lambda *a, **k: builds.append(1) or [])
+    assert runmod.send_daily_report_if_due(
+        cfg, ledger, _send_time(hour=16)) is True
+    assert len(docs) == n_docs + 1 and docs[-1] == csv_path.read_bytes()
+    assert msgs == [] and builds == [], \
+        "document-only resend: no message, no regeneration"
+    assert _json.loads(record.read_text()).get("doc_sent") is True
+    assert runmod.send_daily_report_if_due(
+        cfg, ledger, _send_time(hour=17)) is False
 
 
 # ------- D2a (#12): the hard length gates judge the PROBED duration

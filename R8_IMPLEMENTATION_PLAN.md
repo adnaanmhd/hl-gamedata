@@ -33,10 +33,10 @@ the first unchecked item.
 - [x] Full gate green on Mac AND VM at final r8-fix HEAD b694456 — Mac 582 (61s), VM side checkout 582 (251s), both floor 578; tree-verify (diff/status/MUTATION) clean
 - [x] Review iteration 9 RAN (2026-08-18, workflow `tools/review/flip-review-iter9.js`, 53 agents) — **NOT QUIET: 23 confirmed (14 major / 9 minor / 0 blockers), 0 killed**; findings of record in `R9_FINDINGS.md`; fixes synthesized into §9 as D1–D8 (Adnaan redirected the r8 session to hand off instead of fixing in-iteration)
 - [x] D0 DISCUSSION RAN (2026-08-18): measured the real ledger read-only — production schema is PRE-payment-split (no `accepted_reported_at`/`tree_sealed_at` columns; they arrive with the flip deploy's migration), 0/1396 rows carry any payment stamp, 16 fix-failed rows → 14 selectable roots → 0.76 h, **0 trees with payment evidence** — the kickoff's assumption confirmed (option A would have cost nothing at the flip; the dilemma bites only post-flip refix waves). Options A/B/C presented; **Adnaan RULED C — per-piece payment memory** (2026-08-18). §9 D7a superseded accordingly; accepted-behaviours entry 21 rewritten to match.
-- [ ] D1 translator hardening (#2 carried-only rebase guard, #3/#16 v2 untyped crashes, #17 falsy-key binding) — §9
-- [ ] D2 validation truth sources (#12 CNT_SHORT from probed duration, #15 analyze() typed-FAIL path) — §9
-- [ ] D3 driver host classes (#9 BrokenProcessPool first-death=host, #10 U-lane CalledProcessError) — §9
-- [ ] D4 gate-record clock rebasing + adoption propagation (#11/#20, #14, #22 tests) — §9
+- [x] D1 translator hardening (#2 carried-only rebase guard, #3/#16 v2 untyped crashes, #17 falsy-key binding) — fail-first 11 failed pre-fix in scratch; Mac 596 green; committed (D0 ruling commit + D1 commit)
+- [x] D2 validation truth sources (#12 CNT_SHORT from probed duration, #15 analyze() typed-FAIL path) — fail-first 4/4; Mac 601 green; commit 3199091
+- [x] D3 driver host classes (#9 BrokenProcessPool first-death=host, #10 U-lane CalledProcessError) — fail-first 3/3; r3 quarantine test re-seeded to two deaths (cited); Mac 604 green
+- [x] D4 gate-record clock rebasing + adoption propagation (#11/#20, #14, #22 tests) — fail-first 4/4 + 2/2 mutation-proof (D4c); adoption-site calls loud-not-blocking (deviation recorded in commit c5a145c); Mac 610 green
 - [ ] D5 daily-send resume robustness (#6/#21 day-agnostic, #4 conditional re-stamp, #8 doc_sent) — §9
 - [ ] D6 quarantine heal md5-conditional stamp clearing (#5) — §9
 - [ ] D7 refix tool per-piece payment memory (RULED C, Adnaan 2026-08-18) + pending-record interlock + lsf honesty (#1/#18, #7, #19) — §9 — OBSERVABLE payment-behaviour change, surface to Adnaan
@@ -979,20 +979,30 @@ D+1 fresh generation on that tick; conservation across the sends.
 **D5b (#4 + #7's resume half)** the resume re-stamps its recorded sids
 blindly — over a supersede/heal/recal reset that legitimately cleared the
 marks in the crash-recovery gap, and even over DELETED rows (silent no-ops).
-Fix: write the record with a stamp-time field (`"at": <utc iso>`). On
-resume: for each counted/accepted sid — row MISSING → the ledger changed
-under the record (a recal tool ran): print a LOUD
-"[daily] resume: counted row <sid> no longer exists — REFUSING; reconcile
-by hand" to stderr and return False (same doctrine as the unreadable
-record; the D7 interlock makes this near-unreachable). Row present with
-`updated_at > record.at` AND its mark now NULL → a supersede/heal
-deliberately cleared it: SKIP stamping that sid (loud per-sid line), stamp
-the rest, continue the send (the CSV is authoritative for what was counted;
-the new bytes' hours must stay countable). Backward compat: a record
-without "at" stamps unconditionally (today's behaviour) — note it in the
-code. Tests: supersede-between-kill-and-resume → resumed send does NOT
-re-stamp that sid, its new upload's hours reach a later sheet exactly once;
-deleted-row record → refusal, sheet untouched.
+Fix: row MISSING → the ledger changed under the record (a recal tool ran):
+print a LOUD "[daily] resume: counted row <sid> no longer exists —
+REFUSING; reconcile by hand" to stderr and return False (same doctrine as
+the unreadable record; the D7 interlock makes this near-unreachable).
+**DEVIATION recorded by the r9 executor (2026-08-18): the per-sid skip
+discriminator is an md5 MISMATCH (finding #4's own alternative proposal),
+NOT the originally-specced `updated_at > record.at` test.** Why: roots are
+counted while still INGESTED/VALIDATING by design, and updated_at bumps on
+EVERY innocent set_state/update — so kill-before-stamps plus any driver
+churn on an in-flight counted root would false-positive the skip and its
+uploaded hours would be counted AGAIN by the late-arrival guard
+(double-pay). md5_video changes ONLY on the two legitimate mark-clearing
+flows (ledger.supersede and the different-md5 heal — both write the new
+md5 atomically WITH the clears, verified), and the remaining clearing
+flows (refix/rebuild tools) are interlocked by D7b. So: the record stores
+`"md5": {sid: md5_video}` (+ `"at"` for forensics); on resume a sid whose
+current md5_video differs from the recorded one is SKIPPED (loud per-sid
+line), the rest stamp, the send continues. Records without "md5" (pre-r9)
+stamp unconditionally — today's behaviour. Tests:
+supersede-between-kill-and-resume → resumed send does NOT re-stamp that
+sid, its new upload's hours reach a later sheet exactly once; an
+innocently-updated (state-churned, same-md5) counted root IS still
+stamped (the double-count control); deleted-row record → refusal, sheet
+untouched.
 
 **D5c (#8)** `.sent` is touched before the document goes out; a kill in
 between suppresses the CSV forever with a dangling "attached" message.

@@ -889,9 +889,14 @@ def _build_daily_stats(ledger: Ledger, now_ist: datetime,
         folder_issues=len(reports.build_folder_issues(ledger)))
 
 
-def _send_sheet_document(cfg: C.Config, csv_path: Path) -> None:
+def _send_sheet_document(cfg: C.Config, csv_path: Path) -> bool:
+    """True only when the document actually went out — the caller records
+    doc_sent in the durable record on True, so a swallowed TelegramError
+    (alert path, by design) leaves it unset and the next tick retries the
+    document. Dup-over-silence, same as the digest doctrine (r-loop 9 #8)."""
     try:
         telegram.send_document(cfg, csv_path, caption="payment sheet")
+        return True
     except telegram.TelegramError as e:
         print(f"[daily-sheet-undelivered] {e} — sheet remains at "
               f"{csv_path}", file=sys.stderr)
@@ -903,6 +908,22 @@ def _send_sheet_document(cfg: C.Config, csv_path: Path) -> None:
                      f"file is on the VM at {csv_path}")
         except telegram.TelegramError:
             pass
+        return False
+
+
+def _mark_doc_sent(record: Path) -> None:
+    """Atomic doc_sent=true rewrite of the durable counted record — the
+    .sent marker alone was touched BEFORE the document went out, so a kill
+    in between suppressed the payment CSV forever with a dangling
+    'attached' message (r-loop 9 #8)."""
+    try:
+        rec = json.loads(record.read_text())
+    except (OSError, json.JSONDecodeError):
+        return
+    rec["doc_sent"] = True
+    tmp = record.with_name(record.name + f".tmp{os.getpid()}")
+    tmp.write_text(json.dumps(rec))
+    os.replace(tmp, record)
 
 
 def _resume_daily_send(cfg: C.Config, ledger: Ledger, now_ist: datetime,
@@ -939,6 +960,62 @@ def _resume_daily_send(cfg: C.Config, ledger: Ledger, now_ist: datetime,
         except telegram.TelegramError as e:
             print(f"[daily-resume-alert-undelivered] {e}", file=sys.stderr)
         return False
+    if marker.exists():
+        # everything but the document landed (kill between marker and the
+        # attachment, r-loop 9 #8): re-send ONLY the document
+        if rec.get("doc_sent"):
+            return False
+        if _send_sheet_document(cfg, csv_path):
+            _mark_doc_sent(record)
+        return True
+    # the ledger may have legitimately changed in the crash-recovery gap
+    # (r-loop 9 #4/#7): a MISSING counted/accepted row means a recal tool
+    # tore the cohort down under the record — a blind resume would send a
+    # stale sheet crediting deleted rows and no-op-stamp into nothing,
+    # letting the re-run's same-id children be counted AGAIN. Refuse to a
+    # human, same doctrine as the unreadable record (the refix/rebuild
+    # pending-record interlock makes this near-unreachable).
+    rows = {}
+    for sid in dict.fromkeys(counted + accepted):
+        r = ledger.get(sid)
+        if r is None:
+            print(f"[daily] resume: counted row {sid} no longer exists — "
+                  f"REFUSING; reconcile by hand ({record})",
+                  file=sys.stderr)
+            return False
+        rows[sid] = r
+
+    def _bytes_changed(sid: str) -> bool:
+        """True when the row now holds DIFFERENT bytes than the sheet
+        counted: supersede and the different-md5 heal both write the new
+        md5 atomically WITH their mark clears, so an md5 mismatch is
+        exactly 'a clearing tool ran here' — re-stamping would strand the
+        new bytes' hours off every future sheet (r-loop 9 #4). Innocent
+        state churn on an in-flight counted root never changes the md5,
+        so it still stamps (an updated_at test would false-positive there
+        and double-count — deviation recorded in plan §9 D5b). Records
+        without "md5" (pre-r9) stamp unconditionally."""
+        rec_md5 = (rec.get("md5") or {}).get(sid)
+        return rec_md5 is not None and rows[sid]["md5_video"] != rec_md5
+
+    counted_keep = []
+    for sid in counted:
+        if _bytes_changed(sid):
+            print(f"[daily] resume: {sid} was re-uploaded with new bytes "
+                  f"after the record (supersede/heal) — NOT re-stamping "
+                  f"its upload mark; the new hours stay countable",
+                  file=sys.stderr)
+        else:
+            counted_keep.append(sid)
+    accepted_keep = []
+    for sid in accepted:
+        if _bytes_changed(sid):
+            print(f"[daily] resume: {sid} was re-uploaded with new bytes "
+                  f"after the record (supersede/heal) — NOT re-stamping "
+                  f"its accepted mark; the new hours stay countable",
+                  file=sys.stderr)
+        else:
+            accepted_keep.append(sid)
     d = _build_daily_stats(ledger, now_ist, lo, hi)
     msg = reports.build_daily_message(d, _pace_now(ledger))
     try:
@@ -946,18 +1023,21 @@ def _resume_daily_send(cfg: C.Config, ledger: Ledger, now_ist: datetime,
     except telegram.TelegramError as e:
         print(f"[daily-report-undelivered] {e}", file=sys.stderr)
         return False
-    # idempotent re-stamps of exactly what the interrupted send counted;
-    # ordering (stamps -> anchor -> marker) preserved from the fresh path
-    stamped = reports.mark_uploads_reported(ledger, lo, hi, sids=counted)
+    # idempotent re-stamps of exactly what the interrupted send counted
+    # (minus the deliberately-cleared skips above); ordering
+    # (stamps -> anchor -> marker) preserved from the fresh path
+    stamped = reports.mark_uploads_reported(ledger, lo, hi,
+                                            sids=counted_keep)
     if stamped:
         print(f"[daily] resume: re-stamped {stamped} root upload(s)")
-    acc_stamped = reports.mark_accepted_reported(ledger, accepted)
+    acc_stamped = reports.mark_accepted_reported(ledger, accepted_keep)
     if acc_stamped:
         print(f"[daily] resume: re-stamped {acc_stamped} accepted node(s)")
     (cfg.reports_dir / ".last_daily_sent").write_text(hi)
     marker.parent.mkdir(parents=True, exist_ok=True)
     marker.touch()
-    _send_sheet_document(cfg, csv_path)
+    if _send_sheet_document(cfg, csv_path):
+        _mark_doc_sent(record)
     return True
 
 
@@ -977,14 +1057,40 @@ def send_daily_report_if_due(cfg: C.Config, ledger: Ledger,
     if now_ist.hour < C.DAILY_REPORT_HOUR_IST:
         return False
     day = now_ist.strftime("%Y-%m-%d")
+    # DAY-AGNOSTIC resume scan (r-loop 9 #6/#21), before today's marker
+    # check: the record used to be looked up under TODAY's key only, so an
+    # interruption that outlived IST midnight stranded the stamped
+    # cohort's hours off every sheet ever delivered — the stamps exclude
+    # them from all future sheets and the only CSV carrying them was never
+    # sent. Resume the OLDEST pending day first, one send per tick (the
+    # next tick opens today). Pending = record present without its .sent
+    # marker, or with the marker but the document not yet delivered (#8).
+    try:
+        day_dirs = sorted(p for p in cfg.reports_dir.iterdir()
+                          if p.is_dir())
+    except OSError:
+        day_dirs = []
+    for d_dir in day_dirs:
+        recp = d_dir / ".daily-counted.json"
+        if not recp.is_file():
+            continue
+        sentp = d_dir / ".sent"
+        if sentp.exists():
+            try:
+                if json.loads(recp.read_text()).get("doc_sent"):
+                    continue                      # fully settled
+            except (OSError, json.JSONDecodeError):
+                continue    # unreadable-but-sent: nothing safe to redo
+        if d_dir.name != day:
+            print(f"[daily] resuming an interrupted send from "
+                  f"{d_dir.name} (today is {day}) — one send per tick",
+                  file=sys.stderr)
+        return _resume_daily_send(cfg, ledger, now_ist, d_dir.name,
+                                  recp, sentp)
     marker = cfg.reports_dir / day / ".sent"
     if marker.exists():
         return False
     record = cfg.reports_dir / day / ".daily-counted.json"
-    if record.exists():
-        # an interrupted send left its durable record — resume, never
-        # regenerate (r-loop 8 BLOCKER; see _resume_daily_send)
-        return _resume_daily_send(cfg, ledger, now_ist, day, record, marker)
     # the reporting window ENDS REPORT_OFFSET_H before send time (Adnaan
     # 08-15: OFFSET over restate) so every cohort in it has settled at
     # generation, and RUNS FROM the previous window's end. A fixed
@@ -1037,8 +1143,15 @@ def send_daily_report_if_due(cfg: C.Config, ledger: Ledger,
     # payment document. From here on a retry RESUMES instead (see
     # _resume_daily_send).
     tmp = record.with_name(record.name + f".tmp{os.getpid()}")
-    tmp.write_text(json.dumps({"lo": lo, "hi": hi, "counted": counted,
-                               "accepted": accepted}))
+    tmp.write_text(json.dumps({
+        "lo": lo, "hi": hi, "counted": counted, "accepted": accepted,
+        # per-sid md5 at count time: the resume skips re-stamping any sid
+        # whose bytes changed under the record (supersede/different-md5
+        # heal — the only unguarded mark-clearing flows; r-loop 9 #4,
+        # deviation in plan §9 D5b). "at" is forensic.
+        "md5": {s: (r["md5_video"] if (r := ledger.get(s)) else None)
+                for s in dict.fromkeys(counted + accepted)},
+        "at": datetime.now(timezone.utc).isoformat(timespec="seconds")}))
     os.replace(tmp, record)
     msg = reports.build_daily_message(d, p)
     if window_clamped:
@@ -1073,7 +1186,8 @@ def send_daily_report_if_due(cfg: C.Config, ledger: Ledger,
     anchor.write_text(hi)          # next report's window starts here
     marker.parent.mkdir(parents=True, exist_ok=True)
     marker.touch()
-    _send_sheet_document(cfg, csv_path)
+    if _send_sheet_document(cfg, csv_path):
+        _mark_doc_sent(record)
     return True
 
 
