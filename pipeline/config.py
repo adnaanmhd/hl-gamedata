@@ -212,6 +212,12 @@ CONT_DISCOVERED_RECLAIM_H = 12
 # sending, so a Telegram outage used to mean ~180 full sheet
 # generations an hour, each rewriting payment-<day>.csv (r-loop 5).
 CONT_DAILY_RETRY_S = 600.0
+# Same defect, digest lane (r-loop 8): the digest ran on EVERY ~20s tick,
+# so a Telegram outage meant ~180 full digest rebuilds+sends an hour —
+# precisely during the incident when Telegram is the operator's only
+# view. Failure-case bound only: CONT_DIGEST_INTERVAL_H still gates the
+# SUCCESS cadence; worst added latency is 10 min on a 3 h cadence.
+CONT_DIGEST_RETRY_S = 600.0
 # Shared translation_report.json lock (validate._locked_report_update).
 # INVARIANT: WAIT > STALE. Up to CONT_POOL_MAX workers race this file and a
 # waiter that runs out of patience writes UNLOCKED, which is the r1 #8 lost

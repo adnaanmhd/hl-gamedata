@@ -1106,8 +1106,12 @@ def test_stuck_lines_hold_ages_from_current_stint(cfg, ledger):
             (sid, when.isoformat(timespec="seconds"), "", to_state, ""))
         ledger.db.commit()
 
-    # aged FIX_QUEUED -> stuck
+    # aged FIX_QUEUED -> stuck. Aged from the STINT START in the events
+    # audit since r-loop 8 (the V/FIX retry loops re-stamp updated_at, so
+    # the old updated_at predicate could never fire for these states);
+    # the backdated updated_at alone must NOT be what lists it.
     _seed(ledger, SID1, state="FIX_QUEUED")
+    ev(SID1, "FIX_QUEUED", now - timedelta(hours=9))
     ledger.db.execute("UPDATE sessions SET updated_at=? WHERE session_id=?",
                       ((now - timedelta(hours=9)).isoformat(
                           timespec="seconds"), SID1))

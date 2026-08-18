@@ -237,3 +237,115 @@ def test_host_error_mid_plan_never_reruns_the_destructive_step(
     assert counter.read_text() == "1", \
         "the destructive step must not run twice"
     assert ledger.get(sid)["state"] == "REVALIDATING"
+
+
+# ------------------------------- C4: the three flip-time ops surfaces
+
+def _ev(led, sid, to_state, when):
+    led.db.execute(
+        "INSERT INTO events(session_id, ts, from_state, to_state, detail)"
+        " VALUES(?,?,?,?,?)",
+        (sid, when.isoformat(timespec="seconds"), "", to_state, ""))
+
+
+def test_stuck_list_sees_the_host_error_retry_loops(cfg, ledger):
+    """C4a: the V-lane cooldown retry (state stays VALIDATING) and the C3
+    carve-out (FIX_QUEUED<->FIXING) re-stamp updated_at every ~5 min, so
+    `updated_at < cut` could never fire for exactly the rows most likely
+    to be stuck — invisible on the ONLY ops surface the flip leaves live.
+    Aged from the stint start in the events audit instead."""
+    now = datetime(2026, 8, 18, 12, 0, tzinfo=timezone.utc)
+    drv = cont.ContinuousDriver(cfg, clocks=cont._Clocks(utcnow=lambda: now))
+    fresh = now.isoformat(timespec="seconds")
+
+    def seed(sid, state, stint_start_h, step_min=90):
+        _seed_fix_queued(ledger, cfg, sid, [_R("STR_SENTINELS")])
+        ledger.db.execute("DELETE FROM events WHERE session_id=?", (sid,))
+        _ev(ledger, sid, "INGESTED",
+            now - timedelta(hours=stint_start_h + 1))
+        t = now - timedelta(hours=stint_start_h)
+        states = (["FIX_QUEUED", "FIXING"] if state != "VALIDATING"
+                  else ["VALIDATING"])
+        i = 0
+        while t < now:
+            _ev(ledger, sid, states[i % len(states)], t)
+            t += timedelta(minutes=step_min)
+            i += 1
+        ledger.db.execute(
+            "UPDATE sessions SET state=?, updated_at=? WHERE session_id=?",
+            (state, fresh, sid))
+        ledger.db.commit()
+
+    ping = "2026-08-14T10-00-00Z_kamla_c_00000000000000e1"
+    seed(ping, "FIX_QUEUED", 20)          # 20h FIXING<->FIX_QUEUED loop
+    val = "2026-08-14T10-00-00Z_kamla_c_00000000000000e2"
+    seed(val, "VALIDATING", 20)           # 20h VALIDATING self-refresh
+    okc = "2026-08-14T10-00-00Z_kamla_c_00000000000000e3"
+    seed(okc, "FIXING", 10 / 60.0, step_min=5)   # normal fix, 10 min in
+
+    lines, total = drv._stuck_lines(ledger)
+    joined = " ".join(lines)
+    assert ping in joined, lines
+    assert val in joined, lines
+    assert okc not in joined, lines
+
+
+def test_digest_retry_is_bounded_when_telegram_is_down(cfg, ledger,
+                                                       monkeypatch):
+    """C4b: the digest duty ran on every ~20s H tick; through a Telegram
+    outage that meant ~180 full digest rebuilds+sends an hour — during
+    the incident when Telegram is the operator's only view."""
+    from pipeline import reports as repmod
+    from pipeline import telegram as tgmod
+    mono = [10_000.0]
+    drv = cont.ContinuousDriver(
+        cfg, send_telegram=True,
+        clocks=cont._Clocks(mono=lambda: mono[0]))
+    monkeypatch.setattr(runmod, "send_daily_report_if_due",
+                        lambda *a, **k: False)
+    monkeypatch.setattr(runmod, "send_folder_issues_if_due",
+                        lambda *a, **k: False)
+    builds = []
+    real_build = repmod.build_digest_message
+
+    def spy_build(d, p):
+        builds.append(1)
+        return real_build(d, p)
+    monkeypatch.setattr(repmod, "build_digest_message", spy_build)
+
+    def down(cfg_, text):
+        raise tgmod.TelegramError("down")
+    monkeypatch.setattr(tgmod, "send_message", down)
+
+    for _ in range(6):                       # 2 min of ticks, one window
+        drv._house_tick(ledger)
+        mono[0] += 20.0
+    assert len(builds) == 1, \
+        f"{len(builds)} digest builds inside one retry window"
+    mono[0] += C.CONT_DIGEST_RETRY_S
+    drv._house_tick(ledger)
+    assert len(builds) == 2                  # retried after the window
+
+
+def test_alertbook_failed_send_does_not_consume_the_ttl(cfg, monkeypatch):
+    """C4c: the stamp landed before the send, so a failed send consumed
+    the whole TTL and a persisting condition went silent for
+    CONT_ALERT_DEDUP_MIN. Failed sends retract the stamp; successful ones
+    still dedupe."""
+    from pipeline import telegram as tgmod
+    now = [0.0]
+    book = cont.AlertBook(cfg, ttl_s=100, mono_fn=lambda: now[0])
+    calls = []
+
+    def send(cfg_, text):
+        calls.append(text)
+        if len(calls) == 1:
+            raise tgmod.TelegramError("down")
+    monkeypatch.setattr(tgmod, "send_message", send)
+    book.alert("disk low")
+    now[0] += 10
+    book.alert("disk low")               # within TTL, first send FAILED
+    assert len(calls) == 2, "a failed send must not consume the TTL"
+    now[0] += 10
+    book.alert("disk low")               # second send SUCCEEDED — deduped
+    assert len(calls) == 2

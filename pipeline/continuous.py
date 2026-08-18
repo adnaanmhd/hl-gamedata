@@ -196,6 +196,15 @@ class AlertBook:
         try:
             telegram.send_message(self.cfg, f"⚠️ {text}")
         except telegram.TelegramError as e:
+            # give the slot back: a FAILED send consumed the whole TTL, so
+            # a persisting condition whose first alert died in a Telegram
+            # hiccup went silent for CONT_ALERT_DEDUP_MIN (r-loop 8).
+            # Optimistic-stamp-then-retract keeps at-most-one send in the
+            # healthy path; a rare double-send under a race is
+            # dup-over-silence, the accepted trade.
+            with self._lock:
+                if self._sent.get(text) == now:   # still our stamp — retract
+                    del self._sent[text]
             print(f"[alert-undelivered] {text} ({e})", file=sys.stderr)
 
 
@@ -261,6 +270,13 @@ class ContinuousDriver:
         # last digest window END held in memory, so a failed anchor WRITE
         # after a successful send cannot re-send every tick (r-loop 3)
         self._digest_anchor_mem: str | None = None
+        # H cadence state — on self (not the lane closure) so it survives
+        # ledger reconnects (r-loop 2) and so tests can drive _house_tick
+        # directly (r-loop 8)
+        self._next_scale = 0.0
+        self._next_sweep = 0.0
+        self._next_daily = 0.0
+        self._next_digest = 0.0
         self._scan_passes = 0                     # successful scans
         self._scan_attempts = 0                   # incl. failed scans
         self.threads: list[threading.Thread] = []
@@ -1221,9 +1237,35 @@ class ContinuousDriver:
             "        NOT IN ('READY','PACKAGED','UPLOADED')), '')) first_rdy "
             "FROM sessions s WHERE s.state IN "
             "('READY','PACKAGED','UPLOADED')").fetchall()
+        # The V/FIX cycle gets the same stint treatment (r-loop 8): the
+        # two host-error retry loops (the V lane's cooldown-retry leaves
+        # the state VALIDATING; the fix carve-out parks FIX_QUEUED<->
+        # FIXING) re-stamp updated_at every ~5 min, so the `updated_at <
+        # cut` predicate could never fire for exactly the rows most
+        # likely to be stuck — and the digest is the ONLY ops surface at
+        # the flip. Anchored like `undelivered`: MIN(ts) into the 4-state
+        # set since the last event outside it.
+        fixing = led.db.execute(
+            "SELECT s.session_id, s.state, "
+            "(SELECT MIN(e.ts) FROM events e "
+            "  WHERE e.session_id=s.session_id "
+            "    AND e.to_state IN ('VALIDATING','FIX_QUEUED','FIXING',"
+            "'REVALIDATING') "
+            "    AND e.ts >= COALESCE((SELECT MAX(e2.ts) FROM events e2 "
+            "        WHERE e2.session_id=s.session_id AND e2.to_state "
+            "        NOT IN ('VALIDATING','FIX_QUEUED','FIXING',"
+            "'REVALIDATING')), '')) first_fix "
+            "FROM sessions s WHERE s.state IN "
+            "('VALIDATING','FIX_QUEUED','FIXING','REVALIDATING')"
+        ).fetchall()
         stuck = [(r["session_id"], r["state"], r["updated_at"])
                  for r in rows
-                 if r["state"] not in ("READY", "PACKAGED", "UPLOADED")]
+                 if r["state"] not in ("READY", "PACKAGED", "UPLOADED",
+                                       "VALIDATING", "FIX_QUEUED",
+                                       "FIXING", "REVALIDATING")]
+        for r in fixing:
+            if r["first_fix"] and r["first_fix"] < cut:
+                stuck.append((r["session_id"], r["state"], r["first_fix"]))
         for r in undelivered:
             if r["first_rdy"] and r["first_rdy"] < cut:
                 stuck.append((r["session_id"], r["state"], r["first_rdy"]))
@@ -1425,88 +1467,100 @@ class ContinuousDriver:
             f"sessions, so NEW downloads are paused (mostly {dom}: "
             f"{dom_n}){extra}")
 
+    def _duty(self, label: str, fn) -> None:
+        """Run one housekeeping duty in isolation.
+
+        The block used to be seven unguarded statements with the cadence
+        stamp at the END, so the FIRST one that raised (backup_daily on
+        a full disk is the obvious candidate) skipped every later duty
+        for the life of the process AND left `_next_sweep` unadvanced —
+        turning an hourly block into a 20-second retry loop that wrote a
+        full ledger copy each time onto the already-full disk. The
+        reclaim sweeps are the only thing that frees work dirs, so the
+        failure silently disabled disk recovery while the digest kept
+        reporting a healthy driver (r-loop 3)."""
+        try:
+            fn()
+        except Exception as e:
+            self.alerts.alert(f"housekeeping duty '{label}' failed: "
+                              f"{type(e).__name__}: {e}")
+
+    def _house_tick(self, led: Ledger) -> None:
+        """One housekeeping pass. A method (not a closure) so tests can
+        drive tick-level cadence directly (r-loop 8); the 20s pacing wait
+        stays in the lane body. Cadence state lives on self: the tick is
+        re-entered per lane iteration and must survive a ledger reconnect
+        (r-loop 2)."""
+        now = self.clk.mono()
+        self._counts = led.counts_by_state()
+        if now >= self._next_scale:
+            self._next_scale = now + C.CONT_AUTOSCALE_INTERVAL_S
+            self._duty("autoscale", self._autoscale_tick)
+        if self.send_telegram:
+            if now >= self._next_digest:
+                # Failure-case bound only (r-loop 8): _digest_window still
+                # gates the SUCCESS cadence at CONT_DIGEST_INTERVAL_H;
+                # this caps the RETRY rate when the send fails. The ~20s
+                # tick otherwise meant ~180 full digest rebuilds+sends an
+                # hour through a Telegram outage — the exact defect
+                # CONT_DAILY_RETRY_S fixed for the daily, 25 lines below.
+                # Worst added latency: 10 min on a 3 h cadence.
+                self._next_digest = now + C.CONT_DIGEST_RETRY_S
+                self._duty("digest", lambda: self._send_digest(led))
+            # CONT_DAILY_REPORTS is the payment-endgame interlock:
+            # with every rebuild-era root unstamped
+            # (recal_rebuild_reset nulled uploaded_reported_at), one
+            # daily send's late-arrival guard would pull the WHOLE
+            # cohort into one day's sheet, stamp it, and both
+            # misattribute the hours and deadlock recal_regen_sheets'
+            # stray-stamp gate (r-loop 1). The flip deploys False;
+            # True again after regen.
+            if C.CONT_DAILY_REPORTS and now >= self._next_daily:
+                # Own cadence stamp, like _next_sweep (r-loop 5). This
+                # body runs every ~20s, and send_daily_report_if_due
+                # BUILDS the sheet before it sends, returning False
+                # without writing the marker or the anchor when
+                # Telegram fails. Under the batch driver it was reached
+                # at most once per batch drain; here a Telegram outage
+                # after 14:00 IST turned it into ~180 full sheet
+                # generations an hour, each a whole-table player_rollup
+                # + build_folder_issues scan, each rewriting
+                # reports/<day>/payment-<day>.csv NON-atomically — so
+                # an scp/cat of that path during the payment endgame
+                # could capture a truncated file. It also stretched H's
+                # own cadence (up to three 60s urlopen timeouts per
+                # tick), delaying the 60s autoscale ticks that are the
+                # driver's only backpressure response.
+                self._next_daily = now + C.CONT_DAILY_RETRY_S
+                self._duty("daily payment report",
+                           lambda: runmod.send_daily_report_if_due(
+                               self.cfg, led))
+                self._duty("folder-issues report",
+                           lambda: runmod.send_folder_issues_if_due(
+                               self.cfg, led))
+        if now >= self._next_sweep:
+            # advance the cadence FIRST: a duty that raises must not be
+            # able to convert an hourly block into a 20s retry loop
+            self._next_sweep = now + 3600
+            self._duty("ledger backup",
+                       lambda: led.backup_daily(self.cfg.backups,
+                                                keep=C.LEDGER_BACKUP_KEEP))
+            self._duty("orphan-reject finalize",
+                       lambda: runmod._finalize_orphan_rejects(self.cfg, led))
+            self._duty("terminal-work sweep",
+                       lambda: runmod._sweep_terminal_work(self.cfg, led))
+            # fresh dedup list per sweep: the ceiling alert re-fires
+            # hourly while the condition persists — run._alert's
+            # per-list dedup only spans this call
+            self._duty("upload-ceiling alert",
+                       lambda: runmod._upload_ceiling_alert(self.cfg, led,
+                                                            []))
+            self._duty("cap-pressure alert",
+                       lambda: self._cap_pressure_alert(led))
+
     def _housekeeping_thread(self) -> None:
-        # cadence state lives on self: the body is re-entered per tick and
-        # must survive a ledger reconnect (r-loop 2)
-        self._next_scale = 0.0
-        self._next_sweep = 0.0
-        self._next_daily = 0.0
-
-        def _duty(label: str, fn) -> None:
-            """Run one housekeeping duty in isolation.
-
-            The block used to be seven unguarded statements with the cadence
-            stamp at the END, so the FIRST one that raised (backup_daily on
-            a full disk is the obvious candidate) skipped every later duty
-            for the life of the process AND left `_next_sweep` unadvanced —
-            turning an hourly block into a 20-second retry loop that wrote a
-            full ledger copy each time onto the already-full disk. The
-            reclaim sweeps are the only thing that frees work dirs, so the
-            failure silently disabled disk recovery while the digest kept
-            reporting a healthy driver (r-loop 3)."""
-            try:
-                fn()
-            except Exception as e:
-                self.alerts.alert(f"housekeeping duty '{label}' failed: "
-                                  f"{type(e).__name__}: {e}")
-
         def body(led: Ledger) -> None:
-            now = self.clk.mono()
-            self._counts = led.counts_by_state()
-            if now >= self._next_scale:
-                self._next_scale = now + C.CONT_AUTOSCALE_INTERVAL_S
-                _duty("autoscale", self._autoscale_tick)
-            if self.send_telegram:
-                _duty("digest", lambda: self._send_digest(led))
-                # CONT_DAILY_REPORTS is the payment-endgame interlock:
-                # with every rebuild-era root unstamped
-                # (recal_rebuild_reset nulled uploaded_reported_at), one
-                # daily send's late-arrival guard would pull the WHOLE
-                # cohort into one day's sheet, stamp it, and both
-                # misattribute the hours and deadlock recal_regen_sheets'
-                # stray-stamp gate (r-loop 1). The flip deploys False;
-                # True again after regen.
-                if C.CONT_DAILY_REPORTS and now >= self._next_daily:
-                    # Own cadence stamp, like _next_sweep (r-loop 5). This
-                    # body runs every ~20s, and send_daily_report_if_due
-                    # BUILDS the sheet before it sends, returning False
-                    # without writing the marker or the anchor when
-                    # Telegram fails. Under the batch driver it was reached
-                    # at most once per batch drain; here a Telegram outage
-                    # after 14:00 IST turned it into ~180 full sheet
-                    # generations an hour, each a whole-table player_rollup
-                    # + build_folder_issues scan, each rewriting
-                    # reports/<day>/payment-<day>.csv NON-atomically — so
-                    # an scp/cat of that path during the payment endgame
-                    # could capture a truncated file. It also stretched H's
-                    # own cadence (up to three 60s urlopen timeouts per
-                    # tick), delaying the 60s autoscale ticks that are the
-                    # driver's only backpressure response.
-                    self._next_daily = now + C.CONT_DAILY_RETRY_S
-                    _duty("daily payment report",
-                          lambda: runmod.send_daily_report_if_due(
-                              self.cfg, led))
-                    _duty("folder-issues report",
-                          lambda: runmod.send_folder_issues_if_due(
-                              self.cfg, led))
-            if now >= self._next_sweep:
-                # advance the cadence FIRST: a duty that raises must not be
-                # able to convert an hourly block into a 20s retry loop
-                self._next_sweep = now + 3600
-                _duty("ledger backup",
-                      lambda: led.backup_daily(self.cfg.backups,
-                                               keep=C.LEDGER_BACKUP_KEEP))
-                _duty("orphan-reject finalize",
-                      lambda: runmod._finalize_orphan_rejects(self.cfg, led))
-                _duty("terminal-work sweep",
-                      lambda: runmod._sweep_terminal_work(self.cfg, led))
-                # fresh dedup list per sweep: the ceiling alert re-fires
-                # hourly while the condition persists — run._alert's
-                # per-list dedup only spans this call
-                _duty("upload-ceiling alert",
-                      lambda: runmod._upload_ceiling_alert(self.cfg, led, []))
-                _duty("cap-pressure alert",
-                      lambda: self._cap_pressure_alert(led))
+            self._house_tick(led)
             self.stop.wait(20)
         self._lane_loop("housekeeping", body, idle_s=20)
 

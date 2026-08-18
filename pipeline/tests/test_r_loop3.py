@@ -254,6 +254,13 @@ def test_stuck_list_sorted_so_oldest_hold_is_visible(cfg, ledger):
                               drive_ctime="2026-08-14T10:00:00.000Z",
                               md5_video="a" * 32, bytes_=1,
                               state="FIX_QUEUED")
+        # FIX_QUEUED ages from the STINT START in the events audit since
+        # r-loop 8 (the retry loops re-stamp updated_at); the backdated
+        # updated_at alone no longer lists it
+        ledger.db.execute(
+            "INSERT INTO events(session_id, ts, from_state, to_state, "
+            "detail) VALUES(?,?,?,?,?)",
+            (sid, "2026-08-17T00:00:00+00:00", "", "FIX_QUEUED", ""))
         ledger.db.execute(
             "UPDATE sessions SET updated_at=? WHERE session_id=?",
             ("2026-08-17T00:00:00+00:00", sid))
