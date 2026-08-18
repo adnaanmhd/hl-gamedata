@@ -1275,6 +1275,7 @@ def fix_sessionjson_recompute(work: Path, game: str) -> str:
     # must not crash on one (r-loop 7)
     s = _read_session_json(work)
     created_raw = s.get("created_at_utc")
+    parsed_ok = True
     try:
         created = datetime.fromisoformat(created_raw.replace("Z", "+00:00"))
         if created.tzinfo is None:
@@ -1283,12 +1284,17 @@ def fix_sessionjson_recompute(work: Path, game: str) -> str:
             created = created.replace(tzinfo=timezone.utc)
     except (AttributeError, ValueError):
         created = datetime.now(timezone.utc)
+        parsed_ok = False
     # re-emit canonically whenever the ORIGINAL string is not
     # checker-conformant: covers the naive case (already handled above)
     # AND the aware-nonconforming ones — '+0000' offsets and space
     # separators parse fine but fail _TS_RE, so they used to be kept
-    # verbatim and re-FAILed identically (r-loop 8)
-    if not isinstance(created_raw, str) or not _TS_RE.match(created_raw):
+    # verbatim and re-FAILed identically (r-loop 8). The checker's
+    # acceptance is regex AND parse, so a regex-shaped but unparseable
+    # stamp (hour 25, month 13) must re-emit too — kept verbatim it
+    # re-FAILed 'timestamps unparseable' on both attempts (r-loop 9 #13)
+    if not parsed_ok or not isinstance(created_raw, str) \
+            or not _TS_RE.match(created_raw):
         s["created_at_utc"] = created.astimezone(timezone.utc).strftime(
             "%Y-%m-%dT%H:%M:%S.%f") + "Z"
     ended = created + timedelta(seconds=info.duration_s)

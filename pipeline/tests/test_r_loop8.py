@@ -558,9 +558,19 @@ def _sj_round_trip(tmp_path, field, bad):
       "dy_positive": "down", "dy_negative": "up"}),
     ("created_at_utc", lambda orig: orig[:19].replace("T", " ") + "+00:00"),
     ("created_at_utc", lambda orig: orig[:19] + "+0000"),
+    # r-loop 9 #13: matches _TS_RE (digit shapes) but fromisoformat
+    # raises — the checker's acceptance is regex AND parse
+    ("created_at_utc", "2026-08-18T25:30:00Z"),
+    # r-loop 9 #23: maps_to='other' without maps_to_other — pins
+    # _conv_valid's other-branch (mutation-proved unpinned)
+    ("input_mouse_convention",
+     {"maps_to": "other", "dx_positive": "not_applicable",
+      "dx_negative": "not_applicable", "dy_positive": "not_applicable",
+      "dy_negative": "not_applicable"}),
 ], ids=["bad_platform", "bad_localization", "conv_partial",
         "conv_bad_axes", "conv_bad_mapsto", "space_separated_ts",
-        "plus0000_ts"])
+        "plus0000_ts", "regex_valid_unparseable_ts",
+        "conv_other_missing_label"])
 def test_sj_invalid_rewrite_actually_repairs(tmp_path, field, bad):
     """The rewrite defaulted only ABSENT/FALSY fields while the checker
     rejects PRESENT-but-invalid values — each of these survived BOTH
