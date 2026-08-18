@@ -49,10 +49,24 @@ def gate_windows(session_dir: Path,
                            min(i + pad_frames + 1, len(rows))):
                 blank.add(k)
     gated = 0
+    # Record the inventory this gate DESTROYS. map_reasons re-tests the
+    # recomputed inventory after the fix, and nothing subtracted the rows
+    # the pipeline itself emptied -- so a session whose 3rd distinct action
+    # only occurs inside a frozen context came back with 2 and was rejected
+    # CNT_ACTIONS_FEW (blocking, UNFIXABLE), with coaching.md telling the
+    # player to "play actively" for actions WE deleted. Same shape for
+    # INP_KEYS_MISSING on a mouse-heavy session whose only key presses fall
+    # inside frozen contexts (r-loop 5).
+    destroyed_actions: set[str] = set()
+    destroyed_key_frames = 0
     for i in blank:
         r = rows[i]
         if r[ki] or r[ai]:
             gated += 1
+        if r[ai]:
+            destroyed_actions.update(a for a in r[ai].split("|") if a)
+        if r[ki]:
+            destroyed_key_frames += 1
         r[ki] = ""
         r[ai] = ""
     tmp = session_dir / "frames.csv.tmp"
@@ -73,4 +87,6 @@ def gate_windows(session_dir: Path,
     return {"gated_frames": gated,
             "windows": applied,
             "requested": [[round(a, 3), round(b, 3)] for a, b in windows],
-            "pad_frames": pad_frames}
+            "pad_frames": pad_frames,
+            "destroyed": {"actions": sorted(destroyed_actions),
+                          "key_frames": destroyed_key_frames}}

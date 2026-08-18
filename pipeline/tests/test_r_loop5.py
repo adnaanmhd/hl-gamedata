@@ -1,6 +1,7 @@
 """r-loop 5 regression tests."""
 from __future__ import annotations
 
+import json
 import shutil
 import time
 
@@ -302,3 +303,87 @@ def test_action_on_a_moving_frame_outside_the_run_is_not_counted():
     assert [r["code"] for r in reasons] == [], \
         "an action outside the measured freeze must not raise a reason"
     assert any("no inputs inside" in a for a in advisories)
+
+
+# ---------- content bars must be blind to rows the PIPELINE blanked ----------
+
+def _inv(distinct, actions, key_frames=5, rows=6000):
+    return {"rows": rows, "distinct_actions": distinct,
+            "actions": {a: 10 for a in actions},
+            "key_frames": key_frames, "btn_frames": 3, "motion_frames": 900,
+            "irregular_pct": 0.0}
+
+
+def _map_full(inv, gate_destroyed=None):
+    rep = {"duration_s": 210.0, "inventory": inv, "qa_issues": [],
+           "vlm": {"samples": [{"t": 1.0, "label": "gameplay"}],
+                   "windows": []}}
+    aux = {"refined": {}, "extra_windows": [], "afk_windows": [],
+           "has_raw": False, "vlm_required": True, "video_active": True,
+           "gate_destroyed": gate_destroyed or {"actions": [],
+                                                "key_frames": 0}}
+    return validate.map_reasons(rep, aux)
+
+
+def test_actions_few_not_raised_when_the_gate_destroyed_the_action():
+    """r-loop 5: FIX_GATE_WINDOW blanks input_keys AND input_actions, then
+    the session is FULLY re-validated and the inventory is recomputed from
+    the gated frames.csv — with nothing subtracting the rows the pipeline
+    itself emptied. A session whose 3rd action occurs only inside a frozen
+    context (the OW Observatory terminal is an unmodelled one) came back
+    with 2 and was rejected on a blocking, UNFIXABLE reason, with
+    coaching.md telling the player to 'play actively' for a stretch we
+    erased."""
+    res = _map_full(_inv(2, ["look", "thrust"]),
+                    {"actions": ["interact"], "key_frames": 0})
+    assert "CNT_ACTIONS_FEW" not in [r["code"] for r in res.reasons]
+    assert any("gated" in a for a in res.advisories)
+
+
+def test_actions_few_still_raised_without_a_gate():
+    """A genuine 2-action session must still be rejected."""
+    res = _map_full(_inv(2, ["look", "thrust"]))
+    assert "CNT_ACTIONS_FEW" in [r["code"] for r in res.reasons]
+
+
+def test_actions_few_still_raised_when_the_gate_does_not_close_the_gap():
+    """Restoring what we blanked must still leave the session under the
+    bar to be rejected — the carve-out is attribution, not amnesty."""
+    res = _map_full(_inv(1, ["look"]), {"actions": ["look"],
+                                        "key_frames": 0})
+    assert "CNT_ACTIONS_FEW" in [r["code"] for r in res.reasons]
+
+
+def test_keys_missing_not_raised_when_the_gate_destroyed_the_key_frames():
+    """'re-record (never fabricate)' must never be said about rows we
+    blanked ourselves — reachable for a mouse-heavy session whose only key
+    presses fall inside frozen contexts."""
+    res = _map_full(_inv(3, ["look", "thrust", "interact"], key_frames=0),
+                    {"actions": [], "key_frames": 12})
+    assert "INP_KEYS_MISSING" not in [r["code"] for r in res.reasons]
+
+
+def test_keys_missing_still_raised_without_a_gate():
+    res = _map_full(_inv(3, ["look", "thrust", "interact"], key_frames=0))
+    assert "INP_KEYS_MISSING" in [r["code"] for r in res.reasons]
+
+
+def test_gate_destroyed_reads_the_fixlog_and_tolerates_damage(tmp_path):
+    """The fixlog is the atomic evidence of record; a missing or corrupt
+    one must degrade to today's behaviour, never crash validation."""
+    assert validate._gate_destroyed(tmp_path) == {"actions": [],
+                                                  "key_frames": 0}
+    (tmp_path / "fixlog.json").write_text("{not json")
+    assert validate._gate_destroyed(tmp_path) == {"actions": [],
+                                                  "key_frames": 0}
+    (tmp_path / "fixlog.json").write_text(json.dumps([
+        {"fix": "FIX_KEY_HYGIENE", "ok": True, "note": {}},
+        {"fix": "FIX_GATE_WINDOW", "ok": False,
+         "note": {"destroyed": {"actions": ["ignored"], "key_frames": 9}}},
+        {"fix": "FIX_GATE_WINDOW", "ok": True,
+         "note": {"destroyed": {"actions": ["interact"], "key_frames": 4}}},
+        {"fix": "FIX_GATE_WINDOW", "ok": True,
+         "note": {"destroyed": {"actions": ["map"], "key_frames": 2}}},
+    ]))
+    got = validate._gate_destroyed(tmp_path)
+    assert got == {"actions": ["interact", "map"], "key_frames": 6}, got

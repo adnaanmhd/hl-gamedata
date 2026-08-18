@@ -556,11 +556,33 @@ def map_reasons(rep: dict, aux: dict,
         advisories.append(f"clip {dur / 60:.0f} min exceeds the 30 min "
                           f"guidance — accepted with note (R16)")
     if inv and inv.get("distinct_actions", 99) < C.MIN_DISTINCT_ACTIONS:
-        reasons.append(_reason(
-            "CNT_ACTIONS_FEW", True, False,
-            {"distinct": inv.get("distinct_actions")},
-            f"only {inv.get('distinct_actions')} distinct actions "
-            f"(<{C.MIN_DISTINCT_ACTIONS}, R14)"))
+        # Blind to rows the PIPELINE blanked (r-loop 5). FIX_GATE_WINDOW
+        # empties input_keys AND input_actions, and the session then goes
+        # through a FULL re-validation whose inventory is recomputed from
+        # the gated frames.csv -- with nothing subtracting what we
+        # ourselves deleted. So a session whose 3rd distinct action occurs
+        # only inside a frozen context (the OW Observatory terminal is an
+        # unmodelled one) came back with 2 and was REJECTED on a blocking,
+        # UNFIXABLE reason, and coaching.md told the player to "play
+        # actively" for a stretch this pipeline erased. R1+R3 multiplied
+        # the exposure: every window <=5s is now GATED rather than cut,
+        # up to 40 per session. Same failure shape r-loop 4 already ruled
+        # a major for the keybind inversion -- this is its second instance.
+        destroyed = set((aux.get("gate_destroyed") or {}).get("actions")
+                        or [])
+        restored = set((inv.get("actions") or {})) | destroyed
+        if destroyed and len(restored) >= C.MIN_DISTINCT_ACTIONS:
+            advisories.append(
+                f"only {inv.get('distinct_actions')} distinct actions in "
+                f"the delivered rows, but {len(restored)} before this "
+                f"pipeline gated {sorted(destroyed)} out of a confirmed "
+                f"frozen window — not a player deficit, not a reject")
+        else:
+            reasons.append(_reason(
+                "CNT_ACTIONS_FEW", True, False,
+                {"distinct": inv.get("distinct_actions")},
+                f"only {inv.get('distinct_actions')} distinct actions "
+                f"(<{C.MIN_DISTINCT_ACTIONS}, R14)"))
     pct = inv.get("irregular_pct") or 0.0
     if pct > C.DROPS_REJECT_PCT:
         reasons.append(_reason(
@@ -574,7 +596,18 @@ def map_reasons(rep: dict, aux: dict,
     # modalities (§10.4: blocking when video evidence confirms use)
     if inv:
         if inv.get("key_frames") == 0:
-            if aux.get("video_active", True):
+            gated_keys = int((aux.get("gate_destroyed") or {}).get(
+                "key_frames") or 0)
+            if gated_keys:
+                # same as CNT_ACTIONS_FEW above: reachable for a
+                # mouse-heavy session whose only key presses fall inside
+                # frozen contexts. "re-record (never fabricate)" must
+                # never be said about rows we blanked ourselves.
+                advisories.append(
+                    f"zero key frames in the delivered rows, but this "
+                    f"pipeline gated {gated_keys} key frame(s) out of a "
+                    f"confirmed frozen window — not a capture failure")
+            elif aux.get("video_active", True):
                 reasons.append(_reason(
                     "INP_KEYS_MISSING", True, False, {},
                     f"zero key frames in {inv.get('rows')} rows while the "
@@ -802,6 +835,7 @@ def validate_session(work_dir: Path, dossier_dir: Path, *,
                      vlm_expected=bool(gemini_key) and not skip_vlm)
     aux["has_raw"] = bool(raw_by_sid)
     aux["vlm_required"] = True
+    aux["gate_destroyed"] = _gate_destroyed(dossier_dir)
     if seed_notes:
         aux.setdefault("notes", []).extend(seed_notes)
     # every (key tag, model) that answered — R23 flag trail into the verdict
@@ -1024,6 +1058,47 @@ def _locked_report_remove(report_path: Path, name: str) -> None:
     SYN_TS_NOT_PTS, a burned fix attempt and a paid VLM sweep
     (review-r4 #7)."""
     _locked_report_update(report_path, name, None)
+
+
+def _gate_destroyed(dossier_dir: Path) -> dict:
+    """Inventory that FIX_GATE_WINDOW blanked on earlier attempts.
+
+    map_reasons re-tests the inventory recomputed from the GATED
+    frames.csv, and nothing subtracted the rows the pipeline itself
+    emptied — so a session whose 3rd distinct action only occurs inside a
+    frozen context came back with 2 and was rejected CNT_ACTIONS_FEW,
+    blocking and UNFIXABLE, with coaching.md telling the player to "play
+    actively" for actions WE deleted (r-loop 5).
+
+    Read from the fixlog, which is the atomic evidence of record (r-loop
+    4) — this is a claim about what WE DID, not about current file
+    contents, so unlike the reverted coordinates sidecar it cannot go
+    stale against the CSV. A later FIX_RETRANSLATE that repopulates those
+    rows simply restores the inventory, and the deficit stops firing.
+    Missing/corrupt log -> empty, i.e. exactly today's behaviour.
+    """
+    acts: set[str] = set()
+    keys = 0
+    try:
+        log = json.loads((dossier_dir / "fixlog.json").read_text())
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        return {"actions": [], "key_frames": 0}
+    if not isinstance(log, list):
+        return {"actions": [], "key_frames": 0}
+    for entry in log:
+        if not isinstance(entry, dict) or entry.get("fix") != \
+                "FIX_GATE_WINDOW" or not entry.get("ok"):
+            continue
+        d = (entry.get("note") or {})
+        d = d.get("destroyed") if isinstance(d, dict) else None
+        if not isinstance(d, dict):
+            continue
+        acts.update(a for a in (d.get("actions") or []) if isinstance(a, str))
+        try:
+            keys += int(d.get("key_frames") or 0)
+        except (TypeError, ValueError):
+            pass
+    return {"actions": sorted(acts), "key_frames": keys}
 
 
 def _write_verdict(dossier_dir: Path, session_id: str, res: MapResult) -> None:
