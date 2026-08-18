@@ -387,3 +387,94 @@ def test_gate_destroyed_reads_the_fixlog_and_tolerates_damage(tmp_path):
     ]))
     got = validate._gate_destroyed(tmp_path)
     assert got == {"actions": ["interact", "map"], "key_frames": 6}, got
+
+
+# ------------------------------- the batch driver must honour the flag too
+
+def test_batch_driver_refuses_when_the_continuous_flag_is_on(cfg,
+                                                             monkeypatch):
+    """r-loop 5: PIPELINE_CONTINUOUS was read in exactly ONE place
+    (run_continuous), so it was a one-way interlock — it stopped the
+    continuous unit when False, but nothing stopped the BATCH driver when
+    True. The run lock only stops them running at the same instant, not
+    the batch driver taking over during a continuous restart window: both
+    armed, the next tick wins run.lock, hl-pipeline.service holds it for
+    hours (Type=oneshot, TimeoutStartSec=infinity), hl-continuous burns
+    StartLimitBurst and enters 'failed' with an alert naming the wrong
+    cause, and production silently runs on the batch driver."""
+    monkeypatch.setattr(C, "PIPELINE_CONTINUOUS", True)
+    called = {"lock": False}
+    monkeypatch.setattr(runmod, "acquire_lock",
+                        lambda _c: called.__setitem__("lock", True) or True)
+    assert runmod.run(cfg, send_telegram=False) == 0
+    assert not called["lock"], "must decline BEFORE taking the run lock"
+
+
+# ------------------- the digest must not report resolutions as quarantines
+
+def test_digest_counts_quarantine_ENTRIES_not_same_state_stamps(
+        cfg, ledger, monkeypatch):
+    """r-loop 5: ingest.scan's bad-path chase writes a
+    QUARANTINED->QUARANTINED transition for every INT_PATH row whose
+    folder has vanished from the listing — which happens precisely when an
+    operator has CORRECTED a badly-named folder. The digest printed those
+    resolutions as fresh quarantines, and during the canary that reads as
+    the new driver quarantining sessions: exactly the signal that would
+    trigger a rollback, on the only ops surface there is (the 3h digest,
+    since CONT_DAILY_REPORTS ships False at the flip)."""
+    from datetime import datetime, timedelta, timezone
+    from pipeline import reports, telegram
+    ts = (datetime.now(timezone.utc)
+          - timedelta(minutes=5)).isoformat(timespec="seconds")
+    for sid, frm in (("real", "INGESTED"),        # a true entry
+                     ("fixed1", "QUARANTINED"),   # operator FIXED the path
+                     ("fixed2", "QUARANTINED")):
+        ledger.db.execute(
+            "INSERT INTO events(session_id, from_state, to_state, ts, "
+            "detail) VALUES(?,?,?,?,?)", (sid, frm, "QUARANTINED", ts, ""))
+    ledger.db.commit()
+
+    seen = {}
+    monkeypatch.setattr(reports, "build_digest_message",
+                        lambda d, p: seen.update(q=d.quarantined_n) or "x")
+    monkeypatch.setattr(telegram, "send_message", lambda *a, **k: None)
+    drv = cont.ContinuousDriver(cfg, send_telegram=False)
+    drv._send_digest(ledger)
+
+    assert seen.get("q") == 1, \
+        f"operator fixes must not read as new quarantines (got {seen})"
+
+
+# ---------------- the fix plan must be built with the REROUTED game
+
+def test_fix_plan_uses_the_rerouted_game_not_the_drive_folder(cfg, ledger,
+                                                              monkeypatch):
+    """r-loop 5: _fix_one planned with row['game'] — the DRIVE-FOLDER
+    game, the very value STR_GAME_MISMATCH says is wrong. plan_fixes
+    branches on game, so an Outer Wilds session uploaded into the kamla/
+    tree had INP_FANOUT classified UNFIXABLE and was rejected outright,
+    although FIX_REROUTE_GAME + FIX_ACTIONS_CONTEXT is the designed fix."""
+    sid = "s-misfiled"
+    ledger.insert_session(session_id=sid, game="kamla",
+                          operator_email="op@x.com", player_email="p@x.com",
+                          drive_path="kamla/op@x.com/p@x.com/" + sid,
+                          drive_ctime="2026-08-14T10:00:00.000Z",
+                          md5_video="a" * 32, bytes_=10, state="FIX_QUEUED")
+    reasons = [{"code": "STR_GAME_MISMATCH", "blocking": True,
+                "fixable": True, "params": {"actual": "outer_wilds"}},
+               {"code": "INP_FANOUT", "blocking": True, "fixable": True,
+                "params": {}}]
+    ledger.update(sid, reasons_json=json.dumps(reasons))
+    (cfg.work / sid).mkdir(parents=True)
+
+    seen = {}
+    monkeypatch.setattr(fix, "apply_fixes",
+                        lambda *a, **k: seen.update(game=k.get("game"))
+                        or {"applied": [], "children": None, "error": None})
+    drv = cont.ContinuousDriver(cfg, send_telegram=False)
+    drv._fix_one(ledger, sid)
+
+    assert ledger.get(sid)["state"] != "REJECTED", \
+        "a misfiled OW session must be rerouted, not rejected unfixable"
+    assert seen.get("game") == "outer_wilds"
+    assert ledger.get(sid)["game"] == "outer_wilds"

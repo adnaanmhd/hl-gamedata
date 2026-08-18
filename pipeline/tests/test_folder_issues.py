@@ -9,6 +9,19 @@ from pipeline import ingest
 from pipeline import reports
 from pipeline import run as runmod
 from pipeline.tests.conftest import make_session_entries
+import pytest
+
+
+@pytest.fixture(autouse=True)
+def _arm_the_batch_driver(monkeypatch):
+    """run() now declines when PIPELINE_CONTINUOUS is True (r-loop 5): the
+    flag used to be a ONE-WAY interlock that stopped the continuous unit
+    when False but never stopped the batch driver when True, so a
+    roll-forward could leave both armed and let a batch tick take over
+    production. These tests exercise the (dormant) batch driver itself, so
+    they arm it explicitly."""
+    monkeypatch.setattr(C, "PIPELINE_CONTINUOUS", False)
+
 
 
 def _seed_issue_rows(ledger):

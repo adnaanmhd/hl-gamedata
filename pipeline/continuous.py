@@ -760,7 +760,24 @@ class ContinuousDriver:
         reasons = json.loads(row["reasons_json"] or "[]")
         work = self.cfg.work / sid
         has_raw = (work / "raw" / "inputs.jsonl").exists()
-        plan = fix.plan_fixes(reasons, game=row["game"], has_raw=has_raw)
+        # Resolve the reroute target BEFORE planning (r-loop 5).
+        # row["game"] is the DRIVE-FOLDER game -- the very value
+        # STR_GAME_MISMATCH says is wrong -- and plan_fixes branches on
+        # `game` in two places: INP_FANOUT (fixable only for outer_wilds
+        # or when has_raw) and the hygiene->context coupling. Planning
+        # with the wrong game classified INP_FANOUT as UNFIXABLE and
+        # rejected the session before the reroute was ever applied,
+        # although FIX_REROUTE_GAME + FIX_ACTIONS_CONTEXT is exactly the
+        # designed fix. The milder variant planned hygiene with no
+        # context step after it, so hygiene re-fanned-out the multi-bound
+        # OW keys and INP_FANOUT came back on revalidation, burning the
+        # second attempt and a second paid sweep.
+        game = row["game"]
+        _mm = next((r_ for r_ in reasons
+                    if r_.get("code") == "STR_GAME_MISMATCH"), None)
+        if _mm and (_mm.get("params") or {}).get("actual") in C.GAMES:
+            game = _mm["params"]["actual"]
+        plan = fix.plan_fixes(reasons, game=game, has_raw=has_raw)
         if plan["unfixable"]:
             runmod._discard_split_artifacts(self.cfg, led, sid)
             led.set_state(sid, "REJECTED", f"unfixable: {plan['unfixable']}")
@@ -774,9 +791,9 @@ class ContinuousDriver:
             return False
         reroute = next((p for f_, p in plan["steps"]
                         if f_ == "FIX_REROUTE_GAME"), None)
-        game = row["game"]
         if reroute and reroute.get("actual") in C.GAMES:
             game = reroute["actual"]
+        if game != row["game"]:
             led.update(sid, game=game)
         out = fix.apply_fixes(work, plan, game=game,
                               dossier_dir=self.cfg.dossiers / sid,
@@ -1155,9 +1172,19 @@ class ContinuousDriver:
             f"SELECT reasons_json FROM sessions WHERE state='REJECTED' AND "
             f"{reports.REJECT_TS}>=? AND {reports.REJECT_TS}<?",
             (lo, hi)).fetchall()
+        # Count ENTRIES into QUARANTINED, not same-state stamps
+        # (r-loop 5). ingest.scan's bad-path chase writes a
+        # QUARANTINED->QUARANTINED transition for every INT_PATH row whose
+        # folder has vanished from the Drive listing -- which fires
+        # precisely when an operator has CORRECTED a badly-named folder.
+        # The digest therefore printed resolutions as fresh quarantines,
+        # and at the flip that is the signal that would trigger a
+        # rollback, on the ONLY ops surface there is (CONT_DAILY_REPORTS
+        # ships False).
         quar_n = led.db.execute(
             "SELECT COUNT(DISTINCT session_id) n FROM events WHERE "
-            "to_state='QUARANTINED' AND ts>=? AND ts<?",
+            "to_state='QUARANTINED' AND from_state IS NOT 'QUARANTINED' "
+            "AND ts>=? AND ts<?",
             (lo, hi)).fetchone()["n"]
         label_lists = []
         for r in rej_rows:

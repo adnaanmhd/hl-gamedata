@@ -8,6 +8,19 @@ from datetime import datetime
 from pipeline import config as C
 from pipeline import deliver, ingest, run as runmod
 from pipeline.tests.conftest import make_session_entries
+import pytest
+
+
+@pytest.fixture(autouse=True)
+def _arm_the_batch_driver(monkeypatch):
+    """run() now declines when PIPELINE_CONTINUOUS is True (r-loop 5): the
+    flag used to be a ONE-WAY interlock that stopped the continuous unit
+    when False but never stopped the batch driver when True, so a
+    roll-forward could leave both armed and let a batch tick take over
+    production. These tests exercise the (dormant) batch driver itself, so
+    they arm it explicitly."""
+    monkeypatch.setattr(C, "PIPELINE_CONTINUOUS", False)
+
 
 SID1 = "2026-08-14T10-00-00Z_kamla_c_0123456789abcdef"
 SID2 = "2026-08-14T11-00-00Z_kamla_c_fedcba9876543210"

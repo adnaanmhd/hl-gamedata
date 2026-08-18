@@ -510,7 +510,26 @@ def _fix_phase(cfg, ledger, sids, alerts, *, workers: int,
             reasons = json.loads(row["reasons_json"] or "[]")
             work = cfg.work / sid
             has_raw = (work / "raw" / "inputs.jsonl").exists()
-            plan = fix.plan_fixes(reasons, game=row["game"],
+            # Resolve the reroute target BEFORE planning (r-loop 5).
+            # row["game"] is the DRIVE-FOLDER game -- the very value
+            # STR_GAME_MISMATCH says is wrong -- and plan_fixes branches on
+            # `game` in two places: INP_FANOUT (fixable only for outer_wilds
+            # or when has_raw) and the hygiene->context coupling. Planning
+            # with the wrong game classified INP_FANOUT as UNFIXABLE and
+            # rejected the session before the reroute was ever applied,
+            # although FIX_REROUTE_GAME + FIX_ACTIONS_CONTEXT is exactly the
+            # designed fix. The milder variant planned hygiene with no
+            # context step after it, so hygiene re-fanned-out the multi-bound
+            # OW keys and INP_FANOUT came back on revalidation, burning the
+            # second attempt and a second paid sweep.
+            game = row["game"]
+            _mm = next((r_ for r_ in reasons
+                        if r_.get("code") == "STR_GAME_MISMATCH"),
+                       None)
+            if _mm and (_mm.get("params") or {}).get("actual") \
+                    in C.GAMES:
+                game = _mm["params"]["actual"]
+            plan = fix.plan_fixes(reasons, game=game,
                                   has_raw=has_raw)
             if plan["unfixable"]:
                 _discard_split_artifacts(cfg, ledger, sid)
@@ -526,9 +545,9 @@ def _fix_phase(cfg, ledger, sids, alerts, *, workers: int,
             # re-validation must use — apply it to the ledger FIRST
             reroute = next((p for f, p in plan["steps"]
                             if f == "FIX_REROUTE_GAME"), None)
-            game = row["game"]
             if reroute and reroute.get("actual") in C.GAMES:
                 game = reroute["actual"]
+            if game != row["game"]:
                 ledger.update(sid, game=game)
             out = fix.apply_fixes(work, plan, game=game,
                                   dossier_dir=cfg.dossiers / sid,
@@ -1553,6 +1572,27 @@ def _upload_ceiling_alert(cfg: C.Config, ledger: Ledger,
 
 def run(cfg: C.Config, *, max_batches: int = 50,
         dest_prefix: str = C.VENDOR, send_telegram: bool = True) -> int:
+    # Mirror of the continuous side's rollback interlock (r-loop 5).
+    # PIPELINE_CONTINUOUS was read in exactly ONE place — run_continuous —
+    # so the flag was a one-way interlock: it stopped the continuous unit
+    # when False, but nothing stopped the BATCH driver when True. The run
+    # lock only guarantees the two never run at the same instant; it does
+    # not stop the batch driver taking over during a continuous restart
+    # window. An operator rolling forward the obvious way (set the flag,
+    # deploy, `systemctl start hl-continuous`) without re-running
+    # vm_setup --enable-continuous left BOTH armed: the next *:0/30 tick
+    # wins run.lock, hl-pipeline.service is Type=oneshot with
+    # TimeoutStartSec=infinity so a backlog run holds it for hours,
+    # run_continuous returns 1 on each restart, 5 attempts in ~50s burn
+    # StartLimitBurst, and the unit enters 'failed' with an OnFailure
+    # alert naming the wrong cause — while production silently runs on
+    # the batch driver, writing batch rows onto the continuous ledger.
+    # Return 0, not 1: a timer tick that correctly declines is not a
+    # failure and must not alert.
+    if C.PIPELINE_CONTINUOUS:
+        print("PIPELINE_CONTINUOUS is True — the continuous driver owns "
+              "this pipeline; batch run refusing to start", file=sys.stderr)
+        return 0
     if not acquire_lock(cfg):
         print("run lock held — exiting")
         return 0

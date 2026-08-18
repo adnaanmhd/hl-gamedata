@@ -9,6 +9,19 @@ from datetime import datetime, timedelta, timezone
 from pipeline import config as C
 from pipeline import ingest, reports, run as runmod, validate
 from pipeline.ledger import Ledger
+import pytest
+
+
+@pytest.fixture(autouse=True)
+def _arm_the_batch_driver(monkeypatch):
+    """run() now declines when PIPELINE_CONTINUOUS is True (r-loop 5): the
+    flag used to be a ONE-WAY interlock that stopped the continuous unit
+    when False but never stopped the batch driver when True, so a
+    roll-forward could leave both armed and let a batch tick take over
+    production. These tests exercise the (dormant) batch driver itself, so
+    they arm it explicitly."""
+    monkeypatch.setattr(C, "PIPELINE_CONTINUOUS", False)
+
 
 SID = "2026-08-14T10-00-00Z_kamla_c_00000000000000cc"
 
