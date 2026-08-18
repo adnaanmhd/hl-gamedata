@@ -77,6 +77,23 @@ b. **Resize E2 → C2D.** Pre-flight was VERIFIED against the project's own API
    (ephemeral IP moves) → full suite green on the VM → confirm the balloon
    is gone (`lsmod | grep balloon` empty, and the awk above unavailable/0).
 
+   **Run the suite through the gate, never as a bare `pytest; echo $?`:**
+
+   ```
+   SUITE_FLOOR=440 bash tools/run_suite.sh \
+       --with numpy==2.4.6 --with opencv-python-headless==5.0.0.93 \
+       --with rerun-sdk==0.36.0
+   ```
+
+   "Green" cannot mean "exit status 0". `run_continuous` ends its finally
+   with `os._exit(0)` when it owns the process, and ~12 tests call it
+   in-process, so a regression of the `install_signals` guard kills the
+   interpreter mid-suite: **measured at 140 of 449 tests run, no summary
+   line, exit 0** (r-loop 6). No pytest hook can defend against that —
+   `os._exit` skips every hook — so the gate checks, from the parent, that
+   a summary line exists AND that the pass count clears the floor. Raise
+   `SUITE_FLOOR` as the suite grows; never lower it to make a run green.
+
    **Expected failure branch — zone capacity.** Availability and quota are
    settled, but neither rules out a stockout: `start` can return
    `ZONE_RESOURCE_POOL_EXHAUSTED`, and it can only surface once the VM is

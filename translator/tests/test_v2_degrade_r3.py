@@ -207,3 +207,27 @@ def test_analyze_wrapper_does_not_crash_on_non_utf8_frames_csv(tmp_path,
     # SHORTENS the row, which used to raise IndexError out of inventory()
     assert a.qa_status == "FAIL"
     assert isinstance(a.verdict, str) and a.verdict
+
+
+def test_analyze_wrapper_does_not_crash_on_unparseable_timestamp(tmp_path,
+                                                                 tiny_mp4):
+    """r-loop 6: check_session_v2 guards this cast and emits a FAIL that
+    maps to STR_TS_NONMONO — blocking but FIXABLE. analyze() then
+    re-derived the same column with a bare int() and raised, so a session
+    the checker had just given a one-attempt repairable verdict became
+    QUARANTINED 'validation crashed': terminal, manual queue, media held
+    for CONT_QUARANTINE_RECLAIM_H."""
+    from tools.analyze_sample import analyze
+    n = len(V2_FRAME_COLS)
+    col = {c: i for i, c in enumerate(V2_FRAME_COLS)}
+    rows = []
+    for i in range(2):
+        r = ["0"] * n
+        r[col["frame_id"]] = str(i)
+        r[col["timestamp_ms"]] = "not-a-number" if i == 1 else "0"
+        rows.append(",".join(r))
+    body = ",".join(V2_FRAME_COLS) + "\n" + "\n".join(rows) + "\n"
+    d = _session(tmp_path, frames_bytes=body.encode(), video=tiny_mp4)
+    a = analyze(d, {}, None, 4.0, 0.5)            # must not raise
+    assert a.qa_status == "FAIL"
+    assert a.inventory.get("ts_unparseable") == 1

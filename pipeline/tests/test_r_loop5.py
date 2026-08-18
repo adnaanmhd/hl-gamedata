@@ -914,3 +914,112 @@ def test_reclaim_clock_starts_at_the_first_failure_not_first_sight(
     assert (cfg.work / sid).exists(), \
         "a transfer that first FAILED an hour ago must not be reclaimed " \
         "because the folder was first SEEN five days ago"
+
+
+# ------------- split children must inherit the parent's GATE record
+
+def test_split_children_inherit_the_parents_gate_record(tmp_path):
+    """r-loop 6: since r-loop 5 a cut-bearing plan gates BEFORE it cuts, so
+    the parent's rows are blanked and cutter copies the blanked rows into
+    every child verbatim. But the destroyed-inventory record lived only in
+    the PARENT's dossier while each child is validated against its own
+    fresh one — so _gate_destroyed saw nothing and the child took exactly
+    the wrongful CNT_ACTIONS_FEW / INP_KEYS_MISSING reject the record
+    exists to prevent. Same shape as _propagate_shift_record, same reason:
+    state established on the parent's timeline must follow the footage."""
+    root = tmp_path / "dossiers"
+    parent_sid = "2026-08-15T10-00-00Z_kamla_c_00000000000000aa"
+    parent = root / parent_sid
+    applied = [
+        {"fix": "FIX_GATE_WINDOW", "params": {}, "ok": True,
+         "note": {"destroyed": {"actions": ["interact"], "key_frames": 5}}},
+        {"fix": "FIX_CUT_SEGMENTS", "params": {}, "ok": True, "note": {}},
+    ]
+    segments = [{"id": f"{parent_sid}-p1"}, {"id": f"{parent_sid}-p2"}]
+
+    fix._propagate_gate_record(parent, root, applied, segments)
+
+    for seg in segments:
+        got = validate._gate_destroyed(root / seg["id"])
+        assert got == {"actions": ["interact"], "key_frames": 5}, \
+            f"child {seg['id']} did not inherit the gate record: {got}"
+
+
+def test_gate_record_propagation_includes_earlier_attempts(tmp_path):
+    """A gate applied on attempt 1 and a cut on attempt 2 is the common
+    case — the earlier record is on disk, not in this pass's `applied`."""
+    root = tmp_path / "dossiers"
+    parent_sid = "2026-08-15T11-00-00Z_kamla_c_00000000000000ab"
+    fix._append_fixlog(root / parent_sid, [
+        {"fix": "FIX_GATE_WINDOW", "params": {}, "ok": True,
+         "note": {"destroyed": {"actions": ["map"], "key_frames": 2}}}])
+
+    fix._propagate_gate_record(root / parent_sid, root, [],
+                               [{"id": f"{parent_sid}-p1"}])
+    assert validate._gate_destroyed(root / f"{parent_sid}-p1") == {
+        "actions": ["map"], "key_frames": 2}
+
+
+def test_gate_record_propagation_is_a_noop_without_a_gate(tmp_path):
+    root = tmp_path / "dossiers"
+    fix._propagate_gate_record(root / "p", root, [], [{"id": "p-p1"}])
+    assert not (root / "p-p1").exists()
+
+
+# --------- the V lane needs the transient carve-out D and U already have
+
+def test_host_level_validation_error_is_not_terminal(cfg, ledger,
+                                                     monkeypatch):
+    """r-loop 6: _validate_worker wrapped everything in a bare `except
+    Exception` and _validate_one turned any error dict into QUARANTINED —
+    a TERMINAL state with no automatic re-entry — with no discrimination.
+    Both sibling lanes were hardened for exactly this: _download_one
+    catches (OSError, sqlite3.OperationalError) and cools down, and
+    _deliver_one's own comment records that a bare except there once
+    'converted the whole READY/PACKAGED/UPLOADED backlog to QUARANTINED'.
+    A full disk or an ENOMEM during one sweep therefore terminally
+    rejected every session that happened to be validating, each then
+    holding its media for CONT_QUARANTINE_RECLAIM_H."""
+    sid = "s-hosterr"
+    ledger.insert_session(session_id=sid, game="kamla",
+                          operator_email="op@x.com", player_email="p@x.com",
+                          drive_path="kamla/op@x.com/p@x.com/" + sid,
+                          drive_ctime="2026-08-14T10:00:00.000Z",
+                          md5_video="a" * 32, bytes_=10, state="VALIDATING")
+    (cfg.work / sid).mkdir(parents=True)
+    drv = cont.ContinuousDriver(cfg, send_telegram=False)
+    alerts = []
+    monkeypatch.setattr(cont.AlertBook, "alert",
+                        lambda self, t: alerts.append(t))
+    monkeypatch.setattr(cont, "_POOL_DISABLED", True)   # run inline
+    monkeypatch.setattr(
+        cont, "_WORKER_FN",
+        lambda job: {"sid": sid, "error": "OSError: [Errno 28] No space "
+                                          "left on device", "kind": "host"})
+
+    out = drv._validate_one(ledger, sid, ledger.get(sid))
+    assert out != "QUARANTINED", "a host-level error must not be terminal"
+    assert ledger.get(sid)["state"] == "VALIDATING"
+    assert sid in drv.cool.blocked(), "it must be cooled down for a retry"
+    assert any("host-level" in a for a in alerts)
+
+
+def test_a_genuine_decode_crash_is_still_quarantined(cfg, ledger,
+                                                     monkeypatch):
+    """The carve-out is for the MACHINE having a bad minute, not for this
+    session's bytes crashing the decoder."""
+    sid = "s-crash"
+    ledger.insert_session(session_id=sid, game="kamla",
+                          operator_email="op@x.com", player_email="p@x.com",
+                          drive_path="kamla/op@x.com/p@x.com/" + sid,
+                          drive_ctime="2026-08-14T10:00:00.000Z",
+                          md5_video="b" * 32, bytes_=10, state="VALIDATING")
+    (cfg.work / sid).mkdir(parents=True)
+    drv = cont.ContinuousDriver(cfg, send_telegram=False)
+    monkeypatch.setattr(cont.AlertBook, "alert", lambda self, t: None)
+    monkeypatch.setattr(cont, "_POOL_DISABLED", True)   # run inline
+    monkeypatch.setattr(
+        cont, "_WORKER_FN",
+        lambda job: {"sid": sid, "error": "ValueError: bad frame",
+                     "kind": "crash"})
+    assert drv._validate_one(ledger, sid, ledger.get(sid)) == "QUARANTINED"

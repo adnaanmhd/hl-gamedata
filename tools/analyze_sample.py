@@ -204,7 +204,21 @@ def inventory(rows, col, fps: float, duration_ms: int) -> dict:
     bleed_frames = 0
     bleed_example = ""
     os_keys = collections.Counter()
-    ts = [int(r[col["timestamp_ms"]]) for r in rows]
+    # Guarded, and float-tolerant like pipeline/validate.py:728 already is
+    # (r-loop 6). check_session_v2 wraps this exact cast and emits
+    # "FAIL: timestamp_ms column unparseable", which maps to STR_TS_NONMONO
+    # -- blocking but FIXABLE. The wrapper then re-derived the same column
+    # with a bare int() and raised, so a session the checker had just given
+    # a one-attempt repairable verdict became QUARANTINED "validation
+    # crashed": terminal, manual queue, media held 48h. r-loop 5 guarded
+    # the reads around this one and left the cast strict.
+    ts = []
+    ts_unparseable = 0
+    for r in rows:
+        try:
+            ts.append(int(float(r[col["timestamp_ms"]])))
+        except (TypeError, ValueError, IndexError):
+            ts_unparseable += 1
     for r in rows:
         ks = [t for t in (r[col["input_keys"]] or "").split("|") if t]
         al = [a for a in (r[col["input_actions"]] or "").split("|") if a]
@@ -247,6 +261,7 @@ def inventory(rows, col, fps: float, duration_ms: int) -> dict:
         "bleed_example": bleed_example,
         "median_dt_ms": med, "irregular_intervals": len(irregular),
         "irregular_pct": round(100.0 * len(irregular) / len(dts), 1) if dts else 0.0,
+        "ts_unparseable": ts_unparseable,
         "ts_last_ms": ts[-1] if ts else None,
         "tail_gap_ms": abs(ts[-1] - duration_ms) if ts else None,
         "frame_interval_ms": frame_iv,

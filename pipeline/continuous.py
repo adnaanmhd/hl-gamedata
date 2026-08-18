@@ -731,6 +731,18 @@ class ContinuousDriver:
         if int(res.get("vlm_rung", 0)) > job["vlm_rung"]:
             self.absorb_rung(int(res["vlm_rung"]))
         if "error" in res:
+            if res.get("kind") == "host":
+                # Host-level: the machine, not the session. Leave the row
+                # where it is and cool it down, exactly as _download_one
+                # and _deliver_one already do — QUARANTINED is TERMINAL
+                # with no automatic re-entry, so a full disk or an ENOMEM
+                # during one sweep terminally rejected every session that
+                # happened to be validating, each holding its media for
+                # CONT_QUARANTINE_RECLAIM_H (r-loop 6).
+                self.cool.set(sid, C.CONT_RUNNER_CRASH_RETRY_MIN * 60)
+                self.alerts.alert(f"validation hit a host-level error on "
+                                  f"{sid} (will retry): {res['error']}")
+                return None
             led.set_state(sid, "QUARANTINED",
                           f"validation crashed: {res['error']}")
             self.alerts.alert(f"validation crashed on {sid}: "

@@ -322,6 +322,11 @@ def apply_fixes(work_dir: Path, plan: dict, *, game: str,
                 children = note
                 applied.append({"fix": fix_id, "params": _jsonable(params),
                                 "ok": True, "note": note})
+                # the gate ran on the parent's timeline just above; its
+                # record has to follow the footage into the children
+                # (r-loop 6)
+                _propagate_gate_record(dossier_dir, dossier_dir.parent,
+                                       applied, note.get("segments") or [])
                 break                     # children re-enter Phase II
             applied.append({"fix": fix_id, "params": _jsonable(params),
                             "ok": True, "note": note})
@@ -431,6 +436,47 @@ def _dispatch(fix_id: str, params: dict, work: Path, game: str,
 
 
 # ------------------------------------------------------- implementations
+
+def _propagate_gate_record(parent_dossier: Path, dossier_root: Path,
+                           applied: list[dict], segments: list[dict]) -> None:
+    """Split children must inherit the parent's GATE record.
+
+    Since r-loop 5 a cut-bearing plan gates BEFORE it cuts, so the
+    parent's rows are blanked and cutter copies the blanked rows into
+    every child verbatim. But the destroyed-inventory record lives in the
+    PARENT's dossier, while each child is validated against its own fresh
+    dossier — so validate._gate_destroyed saw nothing and the child took
+    the wrongful CNT_ACTIONS_FEW / INP_KEYS_MISSING reject the record
+    exists to prevent (r-loop 6). Same shape as _propagate_shift_record
+    below, and for the same reason: state established on the parent's
+    timeline has to follow the footage.
+    """
+    gate_entries = [e for e in applied
+                    if e.get("fix") == "FIX_GATE_WINDOW" and e.get("ok")]
+    # plus anything an EARLIER attempt on this parent gated
+    try:
+        log = json.loads((parent_dossier / "fixlog.json").read_text())
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        log = []
+    if isinstance(log, list):
+        for rec in log:
+            if not isinstance(rec, dict):
+                continue
+            for e in (rec.get("fixes") or []):
+                if isinstance(e, dict) and e.get("fix") == "FIX_GATE_WINDOW" \
+                        and e.get("ok"):
+                    gate_entries.append(e)
+    if not gate_entries:
+        return
+    for seg in segments:
+        sid = seg.get("id")
+        if not sid:
+            continue
+        try:
+            _append_fixlog(dossier_root / sid, gate_entries)
+        except OSError:
+            pass
+
 
 def _propagate_shift_record(parent: Path, children: list[Path]) -> None:
     """qa's raw recomputation reads the applied sync shift from

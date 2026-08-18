@@ -165,7 +165,21 @@ def _validate_worker(args: dict) -> dict:
                     for m in (res.metrics or {}).get("models_used", []))}
     except Exception as e:
         import traceback
+        # Tag HOST-level failures so the caller can tell "this machine is
+        # having a bad minute" from "this session's bytes crash the
+        # decoder" (r-loop 6). The V lane was the only one of the three
+        # without this split: _download_one catches (OSError,
+        # sqlite3.OperationalError) and cools down, _deliver_one catches
+        # those plus TimeoutExpired and cools down, and _deliver_one's own
+        # comment records that a bare `except Exception` there once
+        # converted the whole delivery backlog to QUARANTINED. QUARANTINED
+        # is TERMINAL with no automatic re-entry, so a full disk or an
+        # ENOMEM during a sweep terminally rejected every session that
+        # happened to be validating.
+        kind = "host" if isinstance(
+            e, (OSError, MemoryError, sqlite3.OperationalError)) else "crash"
         return {"sid": args["sid"], "error": f"{type(e).__name__}: {e}",
+                "kind": kind,
                 "tb": traceback.format_exc()[-1500:],
                 "vlm_rung": vlmmod._rung}
 
