@@ -14,6 +14,45 @@ especially), then start at the first unchecked item in its §0 status ledger
 that protocol 2026-08-18). Ask only if something in the plan is provably wrong
 or a question only Adnaan can settle — one question at a time.
 
+**FIRST ITEM — D0, a DISCUSSION, before any code (Adnaan's explicit
+instruction, 2026-08-18).** D7's spec changes a payment behaviour Adnaan
+ruled on in C6, and he wants to discuss it before it is implemented. Open the
+session with this discussion; do not implement D7 (or rewrite its two tests)
+until he rules. D1–D6/D8 do not depend on the outcome, but the discussion
+comes FIRST regardless. Run it like this:
+
+1. **Measure before arguing.** Query the REAL production ledger read-only
+   over ssh (the VM's `~/hl-pipeline/ledger.db` — read-only SELECT only,
+   driver state does not matter for a SELECT): how many trees today hold a
+   DELIVERED node with `accepted_reported_at` set AND a fix-failed REJECTED
+   node (all blocking reasons fixable)? **[assumption to verify first]** the
+   rebuild reset nulled all payment stamps and the rebuild ran with
+   `--quiet` (no dailies), so the expected answer is ZERO paid trees right
+   now — meaning option A costs nothing AT THE FLIP and the dilemma only
+   bites post-flip refix waves, once dailies have stamped accepted marks.
+   Confirm or refute this with the query and put the number in front of him.
+2. **Present the three options, plainly** (the trade-off in one line each):
+   - **A — refuse all payment-evidence trees** (the current D7 spec): never
+     wrong about money, but every such tree becomes manual reconcile work,
+     and its fix-failed footage is only recovered by hand.
+   - **B — keep C6's seal-and-rerun, patched** (preserve an existing seal on
+     later passes, per finding #1's own fix): automatic, no double-pay, but
+     the seal still swallows the recovered fix-failed hours in every
+     already-paid tree (#18) — the money the tool exists to recover.
+   - **C — per-piece payment memory** (finding #18's alternative): before
+     teardown, durably record WHICH pieces were paid (e.g. in the teardown
+     event detail); after the re-run, exclude only those pieces' re-delivered
+     hours and pay the recovered ones. Fully automatic and correct in both
+     directions, but the most new engineering and a new invariant to defend
+     (deterministic child ids -pN make the mapping possible, and also make
+     collisions the thing to get right).
+   State clearly: iteration 9 PROVED A-vs-B is a real dilemma (both probes in
+   R9_FINDINGS #1/#18 ran the real code); C is designed but unproven.
+3. **Get his ruling, record it** in plan §9 D7 (superseding the current
+   spec text if he picks B or C), update the two named tests' plan
+   accordingly, THEN proceed with the ledger order (D1…) implementing D7
+   per the ruling when you reach it.
+
 **Session config:** Model **Fable 5**. This message carries `ultracode` — the
 review iterations (plan §5, procedure refreshed in §9 "After D8") are
 multi-agent by ruling; the D1–D8 fix phase you implement yourself, with

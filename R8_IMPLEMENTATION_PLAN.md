@@ -32,6 +32,7 @@ the first unchecked item.
 - [x] C9 suite knob-independence + SUITE_FLOOR 578 + doc corrections — repro CONFIRMED on the pinned runbook invocation (14 failed/567 passed at pre-C9 HEAD; 11→14 = the three new C5 send-path tests); green at BOTH knob values (582/582)
 - [x] Full gate green on Mac AND VM at final r8-fix HEAD b694456 — Mac 582 (61s), VM side checkout 582 (251s), both floor 578; tree-verify (diff/status/MUTATION) clean
 - [x] Review iteration 9 RAN (2026-08-18, workflow `tools/review/flip-review-iter9.js`, 53 agents) — **NOT QUIET: 23 confirmed (14 major / 9 minor / 0 blockers), 0 killed**; findings of record in `R9_FINDINGS.md`; fixes synthesized into §9 as D1–D8 (Adnaan redirected the r8 session to hand off instead of fixing in-iteration)
+- [ ] D0 DISCUSSION FIRST (Adnaan, 2026-08-18): the D7 payment rule needs his ruling before D7 is implemented — measure the affected population on the real ledger, present options A/B/C, record the ruling in §9 D7 (procedure: R9_EXEC_KICKOFF_PROMPT.md "FIRST ITEM"). Blocks D7 only, but runs before everything.
 - [ ] D1 translator hardening (#2 carried-only rebase guard, #3/#16 v2 untyped crashes, #17 falsy-key binding) — §9
 - [ ] D2 validation truth sources (#12 CNT_SHORT from probed duration, #15 analyze() typed-FAIL path) — §9
 - [ ] D3 driver host classes (#9 BrokenProcessPool first-death=host, #10 U-lane CalledProcessError) — §9
@@ -1032,6 +1033,16 @@ verify, and if the seeded md5 matches, adjust THEIR seeds so they pin the
 different-md5 case, citing r-loop 9).
 
 ### D7 — refix tool: payment-evidence refusal + probe honesty (#1, #18, #19, #7-tool-side) — `tools/recal_refix_reset.py`, `tools/recal_rebuild_reset.py`
+
+**⚠ D7a IS PENDING ADNAAN'S RULING (ledger item D0).** He asked to discuss
+this rule before it lands (2026-08-18) — the spec below is the session's
+RECOMMENDATION (option A), not yet a ruling. Hold the D0 discussion first
+(procedure in R9_EXEC_KICKOFF_PROMPT.md "FIRST ITEM": measure the affected
+population, present options A/refuse, B/seal-patched, C/per-piece memory),
+then implement D7a per whatever he rules and update this spec + the two
+named test rewrites to match. D7b (#7 pending-record interlock) and D7c
+(#19 lsf honesty) are NOT part of the dilemma and proceed as specified
+regardless.
 
 **D7a (#1+#18, MAJOR, one coherent rule)** two seal defects with one root:
 the tool's plan-time paid/unpaid computation reads only per-node accepted
