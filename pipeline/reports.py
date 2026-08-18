@@ -408,12 +408,18 @@ def _parse_ts(v: str | None) -> datetime | None:
 GAME_COL = {"kamla": "kamla", "outer_wilds": "ow"}
 
 def pending_daily_send(cfg) -> str | None:
-    """The day name of any daily send whose durable record has not fully
-    settled (missing .sent marker, or .sent without doc_sent), else None.
-    The recal tools REFUSE to run while one exists (r-loop 9 #7): tearing
-    rows down under a pending record makes the later resume send a STALE
-    sheet crediting deleted rows, and the re-run's deterministic same-id
-    children then get counted a second time."""
+    """The day name of any send whose durable record has not fully
+    settled, else None. Two record kinds, same doctrine: the daily
+    send's .daily-counted.json (pending = missing .sent marker, or .sent
+    without doc_sent; r-loop 9 #7) and recal_regen_sheets --send's
+    .regen-v2-counted.json (pending = missing its .regen-v2-done marker;
+    r-loop 11 #15 — the regen resumes from its record verbatim, so a
+    teardown in its crash window makes the re-run send a stale sheet and
+    blind-stamp deleted rows exactly like the daily case). The recal
+    tools REFUSE to run while either exists: tearing rows down under a
+    pending record makes the later resume send a STALE sheet crediting
+    deleted rows, and the re-run's deterministic same-id children then
+    get counted a second time."""
     try:
         day_dirs = sorted(p for p in Path(cfg.reports_dir).iterdir()
                           if p.is_dir())
@@ -421,14 +427,16 @@ def pending_daily_send(cfg) -> str | None:
         return None
     for d in day_dirs:
         rec = d / ".daily-counted.json"
-        if not rec.is_file():
-            continue
-        if not (d / ".sent").exists():
-            return d.name
-        try:
-            if not json.loads(rec.read_text()).get("doc_sent"):
+        if rec.is_file():
+            if not (d / ".sent").exists():
                 return d.name
-        except (OSError, json.JSONDecodeError):
+            try:
+                if not json.loads(rec.read_text()).get("doc_sent"):
+                    return d.name
+            except (OSError, json.JSONDecodeError):
+                return d.name
+        if (d / ".regen-v2-counted.json").is_file() and \
+                not (d / ".regen-v2-done").exists():
             return d.name
     return None
 

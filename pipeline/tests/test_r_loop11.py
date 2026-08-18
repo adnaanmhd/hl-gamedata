@@ -459,6 +459,53 @@ def test_validate_backfills_null_duration_batch(cfg, ledger, monkeypatch):
     assert ledger.get(sid)["duration_raw_s"] == 99.0
 
 
+# ------- r11 #15: the reset interlock covers the regen's resumable send
+
+def test_recal_tools_refuse_while_a_regen_send_is_pending(cfg, monkeypatch,
+                                                          capsys):
+    """recal_regen_sheets --send keeps its own durable resumable record
+    (.regen-v2-counted.json, resumed verbatim on re-run) with the same
+    semantics as the daily's — but pending_daily_send was blind to it,
+    so a teardown in the regen's crash window re-created the
+    stale-sheet/double-count class the D7b interlock closed."""
+    import sys as _sys
+
+    from pipeline import reports
+    from pipeline.ledger import Ledger
+    from pipeline.tests.test_payment_split_r6 import FIXABLE, _load, _put
+    from pipeline.tests.test_r_loop9 import _refix_rc
+    led = Ledger(cfg.ledger_path)
+    sid = "2026-08-14T09-00-00Z_kamla_c_0000000000000rg1"
+    try:
+        _put(led, sid, state="REJECTED", raw=3600.0, reasons=FIXABLE)
+    finally:
+        led.close()
+    day_dir = cfg.reports_dir / "2026-08-15"
+    day_dir.mkdir(parents=True)
+    (day_dir / ".regen-v2-counted.json").write_text(
+        json.dumps({"counted": [sid], "accepted": []}))
+
+    assert _refix_rc(cfg, monkeypatch) == 2
+    assert "pending resume" in capsys.readouterr().out
+    led = Ledger(cfg.ledger_path)
+    assert led.get(sid)["state"] == "REJECTED", "no action before refusal"
+    led.close()
+
+    reset = _load("recal_rebuild_reset")
+    parachute = cfg.home / "parachute.db"
+    parachute.write_bytes(b"x" * 2048)
+    monkeypatch.setenv("HL_PIPELINE_HOME", str(cfg.home))
+    monkeypatch.setattr(_sys, "argv", ["recal_rebuild_reset.py", "--yes",
+                                       "--backup", str(parachute)])
+    assert reset.main() == 2
+    assert "pending resume" in capsys.readouterr().out
+
+    # completed regen (its done marker) -> the interlock releases; the
+    # tools' behaviour on a clear interlock is pinned by the r9 test
+    (day_dir / ".regen-v2-done").touch()
+    assert reports.pending_daily_send(cfg) is None
+
+
 # ------- r11 #9: reclaim/stuck anchors scoped to the current intake
 # ------- stint
 
