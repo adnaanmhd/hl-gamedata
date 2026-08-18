@@ -481,6 +481,22 @@ def _map_windows(rep: dict, aux: dict, reasons: list[dict],
 def _map_flags(rep: dict, aux: dict, reasons: list[dict],
                advisories: list[str]) -> None:
     dur = float(rep.get("duration_s") or 0)
+    # the hard length gate judges the PROBED duration (D2 doctrine);
+    # the claimed one is only the fallback
+    dur_true = float(aux.get("probed_duration_s") or 0) or dur
+
+    def _edge_short(t: float, edge: str) -> float | None:
+        """Post-cut remainder when the planned edge cut (plan_fixes cuts
+        at t±1.0) would leave under MIN_CLIP_S, else None (r-loop 12
+        #7). The CNT_EDGE_NONGAMEPLAY arm has had this check since day
+        one; without it here, a 70-74s clip burned a fix attempt and a
+        paid sweep reaching an INEVITABLE CNT_SHORT — decided fully at
+        map time — under a reason that misdirects the re-record
+        coaching ('under 70s' instead of 'the edge cut leaves too
+        little')."""
+        remain = (dur_true - (t + 1.0)) if edge == "head" else (t - 1.0)
+        return round(remain, 1) if remain < C.MIN_CLIP_S else None
+
     for n in aux.get("notifs", []):
         if not n.get("confirmed"):
             advisories.append(
@@ -488,10 +504,19 @@ def _map_flags(rep: dict, aux: dict, reasons: list[dict],
                 f"crop: {n.get('what', '')})")
             continue
         if n["t"] <= 3.0 or n["t"] >= dur - 3.0:
-            reasons.append(_reason(
-                "CNT_NOTIF_EDGE", True, True,
-                {"t": n["t"], "edge": "head" if n["t"] <= 3.0 else "tail"},
-                f"notification at {n['t']}s (edge): {n.get('what', '')}"))
+            edge = "head" if n["t"] <= 3.0 else "tail"
+            short = _edge_short(n["t"], edge)
+            if short is not None:
+                reasons.append(_reason(
+                    "CNT_SHORT", True, False, {"post_cut_s": short},
+                    f"edge notification at {n['t']}s; trimming leaves "
+                    f"{short:.0f}s (<{C.MIN_CLIP_S:.0f}s)"))
+            else:
+                reasons.append(_reason(
+                    "CNT_NOTIF_EDGE", True, True,
+                    {"t": n["t"], "edge": edge},
+                    f"notification at {n['t']}s (edge): "
+                    f"{n.get('what', '')}"))
         else:
             reasons.append(_reason(
                 "CNT_NOTIF_MID", True, False, {"t": n["t"]},
@@ -504,9 +529,18 @@ def _map_flags(rep: dict, aux: dict, reasons: list[dict],
                 f"{c.get('what', '')})")
             continue
         edge = c["t"] <= 3.0 or c["t"] >= dur - 3.0
-        reasons.append(_reason(
-            "CNT_CHAT_PII", True, edge, {"t": c["t"]},
-            f"player-chat text burned in at {c['t']}s: {c.get('what', '')}"))
+        short = _edge_short(c["t"], "head" if c["t"] <= 3.0 else "tail") \
+            if edge else None
+        if short is not None:
+            reasons.append(_reason(
+                "CNT_SHORT", True, False, {"post_cut_s": short},
+                f"edge chat text at {c['t']}s; cutting leaves "
+                f"{short:.0f}s (<{C.MIN_CLIP_S:.0f}s)"))
+        else:
+            reasons.append(_reason(
+                "CNT_CHAT_PII", True, edge, {"t": c["t"]},
+                f"player-chat text burned in at {c['t']}s: "
+                f"{c.get('what', '')}"))
 
 
 def map_gate_failures(fails: list[str], *, has_raw: bool) -> list[dict]:

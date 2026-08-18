@@ -189,6 +189,52 @@ def test_rows_surgery_precedes_hygiene_in_cutless_plans():
         "hygiene-before-context stays intact"
 
 
+# ------- r12 #7: edge notif/chat cuts get the map-time length check
+
+def test_edge_notification_on_a_barely_long_clip_is_short_at_map_time():
+    """The CNT_EDGE arm has had this check since day one; the notif/chat
+    siblings did not — a 70-74s clip burned a fix attempt and a paid
+    sweep reaching an INEVITABLE CNT_SHORT under a reason that
+    misdirects the re-record coaching."""
+    from pipeline import validate
+    reasons: list = []
+    validate._map_flags(
+        {"duration_s": 71.0},
+        {"probed_duration_s": 71.0,
+         "notifs": [{"t": 2.5, "confirmed": True, "what": "steam toast"}]},
+        reasons, [])
+    assert [r["code"] for r in reasons] == ["CNT_SHORT"], reasons
+    assert reasons[0]["fixable"] is False
+    assert reasons[0]["params"]["post_cut_s"] == 67.5
+
+
+def test_edge_chat_tail_on_a_barely_long_clip_is_short_at_map_time():
+    from pipeline import validate
+    reasons: list = []
+    validate._map_flags(
+        {"duration_s": 71.0},
+        {"probed_duration_s": 71.0,
+         "chats": [{"t": 69.5, "confirmed": True, "what": "pii"}]},
+        reasons, [])
+    assert [r["code"] for r in reasons] == ["CNT_SHORT"], reasons
+    assert reasons[0]["fixable"] is False
+
+
+def test_edge_flags_on_a_long_clip_keep_their_fixable_cuts():
+    """Control: plenty of clip left — the fixable edge codes stand."""
+    from pipeline import validate
+    reasons: list = []
+    validate._map_flags(
+        {"duration_s": 200.0},
+        {"probed_duration_s": 200.0,
+         "notifs": [{"t": 2.5, "confirmed": True, "what": "toast"}],
+         "chats": [{"t": 198.0, "confirmed": True, "what": "pii"}]},
+        reasons, [])
+    assert sorted(r["code"] for r in reasons) == \
+        ["CNT_CHAT_PII", "CNT_NOTIF_EDGE"], reasons
+    assert all(r["fixable"] for r in reasons)
+
+
 # ------- r12 #4: the DISCOVERED-media reclaim grace re-arms per reclaim
 
 def test_reclaim_grace_rearms_after_a_sweep(cfg, ledger):
