@@ -225,3 +225,43 @@ def test_lagshift_decode_failure_stays_typed_session(tmp_path,
                          ValueError("could not open video"))
     assert out["kind"] == "session", out
     assert "not decodable by opencv" in out["error"]
+
+
+# ------- r11 #4/#11: hygiene judges the SESSION's authoritative keybind
+
+def _hygiene_work(tmp_path, keybind: dict | None):
+    from pipeline.tests.test_r_loop7 import make_gate_csv
+    work = tmp_path / "H"
+    (work / "raw").mkdir(parents=True)
+    make_gate_csv(work, inputs={i: ("LShift", "") for i in range(20, 26)})
+    if keybind is not None:
+        (work / "raw" / "keybind.json").write_text(json.dumps(keybind))
+    return work
+
+
+def test_hygiene_honors_the_sessions_own_keybind(tmp_path):
+    """`bound` was built from the built-ins only, so the r10 unbound
+    strip deleted every key the session's own raw/keybind.json binds
+    (6/6 custom-bound LShift presses in the probe) and the action
+    re-resolution erased their actions — the corrupted session then
+    passed the checker cleanly."""
+    from pipeline import fix as fixmod
+    work = _hygiene_work(tmp_path, {"sprint": "shift_l"})
+    note = fixmod.fix_key_hygiene(work, "kamla")
+    header, rows = fixmod._read_csv(work)
+    col = {c: i for i, c in enumerate(header)}
+    carrying = [r for r in rows if "LShift" in r[col["input_keys"]]]
+    assert len(carrying) == 6, note
+    assert all("sprint" in r[col["input_actions"]] for r in carrying), \
+        "the custom bind's action must resolve from the surviving key"
+
+
+def test_hygiene_without_sidecar_still_strips_unbound(tmp_path):
+    """Control (r10 #9 preserved): with no session keybind the built-in
+    governs, and a key it does not bind is still stripped."""
+    from pipeline import fix as fixmod
+    work = _hygiene_work(tmp_path, None)
+    fixmod.fix_key_hygiene(work, "kamla")
+    header, rows = fixmod._read_csv(work)
+    col = {c: i for i, c in enumerate(header)}
+    assert not [r for r in rows if "LShift" in r[col["input_keys"]]]

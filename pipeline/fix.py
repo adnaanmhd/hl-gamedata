@@ -1005,7 +1005,19 @@ def fix_key_hygiene(work: Path, game: str) -> str:
     OS-key/control-byte strip, L+R bleed drop-spurious-side, then re-resolve
     actions from the surviving keys (spec §1.5.5 coupling)."""
     from translator import keys as K
-    kb = dict(KEYBINDS.get(game, {}))
+    kbp = work / "raw" / "keybind.json"
+    if kbp.exists():
+        # the session's own keybind.json is AUTHORITATIVE (r-loop 11
+        # #4/#11): judging `bound` against the built-ins alone made the
+        # r10 unbound strip delete every custom-bound key press (and the
+        # action re-resolution erase its actions) — silent delivered-data
+        # corruption that then passed the checker cleanly. Resolve
+        # exactly as retranslate_from_sidecars does; resolve_keybind
+        # falls back to the built-in itself when the file is unusable.
+        kb = resolve_keybind(keybind_path=kbp, game_name=game,
+                             exe_name=None)
+    else:
+        kb = dict(KEYBINDS.get(game, {}))
     kb.update(KEYBIND_PATCHES.get(game, {}))
     rules = build_resolver(kb) if kb else None
     bound = bound_literals(kb) if kb else frozenset()
