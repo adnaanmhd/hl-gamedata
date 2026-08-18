@@ -503,7 +503,13 @@ def _map_flags(rep: dict, aux: dict, reasons: list[dict],
                 f"possible notification at {n['t']}s (unconfirmed at full "
                 f"crop: {n.get('what', '')})")
             continue
-        if n["t"] <= 3.0 or n["t"] >= dur - 3.0:
+        # edge-ness is judged on the PROBED duration too (r13 #5/G3):
+        # notif/chat timestamps come from the sweep, which is clamped to
+        # min(claim, probed) — comparing them to a corrupt claim (the
+        # r12 #9 ms-in-seconds class) turned a fixable tail-edge flag
+        # into an unfixable terminal reject. dur_true already encodes
+        # the claimed-only fallback.
+        if n["t"] <= 3.0 or n["t"] >= dur_true - 3.0:
             edge = "head" if n["t"] <= 3.0 else "tail"
             short = _edge_short(n["t"], edge)
             if short is not None:
@@ -528,7 +534,7 @@ def _map_flags(rep: dict, aux: dict, reasons: list[dict],
                 f"possible chat text at {c['t']}s (unconfirmed: "
                 f"{c.get('what', '')})")
             continue
-        edge = c["t"] <= 3.0 or c["t"] >= dur - 3.0
+        edge = c["t"] <= 3.0 or c["t"] >= dur_true - 3.0
         short = _edge_short(c["t"], "head" if c["t"] <= 3.0 else "tail") \
             if edge else None
         if short is not None:

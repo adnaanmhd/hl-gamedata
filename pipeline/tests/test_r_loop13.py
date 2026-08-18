@@ -294,3 +294,42 @@ def test_retranslate_reroute_plan_keeps_the_builtin_override(tmp_path):
     assert "Q" not in keys, \
         "reroute: the built-in must govern — q stays unbound"
     assert "W" in keys
+
+
+# ------- r13 #5 (G3): notif/chat edge-vs-mid judged on the probed
+# ------- duration (variables split BOTH ways per §2 rule 3)
+
+def test_edge_flags_judged_on_probed_not_claimed_duration():
+    """r13 #5: the edge tests compared sweep timestamps (clamped to the
+    REAL timeline) against the CLAIMED duration — an ms-in-seconds
+    claim corruption (the r12 #9 class) made every tail event 'mid',
+    turning fixable edge cuts into unfixable terminal rejects."""
+    from pipeline import validate
+    reasons: list = []
+    validate._map_flags(
+        {"duration_s": 300000.0},          # ms-in-seconds corruption
+        {"probed_duration_s": 300.0,
+         "notifs": [{"t": 298.0, "confirmed": True, "what": "toast"}],
+         "chats": [{"t": 298.0, "confirmed": True, "what": "pii"}]},
+        reasons, [])
+    codes = sorted(r["code"] for r in reasons)
+    assert codes == ["CNT_CHAT_PII", "CNT_NOTIF_EDGE"], reasons
+    assert all(r["fixable"] for r in reasons), \
+        "2s before the REAL end is a fixable tail edge, not mid-clip"
+
+
+def test_edge_flags_with_matching_claim_control():
+    """Control (the other split direction): claim == probed keeps the
+    identical verdicts — the migration changes corrupt-claim behavior
+    only."""
+    from pipeline import validate
+    reasons: list = []
+    validate._map_flags(
+        {"duration_s": 300.0},
+        {"probed_duration_s": 300.0,
+         "notifs": [{"t": 298.0, "confirmed": True, "what": "toast"}],
+         "chats": [{"t": 298.0, "confirmed": True, "what": "pii"}]},
+        reasons, [])
+    codes = sorted(r["code"] for r in reasons)
+    assert codes == ["CNT_CHAT_PII", "CNT_NOTIF_EDGE"], reasons
+    assert all(r["fixable"] for r in reasons)
