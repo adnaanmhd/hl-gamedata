@@ -13,6 +13,17 @@ from pipeline import config as C
 from pipeline import deliver, ingest, run as runmod
 from pipeline.ledger import Ledger
 
+
+@pytest.fixture(autouse=True)
+def _arm_the_batch_driver(monkeypatch):
+    """run() declines when PIPELINE_CONTINUOUS is True (r-loop 5). This
+    module exercises the batch driver, so arm it — without this the
+    semaphore-leak regression below passed VACUOUSLY: run() returned
+    before acquire_lock and the balance it asserts was never disturbed
+    (r-loop 6)."""
+    monkeypatch.setattr(C, "PIPELINE_CONTINUOUS", False)
+
+
 SID = "2026-08-14T10-00-00Z_kamla_c_00000000000000bb"
 
 

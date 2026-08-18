@@ -1085,9 +1085,25 @@ def _gate_destroyed(dossier_dir: Path) -> dict:
         return {"actions": [], "key_frames": 0}
     if not isinstance(log, list):
         return {"actions": [], "key_frames": 0}
-    for entry in log:
-        if not isinstance(entry, dict) or entry.get("fix") != \
-                "FIX_GATE_WINDOW" or not entry.get("ok"):
+    # _append_fixlog writes ONE record per apply_fixes call, with the
+    # per-fix entries NESTED under "fixes":
+    #     [{"ts": ..., "fixes": [{"fix": ..., "ok": ..., "note": ...}, ...]}]
+    # r-loop 5 read the top level directly, so every iteration hit the
+    # `continue` and the carve-out was dead code — while its unit test
+    # hand-built a FLAT list and passed against a shape production never
+    # produces (r-loop 6 blocker). Accept both shapes so a hand-written or
+    # older log still reads.
+    entries = []
+    for rec in log:
+        if not isinstance(rec, dict):
+            continue
+        nested = rec.get("fixes")
+        if isinstance(nested, list):
+            entries.extend(x for x in nested if isinstance(x, dict))
+        elif "fix" in rec:
+            entries.append(rec)
+    for entry in entries:
+        if entry.get("fix") != "FIX_GATE_WINDOW" or not entry.get("ok"):
             continue
         d = (entry.get("note") or {})
         d = d.get("destroyed") if isinstance(d, dict) else None

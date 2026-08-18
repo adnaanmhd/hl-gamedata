@@ -391,8 +391,19 @@ class ContinuousDriver:
                     continue
                 sid = p.name[:-len("-analysis")] \
                     if p.name.endswith("-analysis") else p.name
-                if sid in disc:
-                    held.add(sid)
+                if sid not in disc:
+                    continue
+                # An EMPTY dir is not media (r-loop 6 blocker).
+                # ingest.download creates work/<sid> BEFORE the first
+                # rclone attempt, so a download that transferred zero
+                # bytes still left a dir -- and scoring it as media let a
+                # single transient outage fill the whole cap with 0 bytes
+                # on disk.
+                try:
+                    if any(p.iterdir()):
+                        held.add(sid)
+                except OSError:
+                    pass
             n += len(held)
         return n
 
@@ -411,7 +422,33 @@ class ContinuousDriver:
                 if sid not in exclude and self.own.claim(sid):
                     return sid
             if self._local_count(led) >= C.CONT_MEDIA_CAP_SESSIONS:
-                return None                # cap gates NEW intake only
+                # Cap gates NEW intake only -- and since r-loop 5 taught
+                # _local_count to score DISCOVERED rows that hold media,
+                # such a row is ALREADY inside the cap, exactly like the
+                # DOWNLOADING rows above. Without this carve-out the rows
+                # holding the cap were precisely the rows that had to be
+                # re-picked to release it: _download_one returns every
+                # failure to DISCOVERED (never DOWNLOADING), so their only
+                # route back is next_batch, which sits behind this return.
+                # One transient rclone outage across a full intake wave
+                # therefore stopped ALL intake until the 12h reclaim, with
+                # the disk empty and F7 never firing (r-loop 6 blocker).
+                # Re-picking one consumes no new slot.
+                for sid in ingest.next_batch(led, size=None,
+                                             exclude=exclude):
+                    if not ((self.cfg.work / sid).exists()
+                            or (self.cfg.work / f"{sid}-analysis").exists()):
+                        continue
+                    if self.own.claim(sid):
+                        try:
+                            led.set_state(sid, "DOWNLOADING",
+                                          "claimed by D (resume, already "
+                                          "inside the media cap)")
+                        except BaseException:
+                            self.own.release(sid)
+                            raise
+                        return sid
+                return None
             sids = ingest.next_batch(led, size=1, exclude=exclude)
             if not sids:
                 return None
@@ -1125,15 +1162,19 @@ class ContinuousDriver:
         # updated_at and NOT from the current DISCOVERED stint: the 5-min
         # retry bounces DISCOVERED->DOWNLOADING->DISCOVERED forever, so both
         # of those reset on every attempt -- the same re-stamping trap that
-        # made the QUARANTINED age test an r-loop-4 blocker. The last
-        # INGESTED event is the only stamp a retry cannot move.
+        # made the QUARANTINED age test an r-loop-4 blocker. Anchor on the
+        # first DISCOVERED event AFTER a DOWNLOADING event: that is the
+        # first FAILURE. r-loop 5 anchored on the last INGESTED instead,
+        # which can NEVER exist for these rows (INGESTED is written only on
+        # a SUCCESSFUL download), so it silently degraded to first sight on
+        # Drive -- hours or days early (r-loop 6).
         disc_media = led.db.execute(
             "SELECT s.session_id, "
             "(SELECT MIN(e.ts) FROM events e "
             "  WHERE e.session_id=s.session_id AND e.to_state='DISCOVERED' "
-            "    AND e.ts >= COALESCE((SELECT MAX(e2.ts) FROM events e2 "
+            "    AND e.ts > (SELECT MIN(e2.ts) FROM events e2 "
             "        WHERE e2.session_id=s.session_id "
-            "          AND e2.to_state='INGESTED'), '')) first_disc "
+            "          AND e2.to_state='DOWNLOADING')) first_disc "
             "FROM sessions s WHERE s.state='DISCOVERED'").fetchall()
         for r in disc_media:
             if not (r["first_disc"] and r["first_disc"] < cut):
@@ -1273,6 +1314,30 @@ class ContinuousDriver:
             1 for r in led.by_state("QUARANTINED")
             if (self.cfg.work / r["session_id"]).exists()
             or (self.cfg.work / f"{r['session_id']}-analysis").exists())
+        # DISCOVERED counts toward the cap too since r-loop 5, but it is
+        # not in LOCAL_STATES — so when held work dirs filled the cap the
+        # tally was all zeros, max() returned the first LOCAL_STATES key,
+        # and the alert said "40/40 ... (mostly DOWNLOADING: 0)" while
+        # `pipeline status` showed DOWNLOADING 0. That is exactly the
+        # "internally contradictory, pointing at the wrong cause" defect
+        # the r-loop-4 note above says this tally exists to prevent,
+        # reintroduced by r-loop 5 (r-loop 6). sum(tally) must equal n.
+        disc = {r["session_id"] for r in led.by_state("DISCOVERED")}
+        held_disc = set()
+        if disc and self.cfg.work.exists():
+            for p_ in self.cfg.work.iterdir():
+                if not p_.is_dir():
+                    continue
+                sid_ = p_.name[:-len("-analysis")] \
+                    if p_.name.endswith("-analysis") else p_.name
+                if sid_ not in disc:
+                    continue
+                try:
+                    if any(p_.iterdir()):
+                        held_disc.add(sid_)
+                except OSError:
+                    pass
+        tally["DISCOVERED(media)"] = len(held_disc)
         dom, dom_n = max(tally.items(), key=lambda kv: kv[1])
         extra = (f" — {held} of them HOLD_VLM, which never exits on its own "
                  f"(check the VLM key/quota)") if held * 2 >= n else ""

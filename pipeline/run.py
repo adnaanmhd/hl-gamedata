@@ -1509,11 +1509,27 @@ def _sweep_terminal_work(cfg: C.Config, ledger: Ledger) -> None:
                 # makes DOWNLOADING kill-resume safe). Age from the last
                 # completed download -- updated_at and the DISCOVERED stint
                 # are both re-stamped by the 5-min retry.
+                # age from the first FAILURE, not first sight on Drive
+                # (r-loop 6). The INGESTED anchor r-loop 5 used can never
+                # exist for these rows: INGESTED is written only at the END
+                # of a SUCCESSFUL download, and a row only returns to
+                # DISCOVERED holding media from a FAILED one -- so COALESCE
+                # yielded '' and MIN() returned the ingest.scan insert, i.e.
+                # the moment the folder was first seen on Drive. With intake
+                # cap-throttled and one serial download worker, a session
+                # routinely waits >12h between discovery and its first
+                # attempt, so the documented grace was effectively ZERO: the
+                # next hourly sweep deleted a partial multi-part transfer
+                # that rclone --checksum would otherwise have resumed.
+                # Anchoring on the first DISCOVERED event AFTER a DOWNLOADING
+                # event is exact, and MIN (not MAX) means the 5-min retry
+                # bounce cannot reset it. No DOWNLOADING event -> no age ->
+                # never reclaimed, which is right: nothing was downloaded.
                 first_disc = ledger.db.execute(
                     "SELECT MIN(ts) t FROM events WHERE session_id=? "
-                    "AND to_state='DISCOVERED' AND ts >= COALESCE("
-                    "(SELECT MAX(ts) FROM events WHERE session_id=? "
-                    " AND to_state='INGESTED'), '')",
+                    "AND to_state='DISCOVERED' AND ts > (SELECT MIN(ts) "
+                    "FROM events WHERE session_id=? AND "
+                    "to_state='DOWNLOADING')",
                     (sid, sid)).fetchone()
                 t = first_disc["t"] if first_disc else None
                 if t and _iso_age_h(t) >= C.CONT_DISCOVERED_RECLAIM_H:

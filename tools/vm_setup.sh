@@ -27,6 +27,22 @@ set -euo pipefail
 # false diagnosis (r-loop 5 blocker). Derived from our own location, not
 # hardcoded, so a repo checked out elsewhere still works.
 cd "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# ...and it must be the tree the UNITS actually run. UNITS= below and every
+# .in template hardcode $HOME/hl-gamedata (WorkingDirectory=__HOME__/...),
+# so arming from any other checkout validates one tree and arms a DIFFERENT
+# one: FLIP_RUNBOOK step 5 parks the operator in ~/hl-gamedata-continuous-test
+# and steps 6c/6e give the command as a RELATIVE path, so the interlock read
+# the side checkout's CONT_DAILY_REPORTS=False and armed a driver running the
+# live tree where it is still True — the one precondition whose breach is not
+# automatically recoverable (r-loop 6).
+LIVE_TREE="$(cd "$HOME/hl-gamedata" 2>/dev/null && pwd || echo "")"
+if [ "$PWD" != "$LIVE_TREE" ]; then
+  echo "FATAL: running from $PWD, but the systemd units hardcode" >&2
+  echo "  $HOME/hl-gamedata as WorkingDirectory — arming from here would" >&2
+  echo "  validate this checkout and arm a different one. rsync your" >&2
+  echo "  changes to ~/hl-gamedata and re-run from there." >&2
+  exit 1
+fi
 
 BUCKET="${HL_BACKUP_BUCKET:-hl-gamedata-pipeline-backups}"
 ME="$(id -un)"
@@ -123,12 +139,16 @@ sys.path.insert(0, ".")
 try:
     from pipeline import config, run
     cfg = config.load()
+    # acquire/release must be INSIDE the guard too (r-loop 6): a full
+    # disk or a permission problem after the step-6b resize makes
+    # mkdir(run.lock) raise, and that used to exit 1 -- reported as "a
+    # live pid holds it" with the true cause explicitly ruled out.
+    held = not run.acquire_lock(cfg)
+    if not held:
+        run.release_lock(cfg)
 except Exception:
     sys.exit(2)                  # probe broken -- NOT "lock is held"
-if run.acquire_lock(cfg):        # pid-reclaims a stale lock
-    run.release_lock(cfg)
-    sys.exit(0)
-sys.exit(1)
+sys.exit(1 if held else 0)
 PYEOF
   }
   for _ in $(seq 1 60); do
@@ -140,9 +160,13 @@ PYEOF
   lock_rc=0
   lock_free || lock_rc=$?
   if [ "$lock_rc" -ne 0 ]; then
-    if [ "$lock_rc" -eq 2 ]; then
-      echo "FATAL: could not run the lock-liveness probe at all (import" >&2
-      echo "  failed from $(pwd)). This is NOT a held lock -- the check" >&2
+    # ONLY rc 1 means "genuinely held". Everything else -- 2 from the
+    # guard, 126/127 from a missing or non-executable uv, whatever uv
+    # itself returns -- is a broken probe, about which nothing can be
+    # concluded (r-loop 6).
+    if [ "$lock_rc" -ne 1 ]; then
+      echo "FATAL: could not run the lock-liveness probe at all (rc" >&2
+      echo "  $lock_rc from $(pwd)). This is NOT a held lock -- the check" >&2
       echo "  itself is broken, so nothing can be concluded about the" >&2
       echo "  lock. The batch timer is already disabled and its service" >&2
       echo "  stopped, so NO driver is armed: re-arm the previous driver" >&2

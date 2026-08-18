@@ -50,16 +50,35 @@ def _seed_disc(ledger, sid, *, state="DISCOVERED"):
                           md5_video="a" * 32, bytes_=10, state=state)
 
 
-def _age_discovered_event(ledger, sid, hours):
-    """Backdate the DISCOVERED event so the reclaim/stuck age is measured
-    from the audit, not from updated_at."""
+def _age_discovered_event(ledger, sid, hours, *, seen_days_before=3):
+    """Write a REALISTIC event history and backdate the first failure.
+
+    r-loop 6: the age must come from the first DISCOVERED event AFTER a
+    DOWNLOADING event — the first FAILURE — not from first sight on Drive.
+    So the history always includes the ingest.scan insert (much older, and
+    it must NOT set the clock), then the first download attempt, then the
+    failure, then a retry bounce that must not reset the clock either.
+    """
     from datetime import datetime, timedelta, timezone
-    ts = (datetime.now(timezone.utc)
-          - timedelta(hours=hours)).isoformat(timespec="seconds")
+    now = datetime.now(timezone.utc)
+    fail = now - timedelta(hours=hours)
+    seen = fail - timedelta(days=seen_days_before)
+    iso = lambda d: d.isoformat(timespec="seconds")
     ledger.db.execute("DELETE FROM events WHERE session_id=?", (sid,))
-    ledger.db.execute(
+    rows = [
+        (sid, None, "DISCOVERED", iso(seen), "scanned"),
+        (sid, "DISCOVERED", "DOWNLOADING", iso(fail - timedelta(minutes=5)),
+         "claimed by D"),
+        (sid, "DOWNLOADING", "DISCOVERED", iso(fail), "download failed"),
+        # a later retry bounce must not reset the clock
+        (sid, "DISCOVERED", "DOWNLOADING", iso(fail + timedelta(minutes=5)),
+         "claimed by D"),
+        (sid, "DOWNLOADING", "DISCOVERED", iso(fail + timedelta(minutes=10)),
+         "download failed"),
+    ]
+    ledger.db.executemany(
         "INSERT INTO events(session_id, from_state, to_state, ts, detail) "
-        "VALUES(?,?,?,?,?)", (sid, "DOWNLOADING", "DISCOVERED", ts, "fail"))
+        "VALUES(?,?,?,?,?)", rows)
     ledger.db.commit()
 
 
@@ -75,12 +94,22 @@ def test_local_count_sees_media_held_by_a_DISCOVERED_row(cfg, ledger):
     _seed_disc(ledger, "s-nomedia")
     assert drv._local_count(ledger) == 0        # no work dir -> not counted
 
+    # an EMPTY dir is not media (r-loop 6): ingest.download creates
+    # work/<sid> BEFORE the first rclone attempt, so a transfer of zero
+    # bytes still leaves a dir, and scoring it let one transient outage
+    # fill the whole cap with an empty disk
+    _seed_disc(ledger, "s-empty")
+    (cfg.work / "s-empty").mkdir(parents=True)
+    assert drv._local_count(ledger) == 0
+
     _seed_disc(ledger, "s-media")
     (cfg.work / "s-media").mkdir(parents=True)
+    (cfg.work / "s-media" / "video.mp4").write_bytes(b"x")
     assert drv._local_count(ledger) == 1
 
     # sid and sid-analysis are ONE session, not two
     (cfg.work / "s-media-analysis").mkdir(parents=True)
+    (cfg.work / "s-media-analysis" / "report.json").write_bytes(b"{}")
     assert drv._local_count(ledger) == 1
 
 
@@ -368,25 +397,49 @@ def test_keys_missing_still_raised_without_a_gate():
     assert "INP_KEYS_MISSING" in [r["code"] for r in res.reasons]
 
 
-def test_gate_destroyed_reads_the_fixlog_and_tolerates_damage(tmp_path):
-    """The fixlog is the atomic evidence of record; a missing or corrupt
-    one must degrade to today's behaviour, never crash validation."""
+def test_gate_destroyed_reads_a_log_written_by_the_REAL_writer(tmp_path):
+    """r-loop 6 blocker: this test used to hand-build a FLAT list, but
+    fix._append_fixlog writes ONE record per apply_fixes call with the
+    per-fix entries NESTED under "fixes". The reader parsed the top level,
+    so it matched nothing, aux["gate_destroyed"] was ALWAYS empty in
+    production, and the whole r-loop-5 #11 carve-out was dead code — while
+    this test passed against a shape production never produces.
+
+    Go through the real writer, so reader and writer cannot diverge again.
+    """
+    fix._append_fixlog(tmp_path, [
+        {"fix": "FIX_KEY_HYGIENE", "params": {}, "ok": True, "note": {}},
+        {"fix": "FIX_GATE_WINDOW", "params": {}, "ok": True,
+         "note": {"gated_frames": 7,
+                  "destroyed": {"actions": ["interact"], "key_frames": 4}}},
+    ])
+    fix._append_fixlog(tmp_path, [
+        {"fix": "FIX_GATE_WINDOW", "params": {}, "ok": True,
+         "note": {"destroyed": {"actions": ["map"], "key_frames": 2}}},
+        {"fix": "FIX_GATE_WINDOW", "params": {}, "ok": False,
+         "note": {"destroyed": {"actions": ["ignored"], "key_frames": 9}}},
+    ])
+    assert validate._gate_destroyed(tmp_path) == {
+        "actions": ["interact", "map"], "key_frames": 6}
+
+
+def test_gate_destroyed_tolerates_a_missing_or_damaged_log(tmp_path):
+    """The fixlog is the evidence of record; a missing or corrupt one must
+    degrade to today's behaviour, never crash validation."""
     assert validate._gate_destroyed(tmp_path) == {"actions": [],
                                                   "key_frames": 0}
     (tmp_path / "fixlog.json").write_text("{not json")
     assert validate._gate_destroyed(tmp_path) == {"actions": [],
                                                   "key_frames": 0}
+    (tmp_path / "fixlog.json").write_text(json.dumps({"not": "a list"}))
+    assert validate._gate_destroyed(tmp_path) == {"actions": [],
+                                                  "key_frames": 0}
+    # a legacy/hand-written FLAT record must still be read
     (tmp_path / "fixlog.json").write_text(json.dumps([
-        {"fix": "FIX_KEY_HYGIENE", "ok": True, "note": {}},
-        {"fix": "FIX_GATE_WINDOW", "ok": False,
-         "note": {"destroyed": {"actions": ["ignored"], "key_frames": 9}}},
         {"fix": "FIX_GATE_WINDOW", "ok": True,
-         "note": {"destroyed": {"actions": ["interact"], "key_frames": 4}}},
-        {"fix": "FIX_GATE_WINDOW", "ok": True,
-         "note": {"destroyed": {"actions": ["map"], "key_frames": 2}}},
-    ]))
-    got = validate._gate_destroyed(tmp_path)
-    assert got == {"actions": ["interact", "map"], "key_frames": 6}, got
+         "note": {"destroyed": {"actions": ["flat"], "key_frames": 1}}}]))
+    assert validate._gate_destroyed(tmp_path) == {"actions": ["flat"],
+                                                  "key_frames": 1}
 
 
 # ------------------------------- the batch driver must honour the flag too
@@ -594,13 +647,41 @@ def test_archive_dossier_preserves_the_prior_generation(tmp_path, ledger):
     ledger.archive_dossier("never-seen", root)
 
 
-def test_heal_branch_archives_the_dossier(monkeypatch):
-    """Pin the call site itself: the heal must archive before it resets."""
-    import inspect
-    from pipeline import ingest
-    src = inspect.getsource(ingest.scan)
-    assert "archive_dossier" in src, \
-        "the QUARANTINED-path heal must archive the prior dossier"
+def test_heal_actually_archives_the_dossier(cfg, ledger):
+    """Behavioural, not a source grep (r-loop 6): the previous version
+    asserted "archive_dossier" appeared in ingest.scan's source, so a
+    wrong-argument regression at the call site would have shipped green.
+    Drive the real heal branch and check the evidence actually moved."""
+    from pipeline import ingest as ingestmod
+    from pipeline.tests.conftest import make_session_entries
+    sid = "2026-08-15T08-30-00Z_kamla_c_00000000000000bf"
+    ledger.insert_session(
+        session_id=sid, game="", operator_email="", player_email="",
+        drive_path=f"kamla/Op/badplayer/{sid}", drive_ctime="",
+        md5_video="", bytes_=0, state="QUARANTINED",
+        detail="player folder 'badplayer' is not an email")
+    ledger.set_reasons(sid, [
+        {"code": "INT_PATH", "blocking": True, "fixable": False,
+         "params": {}, "evidence": "player folder is not an email"}], 3)
+
+    # evidence from the FIRST upload's pass
+    dossier = cfg.dossiers / sid
+    dossier.mkdir(parents=True)
+    (dossier / "verdict.json").write_text('{"bin": 3, "generation": 1}')
+    (dossier / "fixlog.json").write_text('[{"ts": "t1", "fixes": []}]')
+
+    ingestmod.scan(cfg, ledger,
+                   entries=make_session_entries(sid=sid, player="ok@x.com"))
+
+    assert ledger.get(sid)["state"] == "DISCOVERED"      # healed
+    assert not (dossier / "verdict.json").exists(), \
+        "the prior generation must not stay in place to be overwritten"
+    hist = list((dossier / "history").iterdir())
+    assert len(hist) == 1
+    assert (hist[0] / "verdict.json").read_text() == \
+        '{"bin": 3, "generation": 1}'
+    assert (hist[0] / "fixlog.json").exists(), \
+        "fixlog must be archived too — fix._append_fixlog APPENDS"
 
 
 # ------------- a failed daily send must not regenerate the sheet every 20s
@@ -781,3 +862,55 @@ def test_action_frame_count_includes_the_window_end_frame(tmp_path,
     aux = _statics_aux(tmp_path, monkeypatch, label="loading", conf="high",
                        win=(3.0, 5.0), action_at=50)   # 5.0s at 10fps
     assert aux["extra_windows"][0]["action_frames"] == 1
+
+
+def test_capped_driver_can_still_resume_a_DISCOVERED_row_holding_media(
+        cfg, ledger, monkeypatch):
+    """r-loop 6 blocker: r-loop 5 taught _local_count to score DISCOVERED
+    rows holding media, but gave them no carve-out. _download_one returns
+    EVERY failure to DISCOVERED (never DOWNLOADING), so their only route
+    back is next_batch — which sits behind the cap return. The rows
+    holding the cap were exactly the rows that had to be re-picked to
+    release it, so one transient rclone outage across a full intake wave
+    stopped ALL intake until the 12h reclaim, with the disk empty and F7
+    never firing."""
+    monkeypatch.setattr(C, "CONT_MEDIA_CAP_SESSIONS", 2)
+    for n in range(2):
+        sid = f"s-held{n}"
+        _seed_disc(ledger, sid)
+        (cfg.work / sid).mkdir(parents=True)
+        (cfg.work / sid / "part001.zip").write_bytes(b"partial")
+    _seed_disc(ledger, "s-fresh")          # no media: must stay gated
+
+    drv = cont.ContinuousDriver(cfg, send_telegram=False)
+    assert drv._local_count(ledger) == 2   # cap is full
+
+    picked = drv._pick_download(ledger)
+    assert picked in ("s-held0", "s-held1"), \
+        f"a capped driver must still resume its own held media, got {picked}"
+    assert ledger.get(picked)["state"] == "DOWNLOADING"
+
+
+def test_reclaim_clock_starts_at_the_first_failure_not_first_sight(
+        cfg, ledger):
+    """r-loop 6: r-loop 5 anchored the DISCOVERED reclaim on the last
+    INGESTED event — which can NEVER exist for these rows, because
+    INGESTED is written only at the END of a SUCCESSFUL download and a row
+    only returns to DISCOVERED holding media from a FAILED one. COALESCE
+    yielded '' and MIN() returned the ingest.scan insert: first sight on
+    Drive. With intake cap-throttled and one serial download worker a
+    session routinely waits far longer than the 12h grace between
+    discovery and its first attempt, so the grace was effectively ZERO and
+    the next hourly sweep deleted a partial multi-part transfer that
+    rclone --checksum would have resumed."""
+    sid = "s-seen-long-ago"
+    _seed_disc(ledger, sid)
+    (cfg.work / sid).mkdir(parents=True)
+    (cfg.work / sid / "part001.zip").write_bytes(b"partial")
+    # first seen on Drive 5 days ago; first download failure only 1h ago
+    _age_discovered_event(ledger, sid, 1, seen_days_before=5)
+
+    runmod._sweep_terminal_work(cfg, ledger)
+    assert (cfg.work / sid).exists(), \
+        "a transfer that first FAILED an hour ago must not be reclaimed " \
+        "because the folder was first SEEN five days ago"

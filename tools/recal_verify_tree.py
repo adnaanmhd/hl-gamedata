@@ -130,6 +130,14 @@ def _locked_main(cfg) -> int:
     # was contradicting itself about the same path (r-loop 4).
     inflight = {}
     for r in stuck:
+        # Collect EVERY dir this session could legitimately be occupying,
+        # not just one. A re-delivery is PACKAGED again while its previous
+        # UPLOADED event still names the OLD path, so keying on the latest
+        # UPLOADED event alone protected the stale path and branded the
+        # LIVE one STALE — immediately before the runbook's last
+        # destructive act (r-loop 6). Both are safe to protect: the worst
+        # case is one extra dir left for a human to look at, against
+        # deleting a live delivery.
         ev = ledger.db.execute(
             "SELECT detail FROM events WHERE session_id=? AND "
             "to_state='UPLOADED' AND detail LIKE 'verified at %' "
@@ -137,8 +145,9 @@ def _locked_main(cfg) -> int:
         if ev is not None:
             inflight[ev["detail"][len("verified at "):].strip()] = (
                 r["session_id"], r["state"])
-            continue
-        # No UPLOADED event at all — which is EXACTLY the case the
+        # The CURRENT staging date, which is what an in-flight upload is
+        # actually writing to. Also the only source for a session
+        # interrupted during its FIRST upload — EXACTLY the case the
         # carve-out was written for (r-loop 5). deliver_session sets
         # PACKAGED and only writes the UPLOADED event AFTER
         # upload_and_verify returns, so a session interrupted during its
