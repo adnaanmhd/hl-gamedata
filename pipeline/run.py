@@ -1164,6 +1164,21 @@ def send_daily_report_if_due(cfg: C.Config, ledger: Ledger,
     now_ist = now_ist or datetime.now(C.IST)
     if now_ist.hour < C.DAILY_REPORT_HOUR_IST:
         return False
+    # a pending REGEN send parks the daily entirely (r-loop 12 #11): the
+    # regen resumes verbatim from its own durable record, so nothing
+    # else may count or stamp until it settles — the late-arrival guard
+    # otherwise counted the whole unstamped cohort into an ordinary
+    # sheet, sent + stamped it, and the regen re-run then re-sent the
+    # SAME hours on a SUPERSEDES sheet captioned authoritative: two
+    # payment documents for one cohort, zero loud lines. Same doctrine
+    # the reset tools already follow (F10).
+    regen_day = reports.pending_regen_send(cfg)
+    if regen_day:
+        print(f"[daily] REFUSING: a regen send for {regen_day} is "
+              f"pending (.regen-v2-counted.json without .regen-v2-done)"
+              f" — finish `recal_regen_sheets --send` or reconcile by "
+              f"hand first", file=sys.stderr)
+        return False
     day = now_ist.strftime("%Y-%m-%d")
     # DAY-AGNOSTIC resume scan (r-loop 9 #6/#21), before today's marker
     # check: the record used to be looked up under TODAY's key only, so an

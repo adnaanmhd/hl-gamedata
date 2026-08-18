@@ -322,6 +322,57 @@ def test_inf_timestamp_cell_does_not_crash_analyze(tmp_path):
     assert not a.error, a.error
 
 
+# ------- r12 #11: the DAILY send honors the regen interlock too
+
+def test_daily_send_refuses_while_a_regen_send_is_pending(
+        cfg, ledger, monkeypatch, capsys):
+    """F10 taught only the reset tools about the regen's resumable
+    record; the daily send still counted the whole unstamped cohort
+    through the late-arrival guard, sent + stamped it, and the regen
+    re-run then re-sent the SAME hours on a SUPERSEDES sheet — two
+    authoritative payment documents, zero loud lines."""
+    from pipeline.tests.test_r_loop8 import _daily_seed
+    docs: list[bytes] = []
+    send, sid, csv_path, day = _daily_seed(cfg, ledger, monkeypatch,
+                                           docs=docs)
+    rd = cfg.reports_dir / "2026-08-16"
+    rd.mkdir(parents=True)
+    (rd / ".regen-v2-counted.json").write_text(
+        '{"counted": [], "accepted": []}')
+    assert runmod.send_daily_report_if_due(cfg, ledger, send) is False
+    assert "REFUSING" in capsys.readouterr().err
+    assert not csv_path.exists(), \
+        "no sheet may be generated under the regen interlock"
+    assert ledger.get(sid)["uploaded_reported_at"] is None
+    # the regen completes: the daily proceeds normally
+    (rd / ".regen-v2-done").touch()
+    assert runmod.send_daily_report_if_due(cfg, ledger, send) is True
+    assert ledger.get(sid)["uploaded_reported_at"]
+
+
+# ------- r12 #13: pending_daily_send fails CLOSED when it cannot look
+
+def test_pending_daily_send_fails_closed_when_it_cannot_look(cfg):
+    """'Could not check' must never read as 'checked clean' in a
+    teardown gate: a transient EMFILE/permissions failure at exactly
+    reset-tool entry silently disabled the interlock."""
+    import shutil
+
+    from pipeline import reports
+    cfg.reports_dir.mkdir(parents=True, exist_ok=True)
+    cfg.reports_dir.chmod(0o000)
+    try:
+        assert reports.pending_daily_send(cfg), \
+            "an unreadable reports dir must read as PENDING, not clean"
+        assert reports.pending_regen_send(cfg)
+    finally:
+        cfg.reports_dir.chmod(0o755)
+    # a MISSING reports dir is genuinely nothing-pending (fresh home)
+    shutil.rmtree(cfg.reports_dir, ignore_errors=True)
+    assert reports.pending_daily_send(cfg) is None
+    assert reports.pending_regen_send(cfg) is None
+
+
 # ------- r12 #4: the DISCOVERED-media reclaim grace re-arms per reclaim
 
 def test_reclaim_grace_rearms_after_a_sweep(cfg, ledger):

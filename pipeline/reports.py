@@ -457,12 +457,13 @@ def pending_daily_send(cfg) -> str | None:
     tools REFUSE to run while either exists: tearing rows down under a
     pending record makes the later resume send a STALE sheet crediting
     deleted rows, and the re-run's deterministic same-id children then
-    get counted a second time."""
-    try:
-        day_dirs = sorted(p for p in Path(cfg.reports_dir).iterdir()
-                          if p.is_dir())
-    except OSError:
-        return None
+    get counted a second time. Fails CLOSED (r-loop 12 #13): 'could not
+    check' must never read as 'checked clean' in a teardown gate, so an
+    unreadable reports dir returns the truthy UNKNOWN sentinel and the
+    callers refuse."""
+    day_dirs = _report_day_dirs(cfg)
+    if day_dirs is None:
+        return _UNREADABLE_SENTINEL
     for d in day_dirs:
         rec = d / ".daily-counted.json"
         if rec.is_file():
@@ -473,6 +474,44 @@ def pending_daily_send(cfg) -> str | None:
                     return d.name
             except (OSError, json.JSONDecodeError):
                 return d.name
+        if (d / ".regen-v2-counted.json").is_file() and \
+                not (d / ".regen-v2-done").exists():
+            return d.name
+    return None
+
+
+_UNREADABLE_SENTINEL = "UNKNOWN (reports dir unreadable — refusing to " \
+                       "conclude nothing is pending)"
+
+
+def _report_day_dirs(cfg) -> list | None:
+    """The reports day dirs, [] for a not-yet-created reports dir, or
+    None when the listing FAILED (r-loop 12 #13: EMFILE/EIO/permissions
+    — the caller must fail closed, never read 'could not look' as
+    'nothing pending')."""
+    try:
+        return sorted(p for p in Path(cfg.reports_dir).iterdir()
+                      if p.is_dir())
+    except FileNotFoundError:
+        return []
+    except OSError:
+        return None
+
+
+def pending_regen_send(cfg) -> str | None:
+    """The day of any recal_regen_sheets --send whose durable record
+    (.regen-v2-counted.json) lacks its .regen-v2-done marker, else None.
+    The DAILY send refuses while one exists (r-loop 12 #11): the regen
+    resumes verbatim from its record, so nothing else may count or stamp
+    until it settles — the late-arrival guard otherwise counted the
+    whole unstamped cohort into an ordinary sheet and the regen re-run
+    re-sent the same hours on a SUPERSEDES sheet: two authoritative
+    payment documents, zero loud lines. Fails CLOSED like
+    pending_daily_send."""
+    day_dirs = _report_day_dirs(cfg)
+    if day_dirs is None:
+        return _UNREADABLE_SENTINEL
+    for d in day_dirs:
         if (d / ".regen-v2-counted.json").is_file() and \
                 not (d / ".regen-v2-done").exists():
             return d.name
