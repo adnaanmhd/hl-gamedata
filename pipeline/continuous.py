@@ -831,6 +831,12 @@ class ContinuousDriver:
             self.alerts.alert(f"validation crashed on {sid}: "
                               f"{res['error']}")
             return "QUARANTINED"
+        # duration_raw_s backfill (r-loop 11 #6) — mirror of the batch
+        # driver: an unprobed root is uncountable and silently unpayable
+        # once its window passes; the validate probe is the truth source.
+        pd = res.get("probed_duration_s")
+        if pd and led.get(sid)["duration_raw_s"] is None:
+            led.update(sid, duration_raw_s=float(pd))
         led.set_reasons(sid, res["reasons"], res["bin"])
         if res["hold_vlm"]:
             led.set_state(sid, "HOLD_VLM",

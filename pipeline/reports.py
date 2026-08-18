@@ -606,7 +606,30 @@ def build_sheet_rows(ledger: Ledger, day_ist: datetime,
                         and _tree_has_uncounted_accepted(
                             root, children,
                             paid_mem.get(root["session_id"])))
-        if not in_window and not late and not accepted_due:
+        # THIRD RE-ENTRY ARM (r-loop 11 #6): a root whose duration_raw_s
+        # never landed (the download-time ffprobe is single-shot and
+        # swallowed) is not countable, so it can never be uploaded-
+        # stamped — once its window passed, `late` and `accepted_due`
+        # were BOTH unreachable and its DELIVERED/REJECTED nodes' hours/
+        # labels reached no sheet, silently, forever. Pay the accepted
+        # side exactly like accepted_due; uploaded hours stay 0 — never
+        # fabricate them from a NULL probe. The drivers' validate-time
+        # backfill closes this for every root that still validates; this
+        # arm is the residue for roots that never re-validate.
+        uncountable_due = (not in_window and up < hi_dt and not sealed
+                           and not root["uploaded_reported_at"]
+                           and not (r_countable(root)
+                                    or root["state"] == "REJECTED")
+                           and _tree_has_uncounted_accepted(
+                               root, children,
+                               paid_mem.get(root["session_id"])))
+        if uncountable_due:
+            print(f"[sheet] UNCOUNTABLE root {root['session_id']} "
+                  f"(duration_raw_s missing — swallowed probe): counting "
+                  f"its settled tree nodes' accepted hours/labels; "
+                  f"uploaded hours stay 0", file=sys.stderr)
+        if not in_window and not late and not accepted_due \
+                and not uncountable_due:
             continue
         if late:
             # POST-SPLIT shape (r-loop 8; kickoff §4d): a late root is

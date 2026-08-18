@@ -159,6 +159,8 @@ def _validate_worker(args: dict) -> dict:
                 "hold_vlm": res.hold_vlm, "reasons": res.reasons,
                 "advisories": res.advisories,
                 "engine_verdict": res.engine_verdict,
+                "probed_duration_s":
+                    (res.metrics or {}).get("probed_duration_s"),
                 "vlm_rung": vlmmod._rung,
                 "vlm_fallback": any(
                     m.get("rung", 0) > 0
@@ -332,6 +334,13 @@ def _validate_phase(cfg, ledger, sids, alerts, *, workers: int) -> None:
             _alert(cfg, f"validation crashed on {sid}: {r['error']}", alerts)
             continue
         _VLM_RUN_STATE["fallback"][sid] = bool(r.get("vlm_fallback"))
+        # duration_raw_s backfill (r-loop 11 #6): the download-time
+        # ffprobe is single-shot and swallowed — a NULL root is never
+        # countable, so once its window passed, `late` and `accepted_due`
+        # were both unreachable and its tree's hours reached no sheet.
+        pd = r.get("probed_duration_s")
+        if pd and ledger.get(sid)["duration_raw_s"] is None:
+            ledger.update(sid, duration_raw_s=float(pd))
         ledger.set_reasons(sid, r["reasons"], r["bin"])
         if r["hold_vlm"]:
             ledger.set_state(sid, "HOLD_VLM",

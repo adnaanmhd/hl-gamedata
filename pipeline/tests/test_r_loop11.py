@@ -374,3 +374,86 @@ def test_corrupt_record_still_wedges(cfg, ledger, monkeypatch):
     assert runmod.send_daily_report_if_due(
         cfg, ledger, _send_time(hour=15)) is False
     assert (day_dir / ".wedged").exists()
+
+
+# ------- r11 #6: duration_raw_s=NULL roots stay payable
+
+def test_null_duration_root_tree_still_pays_accepted(tmp_path, capsys):
+    """A swallowed download-time ffprobe left the root uncountable —
+    never uploaded-stamped — so after its cohort window passed, `late`
+    and `accepted_due` were both unreachable and its DELIVERED child's
+    hours reached no sheet, silently, forever."""
+    from pipeline.ledger import Ledger
+    from pipeline.tests.test_payment_split_r6 import W2, W3, _put, _row, \
+        _sheet
+    led = Ledger(tmp_path / "l.db")
+    root = "2026-08-14T09-00-00Z_kamla_c_0000000000000nul"
+    _put(led, root, state="DISCOVERED", raw=None, player="null@x.com")
+    led.set_state(root, "SPLIT")
+    _put(led, f"{root}-p1", state="DELIVERED", parent=root,
+         delivered=1800.0, player="null@x.com")
+    # W2 opens AFTER the root's 08-14 cohort window — the post-window gap
+    s = _row(_sheet(led, W2), "null@x.com")
+    assert s is not None and s["kamla_accepted_hrs"] == 0.5, s
+    assert s["kamla_hrs_uploaded"] == 0.0, \
+        "uploaded hours are never fabricated from a NULL probe"
+    assert "UNCOUNTABLE" in capsys.readouterr().err
+    # exactly once: the child is stamped, W3 has nothing left to count
+    assert _row(_sheet(led, W3), "null@x.com") is None
+    led.close()
+
+
+def test_validate_backfills_null_duration_continuous(cfg, ledger,
+                                                     monkeypatch):
+    """The producing half: the validate-time probe (the D2 truth source)
+    restores countability for every root that still validates."""
+    from pipeline import continuous as cont
+    from pipeline.tests.test_r_loop9 import _ins
+    sid = "s-nulldur"
+    _ins(ledger, sid)
+    assert ledger.get(sid)["duration_raw_s"] is None
+    (cfg.work / sid).mkdir(parents=True)
+    drv = cont.ContinuousDriver(cfg, send_telegram=False)
+    monkeypatch.setattr(cont, "_POOL_DISABLED", True)
+    monkeypatch.setattr(
+        cont, "_WORKER_FN",
+        lambda job: {"sid": job["sid"], "reasons": [], "bin": 1,
+                     "hold_vlm": False, "vlm_rung": 0,
+                     "probed_duration_s": 123.0})
+    assert drv._validate_one(ledger, sid, ledger.get(sid)) == "READY"
+    assert ledger.get(sid)["duration_raw_s"] == 123.0
+
+
+def test_validate_backfill_never_overwrites_a_probed_duration(
+        cfg, ledger, monkeypatch):
+    """Control: the ingest-time probe stays authoritative when present."""
+    from pipeline import continuous as cont
+    from pipeline.tests.test_r_loop9 import _ins
+    sid = "s-hasdur"
+    _ins(ledger, sid)
+    ledger.update(sid, duration_raw_s=555.0)
+    (cfg.work / sid).mkdir(parents=True)
+    drv = cont.ContinuousDriver(cfg, send_telegram=False)
+    monkeypatch.setattr(cont, "_POOL_DISABLED", True)
+    monkeypatch.setattr(
+        cont, "_WORKER_FN",
+        lambda job: {"sid": job["sid"], "reasons": [], "bin": 1,
+                     "hold_vlm": False, "vlm_rung": 0,
+                     "probed_duration_s": 123.0})
+    drv._validate_one(ledger, sid, ledger.get(sid))
+    assert ledger.get(sid)["duration_raw_s"] == 555.0
+
+
+def test_validate_backfills_null_duration_batch(cfg, ledger, monkeypatch):
+    """The batch driver's mirror of the backfill."""
+    from pipeline.tests.test_r_loop9 import _ins
+    sid = "s-nulldur-b"
+    _ins(ledger, sid)
+    (cfg.work / sid).mkdir(parents=True)
+    monkeypatch.setattr(
+        runmod, "_validate_worker",
+        lambda job: {"sid": job["sid"], "reasons": [], "bin": 1,
+                     "hold_vlm": False, "vlm_rung": 0,
+                     "probed_duration_s": 99.0})
+    runmod._validate_phase(cfg, ledger, [sid], [], workers=1)
+    assert ledger.get(sid)["duration_raw_s"] == 99.0

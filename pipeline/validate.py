@@ -713,6 +713,11 @@ def _metrics(rep: dict, aux: dict) -> dict:
     inv = rep.get("inventory", {}) or {}
     return {
         "duration_s": rep.get("duration_s"),
+        # the validate-time ffprobe truth (D2): the drivers backfill a
+        # NULL ledger duration_raw_s from it — the download-time probe is
+        # single-shot and swallowed, and an unprobed root is uncountable
+        # and silently unpayable once its window passes (r-loop 11 #6)
+        "probed_duration_s": aux.get("probed_duration_s"),
         "frames": rep.get("frames"),
         "fps": rep.get("fps"),
         "qa_status": rep.get("qa_status"),
