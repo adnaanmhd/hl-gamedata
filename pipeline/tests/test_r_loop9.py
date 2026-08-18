@@ -178,6 +178,9 @@ def test_resume_skips_superseded_sid_and_new_bytes_count_once(
     assert csv_path.read_bytes() == first
     assert ledger.get(sid)["uploaded_reported_at"] is None, \
         "a superseded sid must NOT be re-stamped from the stale record"
+    assert ledger.get(sid)["accepted_reported_at"] is None, \
+        "the ACCEPTED-side skip too (r10 #13: it was unpinned — the " \
+        "uploaded column masked it)"
 
     # the new bytes re-deliver; their hours reach the D+1 sheet once and
     # the D+2 sheet not at all
@@ -188,6 +191,11 @@ def test_resume_skips_superseded_sid_and_new_bytes_count_once(
     assert runmod.send_daily_report_if_due(
         cfg, ledger, send + timedelta(days=1)) is True
     assert b"p@x.com" in docs[-1], "the new upload's hours must be counted"
+    # column-precise (r10 #13): the accepted hours themselves must land —
+    # a substring test was satisfied by the uploaded column alone
+    rows = list(csv.DictReader(docs[-1].decode().splitlines()))
+    mine = [r for r in rows if r.get("player_email") == "p@x.com"]
+    assert mine and float(mine[0]["kamla_accepted_hrs"]) == 1.0, mine
     assert runmod.send_daily_report_if_due(
         cfg, ledger, send + timedelta(days=2)) is True
     assert b"p@x.com" not in docs[-1], "and only once"

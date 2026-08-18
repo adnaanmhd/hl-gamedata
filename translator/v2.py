@@ -346,7 +346,18 @@ def translate_bundle_v2(bundle_dir: Path, out_root: Path, *,
     sync_report: dict = {"measured": False, "applied_shift_ms": 0.0}
     shift_us = 0
     if lag_correct and sync.available() and stats.has_mouse_motion:
-        mdx, mdy = sync.motion_track(out_dir / "video.mp4")
+        try:
+            mdx, mdy = sync.motion_track(out_dir / "video.mp4")
+        except Exception as e:
+            # opencv open/decode failure: skip lag correction with a
+            # trail instead of crashing the whole translate (r-loop 10
+            # #10); the sync qa check degrades the same way
+            warnings.append(f"lag correction skipped (video not decodable "
+                            f"by opencv: {type(e).__name__})")
+            mdx = None
+    else:
+        mdx = None
+    if mdx is not None:
         conv_meta = {"input_mouse_convention": MOUSE_CONVENTION}
 
         def _measure(rs):
@@ -839,8 +850,24 @@ def check_session_v2(session_dir: Path, raw_bundle: Path | None = None) -> V2Res
 
     # controls-to-video sync (client's action_video_grounding, same gates)
     shift_us = _applied_shift_us(session_dir)
+    mdx = mdy = None
     if sync.available():
-        mdx, mdy = sync.motion_track(session_dir / "video.mp4")
+        try:
+            mdx, mdy = sync.motion_track(session_dir / "video.mp4")
+        except Exception as e:
+            # opencv cannot open/decode what ffprobe could (codec gaps,
+            # truncated moov): un-guarded, the ValueError escaped
+            # check_session_v2 -> analyze -> validate as kind='crash' ->
+            # terminal QUARANTINE instead of a typed verdict — the same
+            # crash class the _num_cell sanitize below closes for the
+            # input track (r-loop 10 #10). Degrade like the sibling
+            # FrameGrabber.opened()/classify_video guards.
+            r.warn(f"controls-to-video sync not measured (video not "
+                   f"decodable by opencv: {type(e).__name__})")
+    else:
+        r.warn("controls-to-video sync not measured (numpy/opencv "
+               "unavailable)")
+    if mdx is not None:
         # SANITIZE first: a non-numeric dx/dy cell is already FAILed above
         # as "not float-formatted" (bad_float), but the raw cells were then
         # handed to sync.input_track_from_rows, whose bare float() raised
@@ -862,8 +889,6 @@ def check_session_v2(session_dir: Path, raw_bundle: Path | None = None) -> V2Res
             r.warn(f"controls-to-video sync: {msg}{note}")
         else:
             r.issues.append(f"OK: controls-to-video sync — {msg}{note}")
-    else:
-        r.warn("controls-to-video sync not measured (numpy/opencv unavailable)")
 
     # independent event-binning recomputation (anti-off-by-one proof)
     if raw_bundle is not None:

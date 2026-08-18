@@ -778,11 +778,24 @@ class ContinuousDriver:
                 # before. The marker event is VALIDATING->VALIDATING so
                 # the stint-based stuck list keeps aging the row (the
                 # anchor only moves on events OUTSIDE the retry set).
-                marker = "validation worker died (host-suspect)"
+                # The count is scoped to EVIDENCE (r-loop 10 #3/#6), not
+                # the sid's lifetime: (a) the marker embeds the current
+                # md5, so superseded/healed NEW bytes start a fresh count
+                # (the old bytes' death says nothing about them); (b) only
+                # markers since the last successful worker RETURN count —
+                # a worker that produced any verdict (HOLD_VLM included)
+                # proved these bytes decode, so a later SIGKILL is a new
+                # host episode, not strike two. Back-to-back deaths with
+                # nothing in between still terminate on the second.
+                marker = (f"validation worker died (host-suspect) "
+                          f"md5={row['md5_video'] or ''}")
                 prior = led.db.execute(
                     "SELECT COUNT(*) c FROM events WHERE session_id=? "
-                    "AND to_state='VALIDATING' AND detail=?",
-                    (sid, marker)).fetchone()["c"]
+                    "AND to_state='VALIDATING' AND detail=? AND ts > "
+                    "COALESCE((SELECT MAX(ts) FROM events WHERE "
+                    "session_id=? AND to_state IN "
+                    "('HOLD_VLM','READY','FIX_QUEUED','REJECTED')), '')",
+                    (sid, marker, sid)).fetchone()["c"]
                 if prior == 0:
                     led.set_state(sid, "VALIDATING", marker)
                     self.cool.set(sid, C.CONT_RUNNER_CRASH_RETRY_MIN * 60)

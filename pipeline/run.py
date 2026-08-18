@@ -461,9 +461,13 @@ def _adopted_segments(ledger, kid_ids: list[str]) -> list[dict]:
     segs = []
     for kid in kid_ids:
         t0 = t1 = None
+        # NEWEST insert event: events outlive refix child-row deletion and
+        # cutter ids are deterministic, so a re-run that cut differently
+        # re-creates the same id — the gen-1 event must not supply stale
+        # bounds for the live row (r-loop 10 #5)
         r = ledger.db.execute(
             "SELECT detail FROM events WHERE session_id=? AND "
-            "detail LIKE 'split segment %' ORDER BY ts LIMIT 1",
+            "detail LIKE 'split segment %' ORDER BY ts DESC LIMIT 1",
             (kid,)).fetchone()
         if r:
             m = _re.match(r"^split segment ([0-9.]+)-([0-9.]+)s$",
@@ -926,6 +930,28 @@ def _mark_doc_sent(record: Path) -> None:
     os.replace(tmp, record)
 
 
+def _wedge_day(cfg: C.Config, day: str, why: str) -> None:
+    """A PERMANENTLY-refusing resume (unreadable record, missing CSV,
+    deleted counted row) used to return False on every future tick — and
+    since the day-agnostic scan resumes the oldest pending day first, one
+    bad day silently shut down EVERY later day's report and payment sheet
+    (r-loop 10 #2). Mark it wedged so the scan skips it loudly; a human
+    reconciles and removes .wedged. Transient failures (Telegram outages)
+    never wedge — they retry next tick."""
+    try:
+        (cfg.reports_dir / day / ".wedged").write_text(why)
+    except OSError as e:
+        print(f"[daily] could not write .wedged for {day}: {e}",
+              file=sys.stderr)
+    try:
+        telegram.send_message(
+            cfg, f"⚠️ daily send for {day} is WEDGED and needs a human: "
+                 f"{why} — later days proceed normally; remove "
+                 f"reports/{day}/.wedged after reconciling")
+    except telegram.TelegramError as e:
+        print(f"[daily-wedge-alert-undelivered] {e}", file=sys.stderr)
+
+
 def _resume_daily_send(cfg: C.Config, ledger: Ledger, now_ist: datetime,
                        day: str, record: Path, marker: Path) -> bool:
     """A `.daily-counted.json` without a `.sent` marker means a prior send
@@ -947,18 +973,14 @@ def _resume_daily_send(cfg: C.Config, ledger: Ledger, now_ist: datetime,
     except (OSError, json.JSONDecodeError, KeyError, TypeError):
         print(f"[daily] resume record unreadable — REFUSING to regenerate "
               f"post-stamp; reconcile by hand ({record})", file=sys.stderr)
+        _wedge_day(cfg, day, "resume record unreadable")
         return False
     csv_path = cfg.reports_dir / day / f"payment-{day}.csv"
     if not csv_path.exists():
         # the record is written AFTER the CSV, so this is unreachable
         # except by external deletion — alert, never regenerate
-        try:
-            telegram.send_message(
-                cfg, f"⚠️ daily resume: {csv_path} is missing while its "
-                     f"counted record exists — the sheet cannot be "
-                     f"re-sent; reconcile by hand")
-        except telegram.TelegramError as e:
-            print(f"[daily-resume-alert-undelivered] {e}", file=sys.stderr)
+        _wedge_day(cfg, day, f"{csv_path.name} missing while its counted "
+                             f"record exists — the sheet cannot be re-sent")
         return False
     if marker.exists():
         # everything but the document landed (kill between marker and the
@@ -982,6 +1004,8 @@ def _resume_daily_send(cfg: C.Config, ledger: Ledger, now_ist: datetime,
             print(f"[daily] resume: counted row {sid} no longer exists — "
                   f"REFUSING; reconcile by hand ({record})",
                   file=sys.stderr)
+            _wedge_day(cfg, day, f"counted row {sid} no longer exists "
+                                 f"(a recal tool ran under the record)")
             return False
         rows[sid] = r
 
@@ -1073,6 +1097,13 @@ def send_daily_report_if_due(cfg: C.Config, ledger: Ledger,
     for d_dir in day_dirs:
         recp = d_dir / ".daily-counted.json"
         if not recp.is_file():
+            continue
+        if (d_dir / ".wedged").exists():
+            # permanently-refusing day, already alerted (r-loop 10 #2):
+            # skip LOUDLY so later days and today still get their sheets
+            print(f"[daily] WEDGED day {d_dir.name} skipped — reconcile "
+                  f"by hand, then rm reports/{d_dir.name}/.wedged",
+                  file=sys.stderr)
             continue
         sentp = d_dir / ".sent"
         if sentp.exists():
@@ -2090,11 +2121,24 @@ def main(argv: list[str] | None = None) -> int:
             "incomplete": len(ledger.incomplete_list())}, indent=1))
         return 0
     if cmd == "daily-report":
-        ledger = Ledger(cfg.ledger_path)
-        sent = send_daily_report_if_due(cfg, ledger)
-        issues = send_folder_issues_if_due(cfg, ledger)
-        print(f"daily report sent: {sent}; folder issues sent: {issues}")
-        return 0
+        # under the run lock (r-loop 10 #2): lockless, this CLI could
+        # write a fresh counted record MID recal-tool teardown (the tools
+        # hold the lock and check pending_daily_send only at entry) —
+        # crediting rows the teardown is deleting. The drivers send
+        # dailies themselves; a manual send needs them stopped.
+        if not acquire_lock(cfg):
+            print("ABORT: run lock held — the driver sends dailies "
+                  "itself; stop it (or the recal tool) first")
+            return 2
+        try:
+            ledger = Ledger(cfg.ledger_path)
+            sent = send_daily_report_if_due(cfg, ledger)
+            issues = send_folder_issues_if_due(cfg, ledger)
+            print(f"daily report sent: {sent}; folder issues sent: "
+                  f"{issues}")
+            return 0
+        finally:
+            release_lock(cfg)
     print(f"unknown command {cmd!r} "
           f"(run | run-continuous | status | daily-report)")
     return 2

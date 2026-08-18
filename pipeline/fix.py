@@ -365,8 +365,23 @@ def apply_fixes(work_dir: Path, plan: dict, *, game: str,
     children = None
     error = None
     kind = None
+    persisted = 0     # applied[:persisted] already written to the fixlog
     for fix_id, params in plan["steps"]:
         try:
+            if fix_id == "FIX_CUT_SEGMENTS" and applied[persisted:]:
+                # DURABLE-BEFORE-THE-CUT (r-loop 10 #1): the gate blanked
+                # frames.csv durably two steps ago, but its destroyed-
+                # inventory record lived only in this process until the
+                # single post-loop fixlog write — so a kill anywhere in
+                # the cut dispatch lost the record forever: the adoption
+                # paths read only the parent fixlog (applied=[]) and the
+                # REVALIDATING route reads _gate_destroyed from the same
+                # empty fixlog, terminally rejecting the child/parent for
+                # a deficit the pipeline itself created. Persist the
+                # attempt-so-far before the cut can start; the post-loop
+                # append writes only the remainder (exactly-once).
+                _append_fixlog(dossier_dir, applied[persisted:])
+                persisted = len(applied)
             note = _dispatch(fix_id, params, work_dir, game,
                              split_root or work_dir.parent)
             if fix_id == "FIX_CUT_SEGMENTS":
@@ -375,9 +390,12 @@ def apply_fixes(work_dir: Path, plan: dict, *, game: str,
                                 "ok": True, "note": note})
                 # the gate ran on the parent's timeline just above; its
                 # record has to follow the footage into the children
-                # (r-loop 6)
+                # (r-loop 6). Only the not-yet-persisted tail rides in
+                # `applied` here — the pre-cut entries are found via the
+                # parent fixlog walk, so nothing is seen twice.
                 _propagate_gate_record(dossier_dir, dossier_dir.parent,
-                                       applied, note.get("segments") or [])
+                                       applied[persisted:],
+                                       note.get("segments") or [])
                 break                     # children re-enter Phase II
             applied.append({"fix": fix_id, "params": _jsonable(params),
                             "ok": True, "note": note})
@@ -402,7 +420,8 @@ def apply_fixes(work_dir: Path, plan: dict, *, game: str,
             applied.append({"fix": fix_id, "params": _jsonable(params),
                             "ok": False, "note": str(e)[:300]})
             break
-    _append_fixlog(dossier_dir, applied)
+    if applied[persisted:]:
+        _append_fixlog(dossier_dir, applied[persisted:])
     return {"applied": applied, "children": children, "error": error,
             "kind": kind}
 
@@ -925,7 +944,17 @@ def retranslate_from_sidecars(work: Path, *,
     shift_us = 0
     note = ""
     if sync.available() and stats.has_mouse_motion:
-        mdx, mdy = sync.motion_track(work / "video.mp4")
+        try:
+            mdx, mdy = sync.motion_track(work / "video.mp4")
+        except Exception as e:
+            # opencv open/decode failure: skip lag correction with a
+            # trail instead of burning the fix attempt (r-loop 10 #10)
+            note = (f"lag correction skipped (video not decodable by "
+                    f"opencv: {type(e).__name__})")
+            mdx = None
+    else:
+        mdx = None
+    if mdx is not None:
         conv = {"input_mouse_convention": MOUSE_CONVENTION}
 
         def measure(rs):
@@ -1002,8 +1031,32 @@ def fix_key_hygiene(work: Path, game: str) -> str:
                 bleed += 1
                 lb, rb = left in bound, right in bound
                 kset.discard(right if lb or not rb else left)
-        btns = [_BTN_DISPLAY_INV.get(b, b)
-                for b in (r[bi] or "").split("|") if b]
+        if bound:
+            # mirror _v2_rows' delivery invariant (r-loop 10 #9): an
+            # unbound key resolves no action, so keeping it re-fires the
+            # keys-without-null-actions FAIL this fix is planned for —
+            # a no-op loop that burned the budget into a wrongful reject.
+            # No-keybind sessions keep every token (actions cannot be
+            # re-resolved there anyway).
+            unbound = {t for t in kset if t not in bound}
+            stripped += len(unbound)
+            kset -= unbound
+        # buttons canonicalize through the FULL vocabulary (r-loop 10 #7):
+        # the exact-name round-trip passed foreign tokens ('left',
+        # 'Mouse4', 'LMB') through verbatim, so the checker's non-v2-token
+        # FAIL re-fired identically after the "fix". Unmappable tokens are
+        # dropped (and counted) so the set test can never re-fire.
+        btns = []
+        for b in (r[bi] or "").split("|"):
+            if not b:
+                continue
+            canon = _BTN_DISPLAY_INV.get(b) \
+                or K.MOUSE_BUTTONS.get(b.lower()) \
+                or (b.lower() if b.lower() in _BTN_DISPLAY else None)
+            if canon:
+                btns.append(canon)
+            else:
+                stripped += 1
         if rules is not None:
             # numeric-zero test, not a string sentinel test — "0"/"-0.0"
             # cells are motionless and must not fire look actions
@@ -1091,7 +1144,13 @@ def fix_lagshift_csv(work: Path) -> str:
     idx = [col[c] for c in ("input_keys", "input_actions",
                             "input_mouse_buttons", "input_mouse_dx",
                             "input_mouse_dy")]
-    mdx, mdy = sync.motion_track(work / "video.mp4")
+    try:
+        mdx, mdy = sync.motion_track(work / "video.mp4")
+    except Exception as e:
+        # typed, attributable failure instead of an untyped ValueError
+        # burning the attempt (r-loop 10 #10)
+        raise FixFailed(f"lag shift cannot measure: video not decodable "
+                        f"by opencv ({type(e).__name__})")
 
     def measure(rs):
         adx, ady = sync.input_track_from_rows(
@@ -1200,21 +1259,38 @@ def fix_camera_null(work: Path) -> str:
 
 
 def fix_sentinels(work: Path) -> str:
+    """Judged by the checker's OWN _FLOAT_RE (r-loop 10 #8): the old
+    ''/'0'/no-dot heuristic left dotted-but-nonconformant cells ('.5',
+    '1.', '+1.0', '1.2e3') verbatim — the FAIL re-fired identically on
+    both attempts — and crashed with an uncaught ValueError on dotless
+    non-numeric cells ('abc'). Importing the regex keeps fix and checker
+    from drifting, the same pattern fix_sessionjson_recompute adopted for
+    the SJ enums in r-loop 8."""
+    import math
+
+    from translator.v2 import _FLOAT_RE
     header, rows = _read_csv(work)
     dxi = header.index("input_mouse_dx")
     dyi = header.index("input_mouse_dy")
-    has_motion = any(r[dxi] not in ("", "0", "0.0") or
-                     r[dyi] not in ("", "0", "0.0") for r in rows)
+
+    def _parse(v) -> float:
+        # unparseable/non-finite degrades to 0.0, like translator/v2's
+        # _num_cell — a junk cell is not motion
+        try:
+            x = float(v)
+        except (TypeError, ValueError):
+            return 0.0
+        return x if math.isfinite(x) else 0.0
+
+    has_motion = any(_parse(r[dxi]) != 0.0 or _parse(r[dyi]) != 0.0
+                     for r in rows)
     fixed = 0
     for r in rows:
         for i in (dxi, dyi):
             v = r[i]
             if has_motion:
-                if v in ("", "0"):
-                    r[i] = "0.0"
-                    fixed += 1
-                elif "." not in v:
-                    r[i] = f"{float(v):.1f}"
+                if not _FLOAT_RE.match(v or ""):
+                    r[i] = f"{_parse(v):.1f}"
                     fixed += 1
             else:
                 if v != "":
@@ -1364,9 +1440,21 @@ def fix_v1_to_v2(work: Path, game: str) -> str:
         # canonical while v1 files may carry either case (review-2 #8)
         kept = [key_display(key_canonical(t)) for t in keys
                 if not bound or key_canonical(t) in bound]
-        btns = [_BTN_DISPLAY.get(b, b)
-                for b in (r[col["input_mouse_buttons"]] or "").split("|")
-                if b]
+        # same full-vocabulary canonicalization as fix_key_hygiene
+        # (r-loop 10 #7): v1 files carry raw-event forms ('left') that the
+        # exact-name map passed through into a checker FAIL; unmappable
+        # tokens are dropped so the set test can never re-fire
+        from translator.keys import MOUSE_BUTTONS as _MB
+        btns = []
+        for b in (r[col["input_mouse_buttons"]] or "").split("|"):
+            if not b:
+                continue
+            canon = _BTN_DISPLAY_INV.get(b) \
+                or (b if b in _BTN_DISPLAY else None) \
+                or _MB.get(b.lower()) \
+                or (b.lower() if b.lower() in _BTN_DISPLAY else None)
+            if canon:
+                btns.append(_BTN_DISPLAY[canon])
         dx, dy = r[col["input_mouse_dx"]], r[col["input_mouse_dy"]]
         if has_motion:
             dx = f"{float(dx or 0):.1f}"

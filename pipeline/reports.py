@@ -421,7 +421,19 @@ def _tree_has_uncounted_accepted(root, children: dict,
     re-entry — see mark_accepted_reported. A DELIVERED node in the paid
     -piece memory is treated as counted (r-loop 9, ruling C): without
     this, a memory-skipped node (which never gets a stamp) would re-enter
-    its root on every future sheet forever."""
+    its root on every future sheet forever. With ORPHANED memory rows
+    (r-loop 10 #11) the match is void — every unstamped node keeps the
+    root re-entering so the loud exclusion line repeats until a human
+    reconciles."""
+    orphaned = False
+    if mem:
+        tree_ids = set()
+        st = [root]
+        while st:
+            n_ = st.pop()
+            tree_ids.add(n_["session_id"])
+            st.extend(children.get(n_["session_id"], []))
+        orphaned = any(pid not in tree_ids for pid in mem)
     stack = [root]
     while stack:
         n = stack.pop()
@@ -430,7 +442,8 @@ def _tree_has_uncounted_accepted(root, children: dict,
                 or n["accepted_reported_at"] \
                 or GAME_COL.get(n["game"] or "") is None:
             continue
-        if n["state"] == "DELIVERED" and mem and n["session_id"] in mem:
+        if n["state"] == "DELIVERED" and mem and not orphaned \
+                and n["session_id"] in mem:
             secs = mem[n["session_id"]]
             cur = n["duration_delivered_s"] or 0.0
             if secs is not None and abs(cur - secs) <= 1.0:
@@ -612,6 +625,24 @@ def build_sheet_rows(ledger: Ledger, day_ist: datetime,
                 bucket(root)[f"{g_root}_hrs_uploaded"] += \
                     (root["duration_raw_s"] or 0.0) / 3600.0
         # recursive walk of the whole tree (root included)
+        mem = paid_mem.get(root["session_id"]) or {}
+        orphaned: list[str] = []
+        if mem:
+            tree_ids = set()
+            st = [root]
+            while st:
+                n_ = st.pop()
+                tree_ids.add(n_["session_id"])
+                st.extend(children.get(n_["session_id"], []))
+            # ORPHANED memory (r-loop 10 #11): a paid piece whose id no
+            # longer exists in the tree means the re-run re-delivered the
+            # same footage under DIFFERENT ids (unsplit root, re-cut
+            # -p1-p1 nesting — the EXPECTED refix outcome when rules
+            # loosen). An id-keyed match alone would then silently
+            # double-pay; instead every not-in-memory DELIVERED node of
+            # such a tree is excluded LOUDLY like an id collision, until
+            # a human reconciles the memory rows.
+            orphaned = sorted(pid for pid in mem if pid not in tree_ids)
         stack = [root]
         while stack:
             n = stack.pop()
@@ -623,7 +654,14 @@ def build_sheet_rows(ledger: Ledger, day_ist: datetime,
                 # counted once, ever: its own mark, or the root-level seal
                 if sealed or n["accepted_reported_at"]:
                     continue
-                mem = paid_mem.get(root["session_id"]) or {}
+                if orphaned and n["session_id"] not in mem:
+                    print(f"[sheet] ORPHANED paid-piece memory under "
+                          f"{root['session_id']} ({', '.join(orphaned)}): "
+                          f"re-delivered node {n['session_id']} "
+                          f"({(n['duration_delivered_s'] or 0.0):.0f}s) "
+                          f"may contain already-paid footage — NOT "
+                          f"counted; reconcile by hand", file=sys.stderr)
+                    continue
                 if n["session_id"] in mem:
                     secs = mem[n["session_id"]]
                     cur = n["duration_delivered_s"] or 0.0

@@ -278,11 +278,23 @@ def scan(cfg: C.Config, ledger: Ledger,
                     # invariant (r-loop 9 #5). The sibling pre-download
                     # move-heal already preserves stamps on the same
                     # rename.
+                    # vmd5 == "" means the Drive listing carries NO video
+                    # md5 (zip payloads list only the zip) — that is
+                    # UNKNOWABLE, not different (r-loop 10 #4): clearing
+                    # on "" != stored re-opened every already-counted
+                    # zip-origin root on a routine typo-fix rename. For
+                    # those, preserve the stamps here and DEFER the
+                    # supersede decision to the download-time backfill,
+                    # which compares the recomputed local hash against
+                    # the pre-heal md5 remembered in the heal event.
                     clears = dict(duration_raw_s=None,
                                   uploaded_reported_at=None,
                                   accepted_reported_at=None,
                                   tree_sealed_at=None) \
-                        if vmd5 != existing["md5_video"] else {}
+                        if vmd5 and vmd5 != existing["md5_video"] else {}
+                    prev_note = ""
+                    if not vmd5 and existing["md5_video"]:
+                        prev_note = f"; prev_md5={existing['md5_video']}"
                     ledger.update(ds.session_id,
                                   drive_path=ds.drive_path,
                                   drive_ctime=ds.ctime, md5_video=vmd5,
@@ -303,7 +315,7 @@ def scan(cfg: C.Config, ledger: Ledger,
                     ledger.set_state(
                         ds.session_id, "DISCOVERED",
                         f"re-registered: quarantined path healed to "
-                        f"{ds.drive_path}")
+                        f"{ds.drive_path}{prev_note}")
                     # post-download quarantines (download/validation crash,
                     # md5 mismatch, garbage payload) keep a populated work
                     # dir; the fresh download would merge stale payload
@@ -845,6 +857,24 @@ def download(cfg: C.Config, ledger: Ledger, session_id: str) -> str:
     if (dst / "video.mp4").exists():
         local_md5 = row["md5_video"] or _md5_file(dst / "video.mp4")
         if not row["md5_video"]:
+            # deferred half of the zip-heal supersede decision (r-loop 10
+            # #4): the heal preserved the payment stamps because the Drive
+            # listing had no md5 to compare; HERE the local hash exists.
+            # Different bytes get the full supersede-style clear the heal
+            # withheld; identical bytes keep everything. Clear-then-stamp
+            # order makes a kill in between converge (md5 still empty ->
+            # the re-run compares and clears again, idempotently).
+            prev = ledger.db.execute(
+                "SELECT detail FROM events WHERE session_id=? AND "
+                "detail LIKE '%prev_md5=%' ORDER BY ts DESC LIMIT 1",
+                (session_id,)).fetchone()
+            if prev:
+                old = prev["detail"].rsplit("prev_md5=", 1)[1].strip()
+                if old and old != local_md5:
+                    ledger.update(session_id, duration_raw_s=None,
+                                  uploaded_reported_at=None,
+                                  accepted_reported_at=None,
+                                  tree_sealed_at=None)
             ledger.update(session_id, md5_video=local_md5)
         # adjudicated LOSERS (REJECTED/DUPLICATE) are excluded: when the
         # scan already picked this copy as the winner, seeing its beaten
