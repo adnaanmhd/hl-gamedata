@@ -80,10 +80,23 @@ def _looks_semantic(x) -> bool:
     correctly-oriented file empties the whole keyboard column and gets the
     session rejected as CNT_ACTIONS_FEW (unfixable, unpaid player), whereas
     failing to flip a genuinely inverted one leaves it as it arrived."""
-    if not isinstance(x, str) or "_" not in x:
+    if not isinstance(x, str):
         return False
+    # Vocabulary FIRST. Testing "_" not in x before it made the
+    # authoritative check unreachable for the two Kamla actions that carry
+    # no underscore -- 'interact' and 'look' -- so a genuinely inverted
+    # Kamla keybind.json was never flipped, every real key failed to
+    # resolve, and input_keys/input_actions shipped EMPTY on every row.
+    # That is the SAME catastrophic outcome the r-loop-4 fix was written
+    # to prevent, just in the opposite direction: CNT_ACTIONS_FEW +
+    # INP_KEYS_MISSING, both unfixable, so the session is rejected with no
+    # fix attempt and the player is coached to "play actively" for our
+    # parser bug (r-loop 5). Outer Wilds never showed it -- all 27 of its
+    # action names have an underscore.
     if x in _SEMANTIC_VOCAB:
         return True
+    if "_" not in x:
+        return False
     return x.count("_") >= 2
 
 

@@ -16,6 +16,17 @@
 # sa.json + secrets.env scp'd to ~/.config/hl-gamedata/ (chmod 600).
 # Redeploy from then on: edit+commit on Mac -> same rsync -> next tick.
 set -euo pipefail
+# Run from the repo root regardless of where the operator invoked us. The
+# usage line above tells them to call this by ABSOLUTE path (`bash
+# ~/hl-gamedata/tools/vm_setup.sh`), i.e. from $HOME, which is where an
+# ssh session lands -- but the inline python probes below do
+# `sys.path.insert(0, ".")` and so raise ModuleNotFoundError from any
+# other cwd. In lock_free() that is indistinguishable from "a live pid
+# holds the lock", so --enable-continuous aborted AFTER disabling the
+# batch timer and stopping its service: no driver armed at all, with a
+# false diagnosis (r-loop 5 blocker). Derived from our own location, not
+# hardcoded, so a repo checked out elsewhere still works.
+cd "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 BUCKET="${HL_BACKUP_BUCKET:-hl-gamedata-pipeline-backups}"
 ME="$(id -un)"
@@ -102,12 +113,18 @@ if [ "${1:-}" = "--enable-continuous" ]; then
   # regression from r-loop 3's own wait loop).
   # Ask the code the same question the driver will ask, so this script and
   # the driver can never disagree about whether the lock is held.
+  # Exit codes are three-valued on purpose: 0 = free, 1 = genuinely held
+  # by a live pid, 2 = the probe itself could not run. Collapsing 2 into
+  # 1 is what let a ModuleNotFoundError print "a live pid holds it".
   lock_free() {
     "$HOME/.local/bin/uv" run python - <<'PYEOF' >/dev/null 2>&1
 import sys
 sys.path.insert(0, ".")
-from pipeline import config, run
-cfg = config.load()
+try:
+    from pipeline import config, run
+    cfg = config.load()
+except Exception:
+    sys.exit(2)                  # probe broken -- NOT "lock is held"
 if run.acquire_lock(cfg):        # pid-reclaims a stale lock
     run.release_lock(cfg)
     sys.exit(0)
@@ -118,7 +135,21 @@ PYEOF
     if lock_free; then break; fi
     sleep 1
   done
-  if ! lock_free; then
+  # `|| rc=$?` both captures the REAL code (a bare `! lock_free` would
+  # collapse 2 into 1) and keeps `set -e` from killing the script here.
+  lock_rc=0
+  lock_free || lock_rc=$?
+  if [ "$lock_rc" -ne 0 ]; then
+    if [ "$lock_rc" -eq 2 ]; then
+      echo "FATAL: could not run the lock-liveness probe at all (import" >&2
+      echo "  failed from $(pwd)). This is NOT a held lock -- the check" >&2
+      echo "  itself is broken, so nothing can be concluded about the" >&2
+      echo "  lock. The batch timer is already disabled and its service" >&2
+      echo "  stopped, so NO driver is armed: re-arm the previous driver" >&2
+      echo "  with 'sudo systemctl enable --now hl-pipeline.timer' or" >&2
+      echo "  fix the checkout and re-run." >&2
+      exit 1
+    fi
     echo "FATAL: run.lock is held by a LIVE pipeline process after 60s." >&2
     echo "  A batch run or a driver is genuinely still running. Stop it" >&2
     echo "  and re-run; arming now would crash-loop hl-continuous into" >&2

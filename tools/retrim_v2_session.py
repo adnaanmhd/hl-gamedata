@@ -62,15 +62,36 @@ def retrim(session_dir: Path, head_s: float, out_dir: Path) -> dict:
         header = next(reader)
         rows = list(reader)
     assert header == V2_FRAME_COLS
-    kept = rows[len(rows) - new_info.frame_count:]
+    i0 = len(rows) - new_info.frame_count
+    kept = rows[i0:]
     base_ms = int(kept[0][1])
     for i, r in enumerate(kept):
         r[0] = str(i)
         r[1] = str(int(r[1]) - base_ms)
 
+    # Anchor created_at on the EXACT source PTS of the first retained
+    # frame, never the millisecond-rounded CSV cell (r-loop 5 blocker).
+    # This is the same bug r-loop 4 fixed in pipeline/cutter.py:192 and
+    # the identical math was left live here. translator/v2.py:846
+    # recovers head_us = (created - started) from this field and re-bins
+    # every raw mouse event against it, so a <=500us rounding error is a
+    # broad systematic band, not isolated jitter: it flips every event
+    # landing within half a millisecond of a frame boundary, _verify_-
+    # against_raw FAILs, and validate.py maps that to SYN_TS_NOT_PTS --
+    # spending a fix attempt and a paid Gemini sweep on a session with
+    # nothing wrong with it. Zero error only when the retained frame's
+    # PTS is a whole millisecond (1 frame in 3 on a nominal 30fps grid).
+    # base_ms still drives the CSV rebase: its <=1ms error is far inside
+    # the 100ms FRAME_SYNC_MS bar. If the PTS list is unreadable we fall
+    # back to it here too -- no worse than the previous behaviour, and a
+    # hard raise (cutter's choice) would instead burn a fix attempt on
+    # the no-raw sessions where the rounding is harmless.
+    src_pts = V.frame_pts(src)
+    head_us = src_pts[i0] if 0 <= i0 < len(src_pts) else base_ms * 1000
+
     s = json.loads((session_dir / "session.json").read_text())
     created = datetime.fromisoformat(s["created_at_utc"].replace("Z", "+00:00"))
-    created += timedelta(milliseconds=base_ms)
+    created += timedelta(microseconds=head_us)
     ended = created + timedelta(seconds=new_info.duration_s)
     iso = lambda d: d.astimezone(timezone.utc).strftime(
         "%Y-%m-%dT%H:%M:%S.%f") + "Z"

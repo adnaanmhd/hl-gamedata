@@ -1419,6 +1419,19 @@ def _close_stale_batches(ledger: Ledger) -> None:
             "sessions": sids, "closed_by": "stale-batch-sweep"})
 
 
+def _iso_age_h(ts_str) -> float:
+    """Hours since an ISO stamp. Returns 0.0 when it is missing or
+    unparseable -- an unreadable timestamp must never authorise deleting
+    media (same contract as _terminal_age_h)."""
+    try:
+        ts = datetime.fromisoformat(str(ts_str).replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        return 0.0
+    if ts.tzinfo is None:
+        ts = ts.replace(tzinfo=timezone.utc)
+    return (datetime.now(timezone.utc) - ts).total_seconds() / 3600.0
+
+
 def _terminal_age_h(row) -> float:
     """Hours since a ledger row last changed. Returns 0.0 when the stamp is
     missing or unparseable — an unreadable timestamp must never be what
@@ -1462,6 +1475,31 @@ def _sweep_terminal_work(cfg: C.Config, ledger: Ledger) -> None:
                 # after a triage window loses nothing recoverable.
                 shutil.rmtree(p, ignore_errors=True)
                 deliver._drop_shift_entry(cfg, sid)
+                continue
+            if row and row["state"] == "DISCOVERED":
+                # A DISCOVERED row holding media is a download that keeps
+                # failing (_download_one returns the row here on every
+                # transient and every zip_incomplete, and ingest.download
+                # leaves what rclone already transferred behind). Nothing
+                # reclaimed it, so an abandoned multi-part zip parked
+                # gigabytes forever -- invisible to the media cap until
+                # r-loop 5 taught _local_count to count it, and then
+                # capable of stopping intake outright with no way back.
+                # Reclaiming loses no data: Drive I keeps the original and
+                # rclone re-downloads idempotently (the same property that
+                # makes DOWNLOADING kill-resume safe). Age from the last
+                # completed download -- updated_at and the DISCOVERED stint
+                # are both re-stamped by the 5-min retry.
+                first_disc = ledger.db.execute(
+                    "SELECT MIN(ts) t FROM events WHERE session_id=? "
+                    "AND to_state='DISCOVERED' AND ts >= COALESCE("
+                    "(SELECT MAX(ts) FROM events WHERE session_id=? "
+                    " AND to_state='INGESTED'), '')",
+                    (sid, sid)).fetchone()
+                t = first_disc["t"] if first_disc else None
+                if t and _iso_age_h(t) >= C.CONT_DISCOVERED_RECLAIM_H:
+                    shutil.rmtree(p, ignore_errors=True)
+                    deliver._drop_shift_entry(cfg, sid)
                 continue
             if row and row["state"] in ("DELIVERED", "SPLIT", "DUPLICATE"):
                 shutil.rmtree(p, ignore_errors=True)

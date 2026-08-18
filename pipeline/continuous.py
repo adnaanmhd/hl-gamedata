@@ -369,6 +369,31 @@ class ContinuousDriver:
             if (self.cfg.work / sid).exists() or \
                     (self.cfg.work / f"{sid}-analysis").exists():
                 n += 1
+        # DISCOVERED counts on the SAME "does it hold media" rule, for the
+        # same reason (r-loop 5). _download_one routes every transient and
+        # every zip_incomplete failure back to DISCOVERED, while
+        # ingest.download leaves whatever rclone already transferred in
+        # work/<sid> -- so an abandoned multi-part zip parks gigabytes in a
+        # state the cap did not count, no sweep reclaimed, and _stuck_lines
+        # excluded by design. The disk filled, _pick_download then refused
+        # on the F7 low-water check, and cap pressure stayed silent, so
+        # nothing said where the disk had gone.
+        #
+        # Iterate the WORK DIR, not the rows: DISCOVERED is the unbounded
+        # population (one row per Drive folder ingest.scan has ever seen),
+        # so statting per row is O(Drive) while work/ is bounded by the cap
+        # itself. sid and sid-analysis collapse to one session.
+        disc = {r["session_id"] for r in led.by_state("DISCOVERED")}
+        if disc and self.cfg.work.exists():
+            held = set()
+            for p in self.cfg.work.iterdir():
+                if not p.is_dir():
+                    continue
+                sid = p.name[:-len("-analysis")] \
+                    if p.name.endswith("-analysis") else p.name
+                if sid in disc:
+                    held.add(sid)
+            n += len(held)
         return n
 
     def _pick_download(self, led: Ledger) -> str | None:
@@ -1012,7 +1037,10 @@ class ContinuousDriver:
     def _stuck_lines(self, led: Ledger) -> tuple[list[str], int]:
         """Stuck = non-terminal, unchanged > CONT_STUCK_H. DISCOVERED is
         excluded (cap-throttled intake is normal, not stuck — the digest's
-        undownloaded count already shows it). HOLD_VLM ages from the FIRST
+        undownloaded count already shows it) UNLESS it holds media, which
+        means a download failing over and over: that was the one way to
+        fill the disk with nothing naming the cause (r-loop 5).
+        HOLD_VLM ages from the FIRST
         HOLD event OF THE CURRENT STINT: each 30-min retry refreshes
         updated_at, which would otherwise hide a permanently-held session
         forever (r-loop 1) — but a lifetime MIN(ts) over-ages a session
@@ -1066,6 +1094,31 @@ class ContinuousDriver:
         for r in held:
             if r["first_hold"] and r["first_hold"] < cut:
                 stuck.append((r["session_id"], "HOLD_VLM", r["first_hold"]))
+        # DISCOVERED is excluded from the query above by design -- it is the
+        # unbounded "seen on Drive" population. But a DISCOVERED row that
+        # HOLDS MEDIA is a download failing over and over, and it was the
+        # one way for the disk to fill with nothing naming the cause
+        # (r-loop 5). Age it from the last completed download, NOT from
+        # updated_at and NOT from the current DISCOVERED stint: the 5-min
+        # retry bounces DISCOVERED->DOWNLOADING->DISCOVERED forever, so both
+        # of those reset on every attempt -- the same re-stamping trap that
+        # made the QUARANTINED age test an r-loop-4 blocker. The last
+        # INGESTED event is the only stamp a retry cannot move.
+        disc_media = led.db.execute(
+            "SELECT s.session_id, "
+            "(SELECT MIN(e.ts) FROM events e "
+            "  WHERE e.session_id=s.session_id AND e.to_state='DISCOVERED' "
+            "    AND e.ts >= COALESCE((SELECT MAX(e2.ts) FROM events e2 "
+            "        WHERE e2.session_id=s.session_id "
+            "          AND e2.to_state='INGESTED'), '')) first_disc "
+            "FROM sessions s WHERE s.state='DISCOVERED'").fetchall()
+        for r in disc_media:
+            if not (r["first_disc"] and r["first_disc"] < cut):
+                continue
+            sid = r["session_id"]
+            if (self.cfg.work / sid).exists() or \
+                    (self.cfg.work / f"{sid}-analysis").exists():
+                stuck.append((sid, "DISCOVERED(media)", r["first_disc"]))
         # re-sort the MERGED list: HOLD rows are appended after the
         # already-age-sorted query rows, so without this the digest's
         # `stuck[:5]` showed HOLD sessions only when fewer than five other
@@ -1451,9 +1504,23 @@ def run_continuous(cfg: C.Config, *, dest_prefix: str = C.VENDOR,
             # the drain grace has already expired, every state transition
             # is committed before its side effect, and the run lock is
             # deliberately KEPT for pid-reclaim.
+            #
+            # ...but ONLY when we own the process. run_continuous is a
+            # library call: ~12 in-process test call sites reach this
+            # same finally, and os._exit there terminates the PYTEST
+            # interpreter with status 0 — no summary, no remaining
+            # tests, and a CI/shell reading the exit code sees success.
+            # Reproduced (r-loop 5): a lane outliving the drain grace
+            # made `pytest` collect 2 tests, run one, skip a guaranteed
+            # failure and exit 0. A partially-run suite is then
+            # indistinguishable from a green one, which is exactly what
+            # the flip's arming gate depends on. install_signals is the
+            # ownership flag — only a process owner installs handlers —
+            # and every test passes install_signals=False.
             print("[shutdown] drain grace expired with work still in "
                   "flight — exiting immediately; the ledger resumes "
                   "exactly as it does from kill -9", file=sys.stderr)
             sys.stderr.flush()
             sys.stdout.flush()
-            os._exit(0)
+            if install_signals:
+                os._exit(0)

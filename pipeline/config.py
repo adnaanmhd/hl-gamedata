@@ -202,6 +202,11 @@ CONT_DRAIN_GRACE_S = 600          # SIGTERM: wait this long for runners
 # and Drive I still holds the original (R6 read-only forever), so the local
 # copy is re-downloadable, not unique.
 CONT_QUARANTINE_RECLAIM_H = 48
+# A DISCOVERED row can hold local media too: _download_one returns the
+# row to DISCOVERED on every transient/zip_incomplete failure while
+# ingest.download leaves whatever rclone already transferred in
+# work/<sid>. Same class as the QUARANTINED leak above (r-loop 5).
+CONT_DISCOVERED_RECLAIM_H = 12
 # Shared translation_report.json lock (validate._locked_report_update).
 # INVARIANT: WAIT > STALE. Up to CONT_POOL_MAX workers race this file and a
 # waiter that runs out of patience writes UNLOCKED, which is the r1 #8 lost
