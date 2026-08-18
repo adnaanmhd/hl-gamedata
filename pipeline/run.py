@@ -1915,6 +1915,12 @@ def _terminal_age_h(row) -> float:
     return (datetime.now(timezone.utc) - ts).total_seconds() / 3600.0
 
 
+# the reclaim's audit marker (r-loop 12 #4): a same-state DISCOVERED
+# event written at reclaim time so the media-age anchor re-arms — the
+# digest's disc_media query keys on the same string.
+RECLAIM_MARKER = "media reclaimed by sweep"
+
+
 def _sweep_terminal_work(cfg: C.Config, ledger: Ledger) -> None:
     """A kill between the DELIVERED commit and the local wipe leaks work/,
     -analysis/ and stage dirs forever — resumed runs skip DELIVERED
@@ -1985,16 +1991,28 @@ def _sweep_terminal_work(cfg: C.Config, ledger: Ledger) -> None:
                 # DISCOVERED/DOWNLOADING retry set (the supersede's
                 # REJECTED/QUARANTINED exit); never-successful rows have
                 # no outside events and are unchanged.
+                # ... and re-armed by the last reclaim (r-loop 12 #4):
+                # the reclaim writes no event, so with the anchor frozen
+                # at the FIRST failure the grace was permanently zero
+                # after the first reclaim — every later hourly sweep
+                # wiped whatever minutes-old parts the retries had
+                # re-accumulated, exactly the resumable-transfer loss the
+                # r-loop-6 comment above documents. A same-state marker
+                # event at reclaim time restarts the age at the first
+                # failure AFTER the last reclaim.
                 first_disc = ledger.db.execute(
                     "SELECT MIN(ts) t FROM events WHERE session_id=? "
                     "AND to_state='DISCOVERED' AND ts > (SELECT MIN(ts) "
                     "FROM events WHERE session_id=? AND "
                     "to_state='DOWNLOADING' AND ts > COALESCE((SELECT "
                     "MAX(ts) FROM events WHERE session_id=? AND to_state "
-                    "NOT IN ('DISCOVERED','DOWNLOADING')), ''))",
-                    (sid, sid, sid)).fetchone()
+                    "NOT IN ('DISCOVERED','DOWNLOADING')), '')) "
+                    "AND ts > COALESCE((SELECT MAX(ts) FROM events "
+                    "WHERE session_id=? AND detail=?), '')",
+                    (sid, sid, sid, sid, RECLAIM_MARKER)).fetchone()
                 t = first_disc["t"] if first_disc else None
                 if t and _iso_age_h(t) >= C.CONT_DISCOVERED_RECLAIM_H:
+                    ledger.set_state(sid, "DISCOVERED", RECLAIM_MARKER)
                     shutil.rmtree(p, ignore_errors=True)
                     deliver._drop_shift_entry(cfg, sid)
                 continue

@@ -98,6 +98,51 @@ def test_deferral_adjudicated_new_bytes_still_skip(cfg, ledger,
     assert "SKIPPED" in capsys.readouterr().err
 
 
+# ------- r12 #4: the DISCOVERED-media reclaim grace re-arms per reclaim
+
+def test_reclaim_grace_rearms_after_a_sweep(cfg, ledger):
+    """The reclaim wrote no event, so the age anchor stayed frozen at
+    the FIRST failure forever: after the first legitimate reclaim, every
+    later hourly sweep wiped whatever minutes-old parts the 5-min
+    retries had re-accumulated — effective grace ZERO, the exact
+    resumable-transfer loss the r-loop-6 comment documents."""
+    from datetime import datetime, timedelta, timezone
+
+    from pipeline import config as C
+    from pipeline import continuous as cont
+    from pipeline.tests.test_r_loop5 import _age_discovered_event, \
+        _seed_disc
+    sid = "s-rearm"
+    _seed_disc(ledger, sid)
+    (cfg.work / sid).mkdir(parents=True)
+    (cfg.work / sid / "video.mp4").write_bytes(b"x" * 16)
+    _age_discovered_event(ledger, sid, C.CONT_DISCOVERED_RECLAIM_H + 8)
+    runmod._sweep_terminal_work(cfg, ledger)
+    assert not (cfg.work / sid).exists(), "first reclaim is legitimate"
+    # the 5-min retries re-accumulate parts and fail again 10 min ago
+    (cfg.work / sid).mkdir(parents=True)
+    (cfg.work / sid / "video.mp4").write_bytes(b"y" * 16)
+    now = datetime.now(timezone.utc)
+
+    def iso(d):
+        return d.isoformat(timespec="seconds")
+    ledger.db.executemany(
+        "INSERT INTO events(session_id, from_state, to_state, ts, detail)"
+        " VALUES(?,?,?,?,?)",
+        [(sid, "DISCOVERED", "DOWNLOADING",
+          iso(now - timedelta(minutes=15)), "claimed by D"),
+         (sid, "DOWNLOADING", "DISCOVERED",
+          iso(now - timedelta(minutes=10)), "download failed")])
+    ledger.db.commit()
+    runmod._sweep_terminal_work(cfg, ledger)
+    assert (cfg.work / sid).exists(), \
+        "post-reclaim re-accumulated parts get a fresh 12h grace"
+    # and the digest reports the true (young) age, not the frozen one
+    drv = cont.ContinuousDriver(cfg, send_telegram=False)
+    lines, _n = drv._stuck_lines(ledger)
+    assert sid not in " ".join(lines), lines
+
+
 # ------- r12 #3/#12: recal_rebuild_reset HOLDS the run lock
 
 def test_rebuild_reset_holds_the_run_lock(cfg, monkeypatch):

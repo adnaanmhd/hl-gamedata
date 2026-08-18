@@ -1352,7 +1352,9 @@ class ContinuousDriver:
         # Scoped to the CURRENT intake stint (r-loop 11 #9), like the
         # reclaim sweep: supersede/heal re-entries otherwise inherit the
         # gen-1 anchor and a 25-minute-old gen-2 failure reported as
-        # "DISCOVERED(media) 29.0h".
+        # "DISCOVERED(media) 29.0h". Re-armed by the last reclaim
+        # (r-loop 12 #4, same marker as the sweep) so post-reclaim
+        # re-accumulated parts report their true age.
         disc_media = led.db.execute(
             "SELECT s.session_id, "
             "(SELECT MIN(e.ts) FROM events e "
@@ -1364,8 +1366,12 @@ class ContinuousDriver:
             "              FROM events e3 "
             "              WHERE e3.session_id=s.session_id "
             "                AND e3.to_state NOT IN "
-            "                ('DISCOVERED','DOWNLOADING')), ''))) first_disc "
-            "FROM sessions s WHERE s.state='DISCOVERED'").fetchall()
+            "                ('DISCOVERED','DOWNLOADING')), '')) "
+            "    AND e.ts > COALESCE((SELECT MAX(e4.ts) FROM events e4 "
+            "        WHERE e4.session_id=s.session_id "
+            "          AND e4.detail=?), '')) first_disc "
+            "FROM sessions s WHERE s.state='DISCOVERED'",
+            (runmod.RECLAIM_MARKER,)).fetchall()
         held_now = self._held_discovered(led)
         for r in disc_media:
             if not (r["first_disc"] and r["first_disc"] < cut):
