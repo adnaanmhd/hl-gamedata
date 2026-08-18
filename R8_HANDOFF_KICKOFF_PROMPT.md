@@ -17,8 +17,9 @@ explicitly supersedes them (Adnaan, 2026-08-18).
 order directly. Ask only if something here is wrong or a question only Adnaan
 can settle.
 
-**Session config:** Model **Opus 5**. Include `ultracode` in your first message
-— the review/verification work is multi-agent and is not runnable
+**Session config:** Model **Fable 5** (Adnaan, 2026-08-18 — supersedes the
+Opus 5 line every earlier kickoff carried). Include `ultracode` in your first
+message — the review/verification work is multi-agent and is not runnable
 single-threaded at depth.
 
 ---
