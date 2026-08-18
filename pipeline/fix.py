@@ -1146,6 +1146,13 @@ def fix_lagshift_csv(work: Path) -> str:
                             "input_mouse_dy")]
     try:
         mdx, mdy = sync.motion_track(work / "video.mp4")
+    except (OSError, MemoryError, sqlite3.OperationalError,
+            subprocess.TimeoutExpired):
+        # host classes propagate to apply_fixes' classifier untouched
+        # (attempt refunded, cooldown) — the r10 guard below re-typed
+        # them as session-kind FixFailed and burned the attempt on an
+        # infrastructure failure (r-loop 11 #3)
+        raise
     except Exception as e:
         # typed, attributable failure instead of an untyped ValueError
         # burning the attempt (r-loop 10 #10)

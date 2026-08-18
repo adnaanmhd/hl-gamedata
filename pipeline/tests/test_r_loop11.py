@@ -185,3 +185,43 @@ def test_all_matched_orphan_tree_stays_loud_every_sheet(tmp_path, capsys):
     assert "ORPHANED paid-piece memory" in capsys.readouterr().err, \
         "the reconcile line must repeat until a human reconciles"
     led.close()
+
+
+# ------- r11 #3: fix_lagshift_csv must not swallow host classes
+
+def _lagshift_boom(tmp_path, monkeypatch, exc):
+    from pipeline import fix as fixmod
+    from pipeline.tests.test_r_loop7 import make_gate_csv
+    from translator import sync as syncmod
+    work = tmp_path / "L"
+    work.mkdir()
+    make_gate_csv(work)
+    (work / "session.json").write_text('{"fps": 30.0}')
+    monkeypatch.setattr(syncmod, "available", lambda: True)
+
+    def boom(path):
+        raise exc
+    monkeypatch.setattr(syncmod, "motion_track", boom)
+    return fixmod.apply_fixes(work,
+                              {"steps": [("FIX_LAGSHIFT_CSV", {})]},
+                              game="kamla", dossier_dir=tmp_path / "d")
+
+
+def test_lagshift_memoryerror_stays_host_classed(tmp_path, monkeypatch):
+    """The r10 except-Exception guard re-typed MemoryError/OSError (host:
+    attempt refunded, cooldown) as session-kind FixFailed (attempt
+    burned) — an OOM burst spent both attempts on a terminal reject."""
+    out = _lagshift_boom(tmp_path, monkeypatch,
+                         MemoryError("Unable to allocate 1.9 GiB"))
+    assert out["kind"] == "host", out
+    assert "MemoryError" in out["error"]
+
+
+def test_lagshift_decode_failure_stays_typed_session(tmp_path,
+                                                     monkeypatch):
+    """Control: the motivating r10 #10 error class (opencv cannot open
+    the video) keeps its typed session-kind FixFailed."""
+    out = _lagshift_boom(tmp_path, monkeypatch,
+                         ValueError("could not open video"))
+    assert out["kind"] == "session", out
+    assert "not decodable by opencv" in out["error"]
