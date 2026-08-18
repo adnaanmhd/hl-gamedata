@@ -930,26 +930,73 @@ def _mark_doc_sent(record: Path) -> None:
     os.replace(tmp, record)
 
 
+def _attempt_wedge_alert(cfg: C.Config, day: str, why: str = "") -> None:
+    """Deliver the wedge alert AT LEAST once. The r10 wedge sent it
+    exactly once and swallowed TelegramError — a Telegram outage at
+    wedge time permanently silenced a needs-a-human condition, inverting
+    the codebase's own alert contract (AlertBook retracts failed stamps;
+    the daily message retries every tick) (r-loop 11 #5/#8/#10).
+    Delivery is recorded durably (`alerted` in .wedged, stamped only
+    AFTER send_message returns); the scan's wedge-skip re-attempts while
+    undelivered — one success, then silence."""
+    wedgep = cfg.reports_dir / day / ".wedged"
+    w = None
+    try:
+        raw = wedgep.read_text()
+    except OSError:
+        raw = None
+    if raw is not None:
+        try:
+            w = json.loads(raw)
+        except json.JSONDecodeError:
+            pass
+        if not isinstance(w, dict):
+            # legacy plain-text .wedged (pre-r11): its content IS the
+            # reason; treat as un-alerted (dup-over-silence)
+            w = {"why": raw.strip()}
+    if w is None:
+        # missing/unreadable (the .wedged write itself failed): alert
+        # anyway — durable dedup resumes once the file is writable
+        w = {"why": why}
+    if w.get("alerted"):
+        return
+    try:
+        telegram.send_message(
+            cfg, f"⚠️ daily send for {day} is WEDGED and needs a human: "
+                 f"{w.get('why') or why} — later days proceed normally; "
+                 f"remove reports/{day}/.wedged after reconciling")
+    except telegram.TelegramError as e:
+        print(f"[daily-wedge-alert-undelivered] {e} — retried next tick",
+              file=sys.stderr)
+        return
+    w["alerted"] = True
+    try:
+        tmp = wedgep.with_name(wedgep.name + f".tmp{os.getpid()}")
+        tmp.write_text(json.dumps(w))
+        os.replace(tmp, wedgep)
+    except OSError as e:
+        print(f"[daily] wedge alert delivered but could not be stamped "
+              f"for {day}: {e}", file=sys.stderr)
+
+
 def _wedge_day(cfg: C.Config, day: str, why: str) -> None:
     """A PERMANENTLY-refusing resume (unreadable record, missing CSV,
     deleted counted row) used to return False on every future tick — and
     since the day-agnostic scan resumes the oldest pending day first, one
     bad day silently shut down EVERY later day's report and payment sheet
     (r-loop 10 #2). Mark it wedged so the scan skips it loudly; a human
-    reconciles and removes .wedged. Transient failures (Telegram outages)
-    never wedge — they retry next tick."""
+    reconciles and removes .wedged. Transient failures (Telegram outages,
+    EMFILE/EIO-class stat errors) never wedge — they retry next tick.
+    An existing .wedged is never overwritten (its `alerted` stamp is the
+    alert dedup, r-loop 11 #5)."""
+    wedgep = cfg.reports_dir / day / ".wedged"
     try:
-        (cfg.reports_dir / day / ".wedged").write_text(why)
+        if not wedgep.exists():
+            wedgep.write_text(json.dumps({"why": why, "alerted": False}))
     except OSError as e:
         print(f"[daily] could not write .wedged for {day}: {e}",
               file=sys.stderr)
-    try:
-        telegram.send_message(
-            cfg, f"⚠️ daily send for {day} is WEDGED and needs a human: "
-                 f"{why} — later days proceed normally; remove "
-                 f"reports/{day}/.wedged after reconciling")
-    except telegram.TelegramError as e:
-        print(f"[daily-wedge-alert-undelivered] {e}", file=sys.stderr)
+    _attempt_wedge_alert(cfg, day, why)
 
 
 def _resume_daily_send(cfg: C.Config, ledger: Ledger, now_ist: datetime,
@@ -970,17 +1017,33 @@ def _resume_daily_send(cfg: C.Config, ledger: Ledger, now_ist: datetime,
         lo, hi = rec["lo"], rec["hi"]
         counted = list(rec["counted"])
         accepted = list(rec["accepted"])
-    except (OSError, json.JSONDecodeError, KeyError, TypeError):
+    except OSError as e:
+        # an EMFILE/EIO-class read failure is the HOST having a bad
+        # moment, not a corrupt record — wedging here turned a condition
+        # that passes on the next 600s tick into a permanent human-only
+        # stop (r-loop 11 #10)
+        print(f"[daily] resume record unreadable ({e}) — transient host "
+              f"error; retrying next tick", file=sys.stderr)
+        return False
+    except (json.JSONDecodeError, KeyError, TypeError, ValueError):
         print(f"[daily] resume record unreadable — REFUSING to regenerate "
               f"post-stamp; reconcile by hand ({record})", file=sys.stderr)
         _wedge_day(cfg, day, "resume record unreadable")
         return False
     csv_path = cfg.reports_dir / day / f"payment-{day}.csv"
-    if not csv_path.exists():
+    try:
+        os.stat(csv_path)
+    except FileNotFoundError:
         # the record is written AFTER the CSV, so this is unreachable
         # except by external deletion — alert, never regenerate
         _wedge_day(cfg, day, f"{csv_path.name} missing while its counted "
                              f"record exists — the sheet cannot be re-sent")
+        return False
+    except OSError as e:
+        # Path.exists() swallowed this into a false "missing" and wedged
+        # permanently for a transient stat failure (r-loop 11 #10)
+        print(f"[daily] resume: cannot stat {csv_path.name} ({e}) — "
+              f"transient host error; retrying next tick", file=sys.stderr)
         return False
     if marker.exists():
         # everything but the document landed (kill between marker and the
@@ -1099,11 +1162,13 @@ def send_daily_report_if_due(cfg: C.Config, ledger: Ledger,
         if not recp.is_file():
             continue
         if (d_dir / ".wedged").exists():
-            # permanently-refusing day, already alerted (r-loop 10 #2):
-            # skip LOUDLY so later days and today still get their sheets
+            # permanently-refusing day (r-loop 10 #2): skip LOUDLY so
+            # later days and today still get their sheets, re-attempting
+            # the wedge alert while undelivered (r-loop 11 #5)
             print(f"[daily] WEDGED day {d_dir.name} skipped — reconcile "
                   f"by hand, then rm reports/{d_dir.name}/.wedged",
                   file=sys.stderr)
+            _attempt_wedge_alert(cfg, d_dir.name)
             continue
         sentp = d_dir / ".sent"
         if sentp.exists():

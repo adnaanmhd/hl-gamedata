@@ -265,3 +265,112 @@ def test_hygiene_without_sidecar_still_strips_unbound(tmp_path):
     header, rows = fixmod._read_csv(work)
     col = {c: i for i, c in enumerate(header)}
     assert not [r for r in rows if "LShift" in r[col["input_keys"]]]
+
+
+# ------- r11 #5/#8/#10: wedge robustness — durable alert, no transient
+# ------- wedges
+
+def test_wedge_alert_retries_until_delivered_exactly_once(
+        cfg, ledger, monkeypatch):
+    """The wedge's one-and-only alert was swallowed on TelegramError — a
+    Telegram outage at wedge time permanently silenced a needs-a-human
+    condition, while every other alert surface in the codebase
+    retries."""
+    from pipeline import telegram as tgmod
+    from pipeline.tests.test_r_loop8 import _daily_seed
+    from pipeline.tests.test_r_loop9 import _interrupt_before_stamps
+    from pipeline.tests.test_review_r5_driver import _send_time
+    send, sid, csv_path, day = _daily_seed(cfg, ledger, monkeypatch)
+    _interrupt_before_stamps(cfg, ledger, monkeypatch, send)
+    ledger.db.execute("DELETE FROM sessions WHERE session_id=?", (sid,))
+    ledger.db.commit()
+    delivered: list[str] = []
+    down = {"on": True}
+
+    def flaky(c, t):
+        if "WEDGED" not in t:
+            return
+        if down["on"]:
+            raise tgmod.TelegramError("outage")
+        delivered.append(t)
+    monkeypatch.setattr(runmod.telegram, "send_message", flaky)
+    # tick 1: wedges, the alert attempt FAILS
+    assert runmod.send_daily_report_if_due(cfg, ledger, send) is False
+    assert (cfg.reports_dir / day / ".wedged").exists()
+    assert delivered == []
+    # tick 2 (same day, telegram back): the scan's wedge-skip re-attempts
+    # and delivers; the F1 guard keeps the day parked
+    down["on"] = False
+    assert runmod.send_daily_report_if_due(
+        cfg, ledger, _send_time(hour=15)) is False
+    assert len(delivered) == 1, "one successful send"
+    # tick 3: delivered — silence
+    assert runmod.send_daily_report_if_due(
+        cfg, ledger, _send_time(hour=16)) is False
+    assert len(delivered) == 1, "then no more"
+    assert not (cfg.reports_dir / day / ".sent").exists()
+
+
+def _pending_resume(cfg, ledger, monkeypatch):
+    from pipeline.tests.test_r_loop8 import _daily_seed
+    from pipeline.tests.test_r_loop9 import _interrupt_before_stamps
+    docs: list[bytes] = []
+    send, sid, csv_path, day = _daily_seed(cfg, ledger, monkeypatch,
+                                           docs=docs)
+    _interrupt_before_stamps(cfg, ledger, monkeypatch, send)
+    return send, day, cfg.reports_dir / day
+
+
+def test_transient_stat_error_does_not_wedge(cfg, ledger, monkeypatch):
+    """Path.exists() swallows OSError into a false 'missing CSV', so an
+    EMFILE/EIO blip at that stat wrote a PERMANENT .wedged (human must
+    rm it) for a condition the next 600s tick would have passed."""
+    import os as osmod
+
+    from pipeline.tests.test_review_r5_driver import _send_time
+    send, day, day_dir = _pending_resume(cfg, ledger, monkeypatch)
+    real_stat = osmod.stat
+
+    def flaky_stat(p, *a, **k):
+        if str(p).endswith(f"payment-{day}.csv"):
+            raise OSError(24, "Too many open files")
+        return real_stat(p, *a, **k)
+    monkeypatch.setattr(runmod.os, "stat", flaky_stat)
+    assert runmod.send_daily_report_if_due(
+        cfg, ledger, _send_time(hour=15)) is False
+    assert not (day_dir / ".wedged").exists(), \
+        "a transient stat failure must not wedge"
+    monkeypatch.setattr(runmod.os, "stat", real_stat)
+    # fault cleared: the resume completes on the next tick
+    assert runmod.send_daily_report_if_due(
+        cfg, ledger, _send_time(hour=16)) is True
+    assert (day_dir / ".sent").exists()
+
+
+def test_transient_record_read_error_does_not_wedge(cfg, ledger,
+                                                    monkeypatch):
+    """Same split for the record read: a bare OSError retries next tick;
+    only parse-level corruption wedges."""
+    from pipeline.tests.test_review_r5_driver import _send_time
+    send, day, day_dir = _pending_resume(cfg, ledger, monkeypatch)
+    record = day_dir / ".daily-counted.json"
+    record.chmod(0o000)
+    try:
+        assert runmod.send_daily_report_if_due(
+            cfg, ledger, _send_time(hour=15)) is False
+        assert not (day_dir / ".wedged").exists()
+    finally:
+        record.chmod(0o644)
+    assert runmod.send_daily_report_if_due(
+        cfg, ledger, _send_time(hour=16)) is True
+
+
+def test_corrupt_record_still_wedges(cfg, ledger, monkeypatch):
+    """Control: parse-level corruption is NOT transient — it still takes
+    the loud permanent wedge."""
+    from pipeline.tests.test_review_r5_driver import _send_time
+    send, day, day_dir = _pending_resume(cfg, ledger, monkeypatch)
+    (day_dir / ".daily-counted.json").write_text("{not json")
+    assert runmod.send_daily_report_if_due(
+        cfg, ledger, _send_time(hour=15)) is False
+    assert (day_dir / ".wedged").exists()
