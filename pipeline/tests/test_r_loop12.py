@@ -74,9 +74,16 @@ def test_resume_stamps_after_zip_heal_in_the_gap(cfg, ledger,
 def test_deferral_adjudicated_new_bytes_still_skip(cfg, ledger,
                                                    monkeypatch, capsys):
     """Control: when the download-time deferral has ALREADY adjudicated
-    NEW bytes inside the stamp window (real md5 backfilled beside its
-    supersede-style clear), the stamp is still skipped loudly — the
-    sheet counted the old bytes and the new hours stay countable."""
+    NEW bytes inside the stamp window, the stamp is still skipped loudly
+    — the sheet counted the old bytes and the new hours stay countable.
+
+    Re-keyed by G1 (r13 #2): the adjudication is now represented the
+    way production records it — the DURABLE ZIP_ADJ_CHANGED marker
+    event ingest.download writes beside its clear — because the old
+    transient signature (real md5 + NULL duration) is legitimately
+    erased by the probe/F6 refill and no longer means anything to
+    _stamp. The end-to-end shapes live in test_r_loop13."""
+    from pipeline import ingest
     from pipeline.tests.test_r_loop8 import _daily_seed
     docs: list[bytes] = []
     send, sid, csv_path, day = _daily_seed(cfg, ledger, monkeypatch,
@@ -90,6 +97,9 @@ def test_deferral_adjudicated_new_bytes_still_skip(cfg, ledger,
             ledger.update(sid, md5_video="e" * 32, duration_raw_s=None,
                           uploaded_reported_at=None,
                           accepted_reported_at=None)
+            ledger.set_state(
+                sid, ledger.get(sid)["state"],
+                f"{ingest.ZIP_ADJ_CHANGED} (md5 00c5 -> {'e' * 32})")
     monkeypatch.setattr(runmod.telegram, "send_message", newbytes_mid_send)
     assert runmod.send_daily_report_if_due(cfg, ledger, send) is True
     row = ledger.get(sid)

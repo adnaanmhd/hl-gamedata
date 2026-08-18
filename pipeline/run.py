@@ -1134,11 +1134,13 @@ def _resume_daily_send(cfg: C.Config, ledger: Ledger, now_ist: datetime,
     # crash-recovery gap, this covers the stamp window itself.
     stamped = reports.mark_uploads_reported(ledger, lo, hi,
                                             sids=counted_keep,
-                                            md5s=rec.get("md5") or {})
+                                            md5s=rec.get("md5") or {},
+                                            counted_at=rec.get("at"))
     if stamped:
         print(f"[daily] resume: re-stamped {stamped} root upload(s)")
     acc_stamped = reports.mark_accepted_reported(ledger, accepted_keep,
-                                                 md5s=rec.get("md5") or {})
+                                                 md5s=rec.get("md5") or {},
+                                                 counted_at=rec.get("at"))
     if acc_stamped:
         print(f"[daily] resume: re-stamped {acc_stamped} accepted node(s)")
     (cfg.reports_dir / ".last_daily_sent").write_text(hi)
@@ -1304,6 +1306,7 @@ def send_daily_report_if_due(cfg: C.Config, ledger: Ledger,
     # header-only) sheet overwrote payment-<day>.csv and went out as the
     # payment document. From here on a retry RESUMES instead (see
     # _resume_daily_send).
+    counted_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
     tmp = record.with_name(record.name + f".tmp{os.getpid()}")
     tmp.write_text(json.dumps({
         "lo": lo, "hi": hi, "counted": counted, "accepted": accepted,
@@ -1313,9 +1316,13 @@ def send_daily_report_if_due(cfg: C.Config, ledger: Ledger,
         # the resume skips re-stamping any sid whose bytes changed under
         # the record (supersede/different-md5 heal — the only unguarded
         # mark-clearing flows; r-loop 9 #4, deviation in plan §9 D5b),
-        # and the stamps compare-and-set on it. "at" is forensic.
+        # and the stamps compare-and-set on it. "at" is ALSO the
+        # recorded-'' arm's count-time anchor (r-loop 13 #2): _stamp
+        # skips a recorded-'' sid whose ZIP_ADJ_CHANGED adjudication
+        # marker postdates it. Captured once, above, so the record and
+        # the stamp calls below carry the IDENTICAL string.
         "md5": md5s,
-        "at": datetime.now(timezone.utc).isoformat(timespec="seconds")}))
+        "at": counted_at}))
     os.replace(tmp, record)
     msg = reports.build_daily_message(d, p)
     if window_clamped:
@@ -1339,14 +1346,16 @@ def send_daily_report_if_due(cfg: C.Config, ledger: Ledger,
     # smaller resent sheet — never toward double-counted hours. The
     # stamps are exactly what THIS sheet counted (review-r5 #3).
     stamped = reports.mark_uploads_reported(ledger, lo, hi, sids=counted,
-                                            md5s=md5s)
+                                            md5s=md5s,
+                                            counted_at=counted_at)
     if stamped:
         print(f"[daily] stamped {stamped} root upload(s) as reported")
     # the accepted-side mark rides the SAME pre-anchor position for the
     # same reason: stamped-then-killed errs toward a smaller resent sheet,
     # never toward hours paid twice (RULED split, Adnaan 2026-08-18)
     acc_stamped = reports.mark_accepted_reported(ledger, accepted,
-                                                md5s=md5s)
+                                                md5s=md5s,
+                                                counted_at=counted_at)
     if acc_stamped:
         print(f"[daily] stamped {acc_stamped} node(s) as accepted-reported")
     anchor.write_text(hi)          # next report's window starts here

@@ -298,11 +298,23 @@ class Ledger:
         # future sheet (the §4 bug in its other form). tree_sealed_at
         # likewise (r-loop 8): new bytes = new hours; a stale whole-tree
         # seal would lock the re-upload's tree out of every sheet.
+        detail = f"superseded: new md5 {new_md5}"
+        if not new_md5 and row["md5_video"]:
+            # zip-class supersede (ingest's re-upload branch passes ""):
+            # the new bytes' md5 is UNKNOWABLE from the Drive listing, so
+            # remember the pre-reset md5 in the SAME breadcrumb format the
+            # quarantine heal writes (ingest.download parses it with
+            # rsplit("prev_md5=", 1)). The download-time deferral then
+            # adjudicates this '' writer exactly like the heal class: a
+            # stamp that falsely landed in the window (the CAS-miss ''
+            # arm cannot tell the two '' writers apart) self-heals when
+            # the bytes prove CHANGED; an identical-bytes re-zip lets it
+            # stand (r-loop 13 #1/#3).
+            detail += f"; prev_md5={row['md5_video']}"
         self.db.execute(
             "INSERT INTO events(session_id, ts, from_state, to_state, detail)"
             " VALUES(?,?,?,?,?)",
-            (session_id, now, row["state"], "DISCOVERED",
-             f"superseded: new md5 {new_md5}"))
+            (session_id, now, row["state"], "DISCOVERED", detail))
         self.db.execute(
             "UPDATE sessions SET state='DISCOVERED' WHERE session_id=?",
             (session_id,))

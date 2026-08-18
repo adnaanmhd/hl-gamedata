@@ -39,6 +39,18 @@ _ZIP_PART_RE = re.compile(r"\.zip([.-]?\d{3})?$|\.z\d{2}$", re.IGNORECASE)
 # survives the folder "listing complete" while parts are still arriving
 ZIP_PARTS_MARKER = "zip parts incomplete"
 
+# Durable adjudication marker (r-loop 13 #2): written by download()'s
+# deferred-clear branch at the moment it proves a ''-md5 slot's
+# re-uploaded bytes CHANGED. reports._stamp keys its recorded-'' arm on
+# this EVENT's ts versus the sheet's count time — the previous
+# discriminator (real md5 beside a NULL duration_raw_s) was transient
+# row state that the F6 validate-time backfill legitimately refills, so
+# adjudicated-NEW-bytes roots were silently re-stamped on resume. The
+# forensic suffix written after this constant deliberately avoids the
+# literal 'prev_md5=' token so the deferral's own LIKE-parse below can
+# never pick the marker up as a breadcrumb.
+ZIP_ADJ_CHANGED = "zip-backfill: bytes CHANGED"
+
 
 def run_rclone(args: list[str], *, timeout_s: int = 3600
                ) -> subprocess.CompletedProcess:
@@ -875,6 +887,16 @@ def download(cfg: C.Config, ledger: Ledger, session_id: str) -> str:
                                   uploaded_reported_at=None,
                                   accepted_reported_at=None,
                                   tree_sealed_at=None)
+                    # durable CHANGED marker (r-loop 13 #2) — same-state
+                    # audit event, the reclaim-marker pattern; the state
+                    # here is DOWNLOADING (set at entry, single-owner).
+                    # A kill before the md5 write below replays this
+                    # whole branch, so a duplicate marker is possible
+                    # and harmless (any marker at/after the count
+                    # triggers the stamp skip).
+                    ledger.set_state(
+                        session_id, "DOWNLOADING",
+                        f"{ZIP_ADJ_CHANGED} (md5 {old} -> {local_md5})")
             ledger.update(session_id, md5_video=local_md5)
         # adjudicated LOSERS (REJECTED/DUPLICATE) are excluded: when the
         # scan already picked this copy as the winner, seeing its beaten

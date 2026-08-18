@@ -15,6 +15,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from . import config as C
+from .ingest import ZIP_ADJ_CHANGED
 from .ledger import Ledger
 from .pace import PaceStatus
 
@@ -307,7 +308,7 @@ def r_countable(root) -> bool:
 
 
 def _stamp(ledger: Ledger, sid: str, column: str, now: str,
-           md5s: dict | None) -> bool:
+           md5s: dict | None, counted_at: str | None = None) -> bool:
     """One payment stamp, compare-and-set on the bytes the sheet counted
     (r-loop 11 #7): when the snapshot carries this sid's REAL md5, the
     stamp lands only if the row still holds those bytes — a supersede/
@@ -322,13 +323,21 @@ def _stamp(ledger: Ledger, sid: str, column: str, now: str,
     change). Treating '' as byte identity made the CAS falsely skip on
     both sides of the sentinel and the SAME uploaded hours landed on two
     sent sheets via the late-arrival re-entry — a silent double-pay, the
-    unrecoverable direction. So: a falsy snapshot stamps (unless the
-    download-time deferral has since adjudicated NEW bytes — its
-    supersede-style clear leaves a real md5 beside a NULL duration), and
-    a CAS miss against a row now holding '' stamps too (the deferral
-    adjudicates those bytes at download time and clears if they really
-    changed). Only a real-vs-real mismatch means "a clearing tool ran
-    here" and skips."""
+    unrecoverable direction. So (r-loop 13 #1/#2/#3): a falsy snapshot
+    stamps unless the download-time deferral has since adjudicated the
+    bytes CHANGED — read from its DURABLE marker event
+    (ingest.ZIP_ADJ_CHANGED) at-or-after `counted_at`, never from row
+    state, which the F6 validate-time backfill legitimately refills —
+    and a CAS miss against a row now holding '' stamps too: BOTH ''
+    writers (the stamp-preserving heal and the zip-class supersede) now
+    leave a prev_md5 breadcrumb, so the deferral adjudicates those
+    bytes at download time and a falsely-landed stamp self-heals. Only
+    a real-vs-real mismatch means "a clearing tool ran here" and skips.
+
+    `counted_at` is the durable count record's "at" — the two
+    production paths (fresh send + resume) always pass it; None
+    (tools/legacy callers without a count record) keeps the
+    unconditional recorded-'' stamp."""
     if md5s is None or sid not in md5s:
         # caller without a snapshot (tools, pre-r9 resume records, or a
         # sid the map never recorded): the pre-r11 unconditional stamp
@@ -337,26 +346,36 @@ def _stamp(ledger: Ledger, sid: str, column: str, now: str,
     m = md5s[sid]
     if not m:
         # the sheet COUNTED this sid with the '' sentinel. Stamp — unless
-        # the download-time deferral has since adjudicated NEW bytes
-        # (its clear ran: md5 backfilled real, duration gone) — then the
-        # sheet counted the old bytes.
-        row = ledger.get(sid)
-        if row is not None and row["md5_video"] and \
-                row["duration_raw_s"] is None:
-            print(f"[sheet-stamp] {sid}: bytes were unknowable at count "
-                  f"time and the download since proved them NEW — "
-                  f"{column} SKIPPED; the new hours stay countable",
-                  file=sys.stderr)
-            return False
+        # the download-time deferral has since adjudicated the bytes
+        # CHANGED (durable marker at-or-after the count) — then the
+        # sheet counted the old bytes and the new hours must stay
+        # countable. `>=`, not `>`: a marker in the record-write second
+        # is post-count too (a marker BEFORE the sheet's row read would
+        # have left a REAL md5 in the snapshot and this arm is never
+        # reached), while `>` let a same-second adjudication re-stamp.
+        if counted_at:
+            adj = ledger.db.execute(
+                "SELECT 1 FROM events WHERE session_id=? AND "
+                "detail LIKE ? AND ts >= ? LIMIT 1",
+                (sid, ZIP_ADJ_CHANGED + "%", counted_at)).fetchone()
+            if adj is not None:
+                print(f"[sheet-stamp] {sid}: bytes were unknowable at "
+                      f"count time and the download since proved them "
+                      f"NEW — {column} SKIPPED; the new hours stay "
+                      f"countable", file=sys.stderr)
+                return False
         ledger.update(sid, **{column: now})
         return True
     if ledger.update_where_md5(sid, m, **{column: now}):
         return True
     row = ledger.get(sid)
     if row is not None and not row["md5_video"]:
-        # a zip-class heal rewrote the md5 to the UNKNOWABLE sentinel
-        # while deliberately preserving the stamps — not byte-change
-        # evidence; the download-time prev_md5 deferral adjudicates
+        # a zip-class writer rewrote the md5 to the UNKNOWABLE sentinel
+        # — the stamp-preserving heal or the zip-class supersede; not
+        # byte-change evidence either way, and both leave a prev_md5
+        # breadcrumb (r-loop 13 #1/#3), so the download-time deferral
+        # adjudicates: changed bytes clear this stamp and the hours
+        # re-enter; identical bytes (ctime-only re-zip) let it stand
         ledger.update(sid, **{column: now})
         return True
     print(f"[sheet-stamp] {sid}: bytes changed since the sheet counted "
@@ -367,7 +386,8 @@ def _stamp(ledger: Ledger, sid: str, column: str, now: str,
 
 def mark_uploads_reported(ledger: Ledger, lo: str, hi: str,
                           sids: list[str] | None = None,
-                          md5s: dict | None = None) -> int:
+                          md5s: dict | None = None,
+                          counted_at: str | None = None) -> int:
     """Stamp uploaded_reported_at on every root the just-generated sheet
     counted. The stamp is what stops a late arrival being counted twice.
     Returns the number stamped.
@@ -378,10 +398,14 @@ def mark_uploads_reported(ledger: Ledger, lo: str, hi: str,
     stamped without ever being counted — its hours vanished from every
     sheet (review-r5 #3). The re-derive below survives only as a fallback
     for callers without a counted list. `md5s` is build_sheet_rows'
-    md5_out snapshot — see _stamp (r-loop 11 #7)."""
+    md5_out snapshot — see _stamp (r-loop 11 #7). `counted_at` is the
+    durable count record's "at" (r-loop 13 #2) — both production paths
+    pass it; None (tools/legacy) keeps the unconditional recorded-''
+    arm."""
     now = datetime.now(timezone.utc).isoformat(timespec="seconds")
     if sids is not None:
-        return sum(_stamp(ledger, sid, "uploaded_reported_at", now, md5s)
+        return sum(_stamp(ledger, sid, "uploaded_reported_at", now, md5s,
+                          counted_at)
                    for sid in sids)
     lo_dt, hi_dt = _parse_ts(lo), _parse_ts(hi)
     if lo_dt is None or hi_dt is None:
@@ -402,7 +426,8 @@ def mark_uploads_reported(ledger: Ledger, lo: str, hi: str,
 
 
 def mark_accepted_reported(ledger: Ledger, sids: list[str],
-                           md5s: dict | None = None) -> int:
+                           md5s: dict | None = None,
+                           counted_at: str | None = None) -> int:
     """Stamp accepted_reported_at on every NODE whose accepted hours (or
     reject labels) the just-generated sheet counted — build_sheet_rows'
     accepted_out. Returns the number stamped.
@@ -420,9 +445,11 @@ def mark_accepted_reported(ledger: Ledger, sids: list[str],
     raced the pipeline threads and stamped rows the sheet never counted
     (review-r5 #3). The caller passes what the sheet actually counted.
     `md5s` is build_sheet_rows' md5_out snapshot — see _stamp
-    (r-loop 11 #7)."""
+    (r-loop 11 #7); `counted_at` is the count record's "at" — see
+    mark_uploads_reported (r-loop 13 #2)."""
     now = datetime.now(timezone.utc).isoformat(timespec="seconds")
-    return sum(_stamp(ledger, sid, "accepted_reported_at", now, md5s)
+    return sum(_stamp(ledger, sid, "accepted_reported_at", now, md5s,
+                      counted_at)
                for sid in sids)
 
 

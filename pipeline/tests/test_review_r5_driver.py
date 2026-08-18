@@ -149,9 +149,9 @@ def test_daily_send_order_stamps_then_anchor_then_marker(cfg, ledger,
     events = []
     real_mark = reports.mark_uploads_reported
 
-    def spy_mark(led_, lo, hi, sids=None, md5s=None):
+    def spy_mark(led_, lo, hi, sids=None, md5s=None, **kw):
         events.append(("stamps", anchor.exists(), marker.exists()))
-        return real_mark(led_, lo, hi, sids=sids, md5s=md5s)
+        return real_mark(led_, lo, hi, sids=sids, md5s=md5s, **kw)
     monkeypatch.setattr(reports, "mark_uploads_reported", spy_mark)
     real_touch = Path.touch
 
@@ -187,9 +187,9 @@ def test_daily_send_stamps_exactly_the_counted_roots(cfg, ledger,
     calls = []
     real_mark = reports.mark_uploads_reported
 
-    def spy_mark(led_, lo, hi, sids=None, md5s=None):
+    def spy_mark(led_, lo, hi, sids=None, md5s=None, **kw):
         calls.append(sids if sids is None else list(sids))
-        return real_mark(led_, lo, hi, sids=sids, md5s=md5s)
+        return real_mark(led_, lo, hi, sids=sids, md5s=md5s, **kw)
     monkeypatch.setattr(reports, "mark_uploads_reported", spy_mark)
     assert runmod.send_daily_report_if_due(cfg, ledger, send) is True
     assert calls == [[DROOT]]              # exactly the counted roots
