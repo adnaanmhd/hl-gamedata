@@ -249,6 +249,178 @@ def test_rrd_child_calledprocesserror_defers_delivery_batch(
     assert stats["upload_failures"] == 1
 
 
+# ------- D4a (#11/#20): gate-record spans rebased across clock shifts
+
+def _gate_parent(tmp_path, inputs, windows):
+    """Real-writer gate entry (C7 discipline): synthetic frames.csv at
+    1 row/s, real gate.gate_windows note."""
+    from pipeline import gate
+    from pipeline.tests.test_r_loop7 import make_gate_csv
+    work = tmp_path / "gatework"
+    work.mkdir(exist_ok=True)
+    make_gate_csv(work, inputs=inputs)
+    note = gate.gate_windows(work, windows)
+    return {"fix": "FIX_GATE_WINDOW", "ok": True,
+            "params": {"windows": [[a, b] for a, b in windows]},
+            "note": note}
+
+
+def test_level2_split_keeps_the_gate_record_on_the_child_clock(tmp_path):
+    """Every span in a gate record was on the parent clock AT GATE TIME,
+    but cutter rebases child rows to the segment's own PTS — a level-2
+    split compared child-clock bounds against parent-clock spans and
+    dropped the record from ALL grandchildren (the r-loop-6 blocker shape
+    one level down; grandchildren exist in production)."""
+    from pipeline.validate import _gate_destroyed
+    entry = _gate_parent(tmp_path, {300: ("Q", "general_cancel"),
+                                    301: ("Q", "general_cancel"),
+                                    302: ("Q", "general_cancel")},
+                         [(300.0, 302.0)])
+    parent = tmp_path / "dossiers" / "S"
+    parent.mkdir(parents=True)
+    # level 1: blanked rows land in S-p2 (t0=200) -> child clock ~100
+    fixmod._propagate_gate_record(parent, tmp_path / "dossiers", [entry],
+                                  [{"id": "S-p1", "t0": 0.0, "t1": 200.0},
+                                   {"id": "S-p2", "t0": 200.0,
+                                    "t1": 400.0}])
+    # level 2: split S-p2 at ITS OWN clock 150 — the blanked rows (~100)
+    # belong to the first grandchild
+    fixmod._propagate_gate_record(
+        tmp_path / "dossiers" / "S-p2", tmp_path / "dossiers", [],
+        [{"id": "S-p2-p1", "t0": 0.0, "t1": 150.0},
+         {"id": "S-p2-p2", "t0": 150.0, "t1": 200.0}])
+    g1 = _gate_destroyed(tmp_path / "dossiers" / "S-p2-p1")
+    g2 = _gate_destroyed(tmp_path / "dossiers" / "S-p2-p2")
+    assert g1 == {"actions": ["general_cancel"], "key_frames": 3}, g1
+    assert g2 == {"actions": [], "key_frames": 0}, g2
+
+
+def test_retrim_after_gate_rebases_the_record_spans(tmp_path):
+    """FIX_RETRIM_HEAD rebases the parent's surviving rows; an attempt-2
+    cut then WITHHELD the record from the segment containing the blanked
+    rows and wrongly handed it to the sibling — the r-loop-7 harm
+    resurrected."""
+    from pipeline.validate import _gate_destroyed
+    entry = _gate_parent(tmp_path, {200: ("E", "interact"),
+                                    201: ("E", "interact"),
+                                    202: ("E", "interact")},
+                         [(200.0, 202.0)])
+    parent = tmp_path / "dossiers" / "R"
+    parent.mkdir(parents=True)
+    fixmod._append_fixlog(parent, [entry])
+    fixmod._append_fixlog(parent, [{
+        "fix": "FIX_RETRIM_HEAD", "ok": True, "params": {"head_s": 30.0},
+        "note": {"session": "R", "head_cut_s": 30.0}}])
+    # post-trim clocks: blanked rows now at ~170-172
+    fixmod._propagate_gate_record(parent, tmp_path / "dossiers", [],
+                                  [{"id": "R-p1", "t0": 0.0, "t1": 180.0},
+                                   {"id": "R-p2", "t0": 180.0,
+                                    "t1": 370.0}])
+    g1 = _gate_destroyed(tmp_path / "dossiers" / "R-p1")
+    g2 = _gate_destroyed(tmp_path / "dossiers" / "R-p2")
+    assert g1 == {"actions": ["interact"], "key_frames": 3}, g1
+    assert g2 == {"actions": [], "key_frames": 0}, g2
+
+
+# ------- D4b (#14): adoption propagates; child-write OSError is host
+
+def test_adoption_propagates_the_gate_record(cfg, ledger, monkeypatch):
+    """Both mid-split crash-adoption paths completed the SPLIT without
+    ever calling _propagate_gate_record — a kill between the cutter's
+    manifest write and the propagation loop shipped children with no
+    inherited record."""
+    import json as _json
+
+    from pipeline import continuous as cont
+    sid = "P"
+    _ins(ledger, sid, state="FIXING")
+    for kid, t0, t1 in ((f"{sid}-p1", 0.0, 200.0),
+                        (f"{sid}-p2", 200.0, 400.0)):
+        ledger.insert_session(
+            session_id=kid, game="kamla", operator_email="op@x.com",
+            player_email="p@x.com", drive_path=f"kamla/op/p/{sid}",
+            drive_ctime="2026-08-14T10:00:00.000Z", md5_video="", bytes_=0,
+            state="INGESTED", parent_id=sid,
+            detail=f"split segment {t0}-{t1}s")
+    (cfg.work / f"{sid}.split-manifest.json").write_text(
+        _json.dumps({"segments": [f"{sid}-p1", f"{sid}-p2"]}))
+    entry = _gate_parent(cfg.work, {300: ("Q", "general_cancel"),
+                                    301: ("Q", "general_cancel")},
+                         [(300.0, 301.0)])
+    fixmod._append_fixlog(cfg.dossiers / sid, [entry])
+
+    drv = cont.ContinuousDriver(cfg, send_telegram=False)
+    assert drv._fixing_triage(ledger, sid, ledger.get(sid)) is False
+    assert ledger.get(sid)["state"] == "SPLIT"
+    from pipeline.validate import _gate_destroyed
+    g2 = _gate_destroyed(cfg.dossiers / f"{sid}-p2")
+    assert g2 == {"actions": ["general_cancel"], "key_frames": 2}, g2
+    assert not (cfg.dossiers / f"{sid}-p1" / "fixlog.json").exists()
+
+
+def test_child_fixlog_oserror_is_host_kind_through_apply_fixes(
+        tmp_path, monkeypatch):
+    """`except OSError: pass` around the per-child write silently shipped
+    a child without its record on ENOSPC — now the OSError surfaces and
+    apply_fixes classifies it HOST, so the carve-out discards the
+    rescinded cut and re-derives."""
+    entry = _gate_parent(tmp_path, {40: ("E", "interact")}, [(40.0, 41.0)])
+    dossiers = tmp_path / "dossiers"
+    (dossiers / "K").mkdir(parents=True)
+    fixmod._append_fixlog(dossiers / "K", [entry])
+    # a FILE squatting on the child-dossier path makes mkdir raise
+    # FileExistsError (an OSError) — a stand-in for ENOSPC
+    (dossiers / "K-p1").write_text("squatter")
+    monkeypatch.setattr(
+        fixmod, "_dispatch",
+        lambda fix_id, params, work, game, root: {
+            "segments": [{"id": "K-p1", "t0": 0.0, "t1": 100.0}],
+            "dropped": []})
+    work = tmp_path / "K"
+    work.mkdir()
+    out = fixmod.apply_fixes(work, {"steps": [("FIX_CUT_SEGMENTS", {})]},
+                             game="kamla", dossier_dir=dossiers / "K")
+    assert out["kind"] == "host", out
+    assert "FIX_CUT_SEGMENTS" in (out["error"] or "")
+
+
+# ------- D4c (#22): applied-span preference pinned at both sites
+
+def test_pad_spill_propagates_via_applied_spans_legacy(tmp_path):
+    """A window ending exactly at a cut boundary: the pad rows spill into
+    the next segment, so the APPLIED span (note.windows) must decide —
+    the requested window alone would withhold the record (preference was
+    mutation-proved suite-invisible)."""
+    entry = _gate_parent(tmp_path, {100: ("E", "interact"),
+                                    101: ("E", "interact"),
+                                    102: ("E", "interact")},
+                         [(100.0, 102.0)])
+    applied_spans = entry["note"]["windows"]
+    assert applied_spans and applied_spans[0][1] > 102.0, \
+        "the real gate must pad beyond the requested end"
+    legacy = {"fix": "FIX_GATE_WINDOW", "ok": True,
+              "params": dict(entry["params"]),
+              "note": {"windows": applied_spans,
+                       "destroyed": entry["note"]["destroyed"]}}
+    # requested [100,102] does not touch [102.5, 200); the pad does
+    assert fixmod._gate_entry_touches(legacy, 102.5, 200.0) is True
+    bare = {"fix": "FIX_GATE_WINDOW", "ok": True,
+            "params": dict(entry["params"]), "note": {}}
+    assert fixmod._gate_entry_touches(bare, 102.5, 200.0) is False
+
+
+def test_pad_spill_selects_the_window_per_window(tmp_path):
+    entry = _gate_parent(tmp_path, {100: ("E", "interact"),
+                                    101: ("E", "interact"),
+                                    102: ("E", "interact")},
+                         [(100.0, 102.0)])
+    pw = entry["note"]["per_window"]
+    assert pw and pw[0]["windows"][0][1] > 102.0
+    mine = fixmod._entries_for_segment([entry], 102.5, 200.0, "S")
+    assert mine, "the pad-widened applied span must select the window"
+    assert mine[0]["note"]["destroyed"]["key_frames"] > 0
+
+
 def test_engine_oserror_is_host_classed_through_validate(tmp_path,
                                                          monkeypatch):
     """The OSError type was laundered into the a.error STRING, so

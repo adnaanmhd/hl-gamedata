@@ -450,6 +450,33 @@ def _recover_split(cfg, ledger, sid: str, row) -> tuple[bool, list[str]]:
     return True, sorted(set(manifest_ids) | have_rows)
 
 
+def _adopted_segments(ledger, kid_ids: list[str]) -> list[dict]:
+    """Segment bounds for adoption-path gate-record propagation
+    (r-loop 9 #14): parsed from each child's insert-event detail
+    ("split segment {t0}-{t1}s", written by the normal cut path).
+    Adopted-child inserts whose detail lacks bounds get t0=t1=None —
+    _propagate_gate_record then propagates whole (dup-over-drop is the
+    doctrine)."""
+    import re as _re
+    segs = []
+    for kid in kid_ids:
+        t0 = t1 = None
+        r = ledger.db.execute(
+            "SELECT detail FROM events WHERE session_id=? AND "
+            "detail LIKE 'split segment %' ORDER BY ts LIMIT 1",
+            (kid,)).fetchone()
+        if r:
+            m = _re.match(r"^split segment ([0-9.]+)-([0-9.]+)s$",
+                          r["detail"])
+            if m:
+                try:
+                    t0, t1 = float(m.group(1)), float(m.group(2))
+                except ValueError:
+                    t0 = t1 = None
+        segs.append({"id": kid, "t0": t0, "t1": t1})
+    return segs
+
+
 def _fix_phase(cfg, ledger, sids, alerts, *, workers: int,
                children_sink=None) -> list[str]:
     """Fix FIX_QUEUED sessions (≤2 attempts each, R2); returns new child
@@ -498,6 +525,22 @@ def _fix_phase(cfg, ledger, sids, alerts, *, workers: int,
                              if (cfg.work / k).is_dir()])
                     except Exception as e:
                         print(f"[shift-propagate-failed] {sid}: {e}",
+                              file=sys.stderr)
+                    # the GATE record too (r-loop 9 #14): the normal cut
+                    # path propagates it inside apply_fixes, so a kill
+                    # between the manifest write and that loop shipped
+                    # children with no inherited record — wrongful
+                    # unfixable reject of the child holding the blanked
+                    # rows. Earlier-attempt entries live in the parent
+                    # fixlog; bounds parse from the child insert details.
+                    # Loud-not-blocking here: adoption is crash recovery
+                    # and must complete (deviation recorded in the plan).
+                    try:
+                        fix._propagate_gate_record(
+                            cfg.dossiers / sid, cfg.dossiers, [],
+                            _adopted_segments(ledger, kid_ids))
+                    except Exception as e:
+                        print(f"[gate-propagate-failed] {sid}: {e}",
                               file=sys.stderr)
                     ledger.set_state(sid, "SPLIT",
                                      f"{len(kid_ids)} segments (completed "

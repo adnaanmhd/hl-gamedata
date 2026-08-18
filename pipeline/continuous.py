@@ -850,6 +850,15 @@ class ContinuousDriver:
             except Exception as e:
                 print(f"[shift-propagate-failed] {sid}: {e}",
                       file=sys.stderr)
+            # the GATE record too — run._fix_phase's adoption branch has
+            # the same call and rationale (r-loop 9 #14)
+            try:
+                fix._propagate_gate_record(
+                    self.cfg.dossiers / sid, self.cfg.dossiers, [],
+                    runmod._adopted_segments(led, kid_ids))
+            except Exception as e:
+                print(f"[gate-propagate-failed] {sid}: {e}",
+                      file=sys.stderr)
             led.set_state(sid, "SPLIT",
                           f"{len(kid_ids)} segments (completed after "
                           f"mid-split crash)")

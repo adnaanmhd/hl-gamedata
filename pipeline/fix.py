@@ -519,21 +519,33 @@ def _propagate_gate_record(parent_dossier: Path, dossier_root: Path,
     below, and for the same reason: state established on the parent's
     timeline has to follow the footage.
     """
-    gate_entries = [e for e in applied
-                    if e.get("fix") == "FIX_GATE_WINDOW" and e.get("ok")]
-    # plus anything an EARLIER attempt on this parent gated
+    # Walk EARLIER attempts (parent fixlog) then the CURRENT attempt in
+    # order, so every gate entry can be brought onto the CURRENT parent
+    # clock first: stored spans are on the clock AT GATE TIME, and every
+    # ok FIX_RETRIM_HEAD applied AFTER a gate entry shifted the parent's
+    # surviving rows earlier by its actual cut — comparing stale spans
+    # against post-trim segment bounds withheld the record from the
+    # segment that contains the blanked rows and handed it to the sibling
+    # (r-loop 9 #11).
+    ordered: list[dict] = []
     try:
         log = json.loads((parent_dossier / "fixlog.json").read_text())
     except (FileNotFoundError, json.JSONDecodeError, OSError):
         log = []
     if isinstance(log, list):
         for rec in log:
-            if not isinstance(rec, dict):
-                continue
-            for e in (rec.get("fixes") or []):
-                if isinstance(e, dict) and e.get("fix") == "FIX_GATE_WINDOW" \
-                        and e.get("ok"):
-                    gate_entries.append(e)
+            if isinstance(rec, dict):
+                ordered.extend(e for e in (rec.get("fixes") or [])
+                               if isinstance(e, dict))
+    ordered.extend(e for e in applied if isinstance(e, dict))
+    gate_entries = []
+    for i, e in enumerate(ordered):
+        if e.get("fix") != "FIX_GATE_WINDOW" or not e.get("ok"):
+            continue
+        off = sum(_retrim_cut(later) for later in ordered[i + 1:]
+                  if later.get("fix") == "FIX_RETRIM_HEAD"
+                  and later.get("ok"))
+        gate_entries.append(_rebase_gate_entry(e, off))
     if not gate_entries:
         return
     for seg in segments:
@@ -562,10 +574,81 @@ def _propagate_gate_record(parent_dossier: Path, dossier_root: Path,
                                     seg.get("t1"), parent_dossier.name)
         if not mine:
             continue
+        # rebase every span into the CHILD's clock: its row 0 sits at
+        # parent-clock t0 (cutter used src_pts[i0]; t0 is its rounded
+        # twin — the <=1ms skew is absorbed by the pad-widened spans).
+        # Without this a level-2 split compared child-clock bounds
+        # against parent-clock spans and dropped the record from ALL
+        # grandchildren (r-loop 9 #20). t0 unknown -> unadjusted.
         try:
-            _append_fixlog(dossier_root / sid, mine)
-        except OSError:
-            pass
+            child_off = float(seg.get("t0"))
+        except (TypeError, ValueError):
+            child_off = 0.0
+        if child_off:
+            mine = [_rebase_gate_entry(e, child_off) for e in mine]
+        # OSError propagates: apply_fixes' except classifies it HOST and
+        # the r-loop-8 carve-out discards the rescinded cut and
+        # re-derives — the old `except OSError: pass` silently shipped a
+        # child without its record on ENOSPC, the exact silent-drop this
+        # function's doctrine forbids (r-loop 9 #14).
+        _append_fixlog(dossier_root / sid, mine)
+
+
+def _retrim_cut(entry: dict) -> float:
+    """The ACTUAL head cut an ok FIX_RETRIM_HEAD removed: the tool's note
+    records head_cut_s (keyframe-snapped); the requested params.head_s is
+    only the fallback for older/torn notes (r-loop 9 #11)."""
+    note = entry.get("note") if isinstance(entry.get("note"), dict) else {}
+    v = note.get("head_cut_s")
+    if v is None:
+        v = (entry.get("params") or {}).get("head_s")
+    try:
+        return float(v or 0.0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _rebase_gate_entry(entry: dict, off: float) -> dict:
+    """A fresh copy of a gate entry with every readable [a, b] span
+    shifted earlier by `off` seconds (clamped at 0) — used both to bring
+    stored spans onto the CURRENT parent clock (subtract later retrim
+    cuts) and to move selected entries onto a CHILD's clock (subtract the
+    segment's t0). Unreadable spans are copied unadjusted: never drop,
+    never guess (r-loop 9 #11/#20). Always copies — the caller's entries
+    may still be written to the parent fixlog afterwards."""
+    e = json.loads(json.dumps(entry, default=str))
+    if not off:
+        return e
+
+    def shift(spans):
+        if not isinstance(spans, list):
+            return spans
+        out = []
+        for w in spans:
+            try:
+                a, b = float(w[0]), float(w[1])
+                out.append([max(a - off, 0.0), max(b - off, 0.0)])
+            except (TypeError, ValueError, IndexError, KeyError):
+                out.append(w)
+        return out
+
+    params = e.get("params")
+    if isinstance(params, dict) and "windows" in params:
+        params["windows"] = shift(params.get("windows"))
+    note = e.get("note")
+    if isinstance(note, dict):
+        if "windows" in note:
+            note["windows"] = shift(note.get("windows"))
+        pw = note.get("per_window")
+        if isinstance(pw, list):
+            for w in pw:
+                if isinstance(w, dict):
+                    if "windows" in w:
+                        w["windows"] = shift(w.get("windows"))
+                    if w.get("requested") is not None:
+                        s = shift([w.get("requested")])
+                        w["requested"] = s[0]
+    return e
 
 
 def _spans_touch(spans, t0, t1) -> bool:
