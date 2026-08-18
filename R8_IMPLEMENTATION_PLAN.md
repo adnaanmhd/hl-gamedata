@@ -43,7 +43,21 @@ the first unchecked item.
 - [x] D8 C8 leftovers (#13 parse-and-regex re-emit, #23 conv_other test) — fail-first 1/1 + 1/1 mutation-proof; Mac 623 green
 - [x] Post-D8: SUITE_FLOOR 619 pinned (run_suite.sh + FLIP_RUNBOOK §6b, commit 55cc759); gates green BOTH hosts at the D8 set — Mac 623 (96s), VM side checkout 623 (294s), both floor 619; tree-verify (diff/status/MUTATION) clean
 - [x] Review iteration 10 RAN (2026-08-19, `tools/review/flip-review-iter10.js`, 41 agents, 0 errors) — 17 raised → 16 confirmed (0 blockers), 1 killed (R10_FINDINGS.md); ALL 16 FIXED IN-ITERATION (commit 6dd2e64: fail-first 13/13 behaviour + 5/5 mutation-pins); gates green BOTH hosts (Mac 641/117s, VM 641) at floor 619 → **QUIET per R5_TRIAGE §7**. Iteration 11 proceeds anyway by Adnaan's ruling (below)
-- [ ] Review iteration 11 — **RULED by Adnaan 2026-08-19: runs REGARDLESS of 10's quiet judgment, as a FULL DEEP review of the whole codebase PLUS the hunt for regressions from the iteration-10 fixes (6dd2e64 = prime suspect)** (supersedes §5's "stop at first quiet" for this one iteration). If 11 is not quiet: STOP, hand Adnaan the list
+- [x] Review iteration 11 RAN (2026-08-19, `tools/review/flip-review-iter11.js`, 47 agents, 2 refuter deaths on usage credits) — **NOT QUIET: 20 raised → 20 confirmed (1 BLOCKER — the r10 wedge fix regressed the never-regenerate doctrine, found by 3 lanes), 0 killed**; findings of record `R11_FINDINGS.md`; fixes synthesized into §11 as F1–F11. Adnaan's ruling: not quiet ⇒ fix all, then TWO more iterations
+- [ ] F1 BLOCKER: pending/wedged TODAY never reaches the fresh path (#1/#14/#16) — §11
+- [ ] F2 orphan-void reconciles against DELIVERED nodes, loud on all-matched trees (#2/#13/#20) — §11
+- [ ] F3 fix_lagshift_csv guard re-raises host classes (#3) — §11
+- [ ] F4 hygiene judges the session's authoritative keybind (#4/#11) — §11
+- [ ] F5 wedge robustness: durable alert + no transient wedges (#5/#8/#10) — §11
+- [ ] F6 duration_raw_s=NULL roots stay payable: validate backfill + third re-entry arm (#6) — §11
+- [ ] F7 stamps compare-and-set on counted md5 (#7) — §11
+- [ ] F8 reclaim/stuck anchors scoped to the current intake stint (#9) — §11
+- [ ] F9 session_id sanitized to one path component (#12) — §11
+- [ ] F10 reset interlock covers the regen's resumable send (#15) — §11
+- [ ] F11 tests-only: watermark pin, three guard tests, fix_v1_to_v2 (check refuter first) (#17/#18/#19) — §11
+- [ ] Post-F11: new SUITE_FLOOR measured+pinned; full gate green Mac AND VM; tree-verify
+- [ ] Review iteration 12 (fix-in-iteration per §5; regressions lane targets the F-commits) — WARRANTED by Adnaan 2026-08-19
+- [ ] Review iteration 13 (confirmation pass, runs regardless of 12's verdict) — WARRANTED by Adnaan 2026-08-19; if 13 is not quiet: STOP, hand Adnaan the list
 - [ ] Independent REAL e2e verification (verdict relayed VERBATIM)
 - [ ] FLIP §5 canary (kill matrix, autoscale, digest; `_pipeline_test/` purged)
 - [ ] FLIP §6 (stop units → resize → deploy False-interlock → refix reset → arm → first hour)
@@ -1241,3 +1255,189 @@ alert path.
   fixes NOT yet applied (Adnaan redirected the r8 session to hand off).
 - Next: D1–D8 above → both gates → iteration 10 → (11) → e2e → flip,
   all per the unchanged §5/§6/§7 discipline and ground rules.
+
+## 11. R-LOOP 11 FINDINGS → fix specifications F1–F11 (added 2026-08-19 by the r9/r10 executor)
+
+**Iteration 11 (RULED full-deep + r10-regressions pass, Adnaan 2026-08-19)
+was NOT quiet: 20 raised → 20 confirmed (1 BLOCKER), 0 killed.** Findings
+of record: `R11_FINDINGS.md` (degraded-vote caveat on #19/#20 recorded
+there — two refuters died on usage-credit exhaustion). Finding numbers
+(#N) refer to R11_FINDINGS.md. **SEQUENCE RULED BY ADNAAN 2026-08-19:
+fix ALL of these (F1–F11) → review iterations 12 AND 13 (two more,
+warranted by 11 not being quiet) → e2e → flip.** Executor's reading of
+the two-iteration warrant, flag to Adnaan if wrong: 12 runs
+fix-in-iteration per §5 discipline; 13 runs as a confirmation pass
+regardless of 12's verdict; if 13 is not quiet → STOP, hand Adnaan the
+list.
+
+Execution order: F1 first (BLOCKER), then F2–F10, F11 (tests-only) last.
+Same per-commit discipline as C-/D-loops: implement → fail-first proof in
+a scratch copy OUTSIDE the repo → suite green on Mac → path-scoped
+commit; VM gate once after F11; locate by SYMBOL. The r10-fix regressions
+(F1, F2, F3, F4, F5) supersede parts of commit 6dd2e64 — cite both loops
+in comments.
+
+### F1 — BLOCKER (#1≡#14≡#16): a pending/wedged TODAY must never reach the fresh path — `pipeline/run.py`
+
+In `send_daily_report_if_due`, after the day-agnostic scan and BEFORE the
+fresh-generation path: refuse (`return False`) when today's dir holds
+`.wedged` OR `.daily-counted.json`. Rationale: every record the scan did
+not resume is by definition wedged or settled; the fresh path guarded
+only on `.sent`, so a same-day wedge (the COMMON case — interrupted 14:00
+send wedges on the 14:10 retry) fell through, REGENERATED post-stamp,
+overwrote payment CSV + counted record (destroying the human's
+reconciliation evidence), and sent the regenerated (header-only/smaller)
+sheet as the payment document — the r-loop-8 BLOCKER doctrine violated.
+Print the WEDGED/pending line on the refusal. Tests: wedge today →
+same-day tick → False, CSV and record byte-identical, no `.sent`, no
+document; the existing next-day test stays green.
+
+### F2 — orphan-void holes (#2≡#13 + #20's silent half): void on failure to reconcile against DELIVERED nodes — `pipeline/reports.py`
+
+Deterministic cutter ids make id-PRESENCE the wrong void key: any re-cut
+re-creates `R-p1`, so the orphan void never fired (silent full double-pay
+proven in two variants: same-level re-cut counts the sibling in full;
+nested re-split's SPLIT node is never compared and the grandchildren
+carrying paid footage are counted + stamped, zero loud lines). Fix in
+BOTH `build_sheet_rows` and `_tree_has_uncounted_accepted`: the void
+fires when ANY memory row fails to reconcile against the tree's
+**DELIVERED** nodes — recorded id absent, OR present as non-DELIVERED
+(SPLIT/REJECTED/pending), OR seconds-mismatched (the AMBIGUOUS case) —
+and a void tree excludes every not-in-memory DELIVERED node loudly (as
+today) AND prints the ORPHANED reconcile line for the ROOT once per sheet
+even when no not-in-mem DELIVERED node exists (#20: all-matched trees
+re-entered silently forever). Tests: same-level re-cut → sibling NOT
+counted + loud; nested re-split → grandchildren NOT counted + loud;
+all-matched orphan tree → loud line every sheet; the void itself pinned
+by mutation (orphaned=False must fail a test); existing match/collision
+tests stay green.
+
+### F3 — (#3) fix_lagshift_csv guard must not swallow host classes — `pipeline/fix.py`
+
+The r10 `except Exception → FixFailed` conversion re-typed
+MemoryError/OSError (host: attempt refunded, cooldown) as session-kind
+(attempt burned). Insert `except (OSError, MemoryError,
+sqlite3.OperationalError, subprocess.TimeoutExpired): raise` before the
+generic arm. Test: motion_track raising MemoryError → apply_fixes
+kind=host, attempt refunded; ValueError still → typed FixFailed.
+
+### F4 — (#4≡#11) hygiene judges the SESSION's authoritative keybind — `pipeline/fix.py`
+
+`fix_key_hygiene` built `bound` from the built-ins only, so the r10
+unbound strip deleted every key the session's own `raw/keybind.json`
+binds (proven: 6/6 custom-bound LShift presses deleted, session then
+passes the checker — silent delivered-data corruption), and the action
+re-resolution erased custom binds' actions. Fix: when
+`work/raw/keybind.json` exists, build kb via
+`resolve_keybind(keybind_path=..., game_name=..., exe_name=...)` exactly
+as `retranslate_from_sidecars` does, then `kb.update(KEYBIND_PATCHES)`;
+built-ins remain the fallback. `bound`, the normalize_event_key
+exemption, the unbound strip, and the resolver all use it. Tests: the
+custom-bound key survives hygiene and its action resolves; the no-sidecar
+case unchanged; the r10 unbound-strip test stays green.
+
+### F5 — wedge robustness (#5≡#8≡#10): durable alert + no transient wedges — `pipeline/run.py`
+
+(a) The wedge alert was one-shot (a TelegramError at wedge time silenced
+a needs-a-human condition forever; a failed `.wedged` WRITE with working
+Telegram spammed every tick). Fix: record alert delivery durably (e.g.
+`alerted` field inside `.wedged`, rewritten only after
+`telegram.send_message` returns); the scan's wedge-skip branch re-attempts
+the alert while undelivered — one success, then silence. (b) Transient
+host errors must not wedge: the `csv_path.exists()` gate (Path.exists
+swallows OSError → false "missing" under EMFILE/EIO) becomes an explicit
+`os.stat` try/except — FileNotFoundError wedges, any other OSError prints
+and returns False (retry next tick); same split for the record read
+(JSONDecodeError/KeyError/ValueError wedge; bare OSError retries). Tests:
+alert fails at wedge time → next tick re-attempts and delivers exactly
+once; stat raising non-ENOENT OSError → no wedge, retried; the F1
+same-day guard keeps the wedged day parked throughout.
+
+### F6 — (#6) duration_raw_s=NULL roots must stay payable — `pipeline/validate.py` + `pipeline/reports.py`
+
+A swallowed download-time ffprobe leaves the root uncountable
+(`r_countable` False) → never stamped → after its window passes, `late`
+and `accepted_due` are both unreachable → its DELIVERED/REJECTED nodes'
+hours/labels reach no sheet, silently, forever. Fix both halves:
+(a) `validate_session` backfills `duration_raw_s` from the probed
+duration (already in aux per D2) when the ledger row's value is NULL —
+restores countability via the existing lattice for every root that still
+validates; (b) reports gains the third re-entry arm for the residue that
+never re-validates (unstamped, unsealed, `up < hi_dt`, not countable,
+tree has uncounted accepted nodes → walk the tree, pay accepted
+hours/labels, loud line; uploads stay 0 — never fabricate uploaded
+hours from a NULL probe). Tests: NULL-duration root with post-window
+DELIVERED child → hours land exactly once; conservation across sheets;
+countable path unchanged.
+
+### F7 — (#7) stamps are compare-and-set on the counted bytes — `pipeline/reports.py`, `pipeline/run.py`
+
+The daily stamps run in hl-H while hl-S concurrently supersedes/heals;
+the stamp window spans Telegram sends (minutes). A reset slot stamped
+from a stale counted list strands the corrected re-upload's hours
+forever. Fix: `build_sheet_rows` emits the md5 snapshot from its OWN row
+read (add `md5_video` to its SELECT; replaces the post-build re-query
+that D5b added for the record's "md5" map);
+`mark_uploads_reported`/`mark_accepted_reported` stamp via
+`... WHERE session_id=? AND md5_video=?`, loud per-sid skip lines on
+mismatch (same semantics as the resume skip: the new hours stay
+countable). Fresh path and resume path both pass the snapshot. Tests:
+supersede between build and stamp → stamp skipped loudly, re-upload's
+hours reach a later sheet exactly once; normal path byte-identical
+behaviour.
+
+### F8 — (#9) reclaim/stuck anchors scoped to the current intake stint — `pipeline/run.py`, `pipeline/continuous.py`
+
+The DISCOVERED-media sweep (and the digest's disc_media stint query)
+anchor on the first DOWNLOADING event EVER; supersede/heal re-entries
+inherit gen-1 anchors, collapsing the 12h grace to ~0 (probe: a
+25-minute-old partial swept as "29h old"). Fix per the finder: inner
+anchor = MIN(ts) of DOWNLOADING events with ts > COALESCE(MAX(ts) of
+events whose to_state NOT IN ('DISCOVERED','DOWNLOADING'), '') — the
+_stuck_lines stint pattern; apply at both sites. Tests: gen-2 partial
+25min old survives the sweep and reports its true age; never-successful
+rows unchanged.
+
+### F9 — (#12) session_id is one safe path component — `translator/v2.py`, `translator/translate.py`
+
+Player-supplied `session_id` was joined into the output path unsanitized
+(proven: `../../../../ESCAPED_dir` wrote all four delivery files outside
+out/). Fix: reject any session_id containing `/`, `\\`, os.sep, or `..`
+(or enforce `^[A-Za-z0-9._-]+$` minus pure-dots), falling back to
+`bundle_dir.name` exactly like the non-str case; same at the v1
+translate join; defense-in-depth `out_dir.resolve()` containment assert.
+Tests: traversal session_id → output lands under out/ with the folder
+name; clean ids unchanged.
+
+### F10 — (#15) the reset interlock also covers the regen's resumable send — `pipeline/reports.py` (or both tools)
+
+`pending_daily_send` (D7b) is blind to
+`reports/<day>/.regen-v2-counted.json` without its done marker —
+a teardown in the regen --send crash window re-creates the
+stale-sheet/double-count class. Fix: extend `pending_daily_send` (single
+shared site) to also return a day whose regen record exists without its
+completion marker (check `tools/recal_regen_sheets.py` for the exact
+done-marker name — verify, don't guess). Tests: pending regen record →
+both tools refuse rc=2; completed regen → proceed.
+
+### F11 — tests-only (#17, #18, #19, and #2's/#20's pins live in F2)
+
+- (#17) pin the exactly-once watermark on the PARENT fixlog: gate step +
+  FAILING cut → `_gate_destroyed(parent)` single-count (3, not 6) and
+  exactly one ok gate entry across records; success-path variant too.
+- (#18) three guard tests mirroring the existing check_session_v2 one:
+  motion_track raising → translate_bundle_v2 completes with the skip
+  warning; retranslate_from_sidecars returns the note with the trail;
+  fix_lagshift_csv raises FixFailed (typed) — plus F3's host-class test.
+- (#19, DEGRADED VOTES 1/1-refuted) fix_v1_to_v2 button round-trip test —
+  BUT first read its single refuter's evidence in r11-results.json: if
+  fix_v1_to_v2 is genuinely unreachable from any plan, record that
+  finding-disposition in R11_FINDINGS.md instead of writing a dead test.
+
+**Deviations from finder proposals, recorded:** #1's fix is applied as a
+combined pending-state guard (wedged OR recorded) per #16's sharper
+formulation. #2/#13 unify on reconcile-against-DELIVERED (each finder had
+half). #5/#8/#10 unify into F5's durable-alert + transient-split. #6
+implements BOTH proposed halves (backfill + third arm) because the
+backfill alone cannot reach already-terminal roots. #7 keeps the stamps
+in their ruled in-window position — only the WHERE clause tightens.
