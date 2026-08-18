@@ -1,11 +1,12 @@
-# Kickoff — r-loop 8 triage → e2e verification → handover
+# Kickoff — fix ALL of r-loop 8 → 3 more review iterations → e2e → THE FLIP
 
 You are picking up the continuous-pipeline flip work in
 `/Users/adnaan/Documents/hl-projects/hl-gamedata`.
 
 `FLIP_SESSION_KICKOFF_PROMPT.md` is still the plan of record.
 `R6_HANDOFF_KICKOFF_PROMPT.md` superseded it on status. **This file supersedes
-both on status.** The rulings in both still bind.
+both on status and scope.** The rulings in both still bind except where §3
+explicitly supersedes them (Adnaan, 2026-08-18).
 
 ---
 
@@ -17,15 +18,15 @@ order directly. Ask only if something here is wrong or a question only Adnaan
 can settle.
 
 **Session config:** Model **Opus 5**. Include `ultracode` in your first message
-— the verification work is multi-agent and is not runnable single-threaded at
-depth.
+— the review/verification work is multi-agent and is not runnable
+single-threaded at depth.
 
 ---
 
 ## 1. Where things stand
 
-**HEAD = `869910d`. Suite 519 green on Mac AND VM**, both through the arming
-gate — never a bare `pytest; echo $?`:
+**HEAD = `f8c629f` (code HEAD `869910d`). Suite 519 green on Mac AND VM**,
+both through the arming gate — never a bare `pytest; echo $?`:
 
 ```bash
 SUITE_FLOOR=450 bash tools/run_suite.sh \
@@ -43,12 +44,12 @@ checkout already has the r-loop-7 code synced (519 green there, verified).
 | `b851ea2` | RULED payment fix — the uploaded/accepted stamp split |
 | `06b936b` | r-loop 6: trim-clock major + five minors |
 | `869910d` | r-loop 7: 2 blockers + 5 majors + 2 minors (the tree r-loop 8 reviewed) |
+| `f8c629f` | this handoff + `R8_FINDINGS.md` |
 
-**Nothing is deployed.** R4 holds: the whole set ships at the flip, and a
-**different session executes the canary and flip**.
+**Nothing is deployed yet.** R1–R3 and every r-loop fix set ship at the flip —
+which is now YOURS to execute (§3.4).
 
-**Review loop: 8 of 8 SPENT. There is no iteration 9 — do not run one.**
-Iteration 8 was **stopped by Adnaan mid-run** at ~18:45 IST 2026-08-18, after
+**Iteration 8 was stopped by Adnaan mid-run** at ~18:45 IST 2026-08-18, after
 50 of 52 agents had finished. Its results were collected from the journal:
 
 - **`R8_FINDINGS.md` (committed, this repo) — the findings of record.**
@@ -56,57 +57,131 @@ Iteration 8 was **stopped by Adnaan mid-run** at ~18:45 IST 2026-08-18, after
   after dedup (the duplicates are listed at the top of that file).
 - All 44 refuter votes for the returned findings **completed** — the 2-vote
   discipline was FULLY applied to everything in that file. Nothing needs
-  re-verification (unlike r-loop 5's dead-verifier situation).
+  re-verification.
 - **The `tests-coverage` finder lane was lost at the stop** — it never
-  returned its list. Whatever it would have raised does not exist anywhere.
-  Surface this to Adnaan as an open item; re-running that single lane is his
-  call, not yours (the cap is spent).
+  returned its list. The three authorized iterations below each run a
+  tests-coverage lane, which re-covers whatever was lost.
 - Full machine-readable data (incl. untruncated refuter evidence):
   `/private/tmp/claude-501/-Users-adnaan-Documents-hl-projects-hl-gamedata/5d20eb3b-6734-4283-b92d-6f369beb2e08/scratchpad/r-loop8-collected.json`
   (+ `r-loop8-journal-raw.jsonl` beside it).
 
-Per `R5_TRIAGE_KICKOFF_PROMPT.md` §7 (still binding): after iteration 8, **fix
-what you can, then hand Adnaan every verified-but-unfixed finding,
-severity-ordered, before the e2e verification.** That is your mandate here.
-
 **The pattern held a fourth time:** the r-loop-8 blockers are regressions from
 r-loop 7's own fixes, exactly as r-loop 7's were from r-loop 6's. Treat the
-newest commits with the MOST suspicion, including everything in `869910d`.
+newest commits with the MOST suspicion, including everything in `869910d` —
+and everything YOU commit.
 
 ---
 
 ## 2. Read before code
 
-1. `R8_FINDINGS.md` — the work queue. Read it in full.
+1. `R8_FINDINGS.md` — the immediate work queue. Read it in full.
 2. `FLIP_SESSION_KICKOFF_PROMPT.md` — plan + rulings R1–R4, §7, §8.
-3. `R5_TRIAGE_KICKOFF_PROMPT.md` §7–§8 — still bind.
+3. `R5_TRIAGE_KICKOFF_PROMPT.md` §7–§8 — the pre-registered "quiet" test and
+   the review discipline still bind.
 4. `R6_HANDOFF_KICKOFF_PROMPT.md` §4, §5, §7, §8 — the payment-split ruling,
    the CONT_DAILY_REPORTS ruling, accepted behaviours, traps.
-5. `FLIP_HANDOVER.md` — DRAFT, yours to finish. A partially updated draft
-   (payment-split section, trim-offset section, CONT_DAILY_REPORTS wording)
-   exists at
-   `/private/tmp/claude-501/-Users-adnaan-Documents-hl-projects-hl-gamedata/5d20eb3b-6734-4283-b92d-6f369beb2e08/scratchpad/FLIP_HANDOVER.draft.md`
-   — use it as the base, then fill its §7/§8 placeholders.
-6. `PIPELINE_CONTINUOUS_DESIGN.md`, `FLIP_RUNBOOK.md`, `PIPELINE_ARCHITECTURE.md`.
+5. `FLIP_RUNBOOK.md` — you will execute it end to end (§3.4). §6b/§6c are the
+   authoritative command sequences.
+6. `FLIP_HANDOVER.md` — DRAFT. Now that the flip is yours (§3.4) it is no
+   longer a baton-pass; keep it as the running record of flip state. A
+   partially updated draft (payment-split section, trim-offset section,
+   CONT_DAILY_REPORTS wording) exists at
+   `/private/tmp/claude-501/-Users-adnaan-Documents-hl-projects-hl-gamedata/5d20eb3b-6734-4283-b92d-6f369beb2e08/scratchpad/FLIP_HANDOVER.draft.md`.
+7. `PIPELINE_CONTINUOUS_DESIGN.md`, `PIPELINE_ARCHITECTURE.md`.
 
 ---
 
-## 3. Work order
+## 3. Work order (RULED — Adnaan, 2026-08-18)
 
-1. **Triage and fix the r-loop 8 findings** (§4 below has per-cluster
-   guidance). Suite green on Mac AND VM through `tools/run_suite.sh` at every
-   commit, path-scoped commits.
-2. **Hand Adnaan the leftovers**: every confirmed-but-unfixed finding,
-   severity-ordered, plus the lost tests-coverage lane as an open item.
-3. **Independent REAL e2e verification** — a fresh agent that wrote and
-   reviewed none of this code; real VLM calls; real Drive II `_pipeline_test/`
-   uploads purged via `deliver.cleanup_test_folder`; real kill/resume.
-   **Verdict relayed VERBATIM; a BLOCKED-with-error never becomes a pass.**
-4. **Finish `FLIP_HANDOVER.md` and hand over explicitly.** While in there:
-   `FLIP_RUNBOOK.md` §6c still says the deploy set is "three things" — it is
-   four (driver, `a4f93de` tolerances, R1–R3, all r-loop fix sets); correct it
-   and make both docs say plainly that `CONT_DAILY_REPORTS` returns to True
-   immediately after the regen `--send` (it is a gap-closer, not policy).
+### 3.1 Fix ALL the r-loop 8 findings first
+
+Every confirmed finding in `R8_FINDINGS.md` — blockers, majors AND minors —
+gets fixed. Not "what you can": all of them. §4 has per-cluster guidance.
+Suite green on Mac AND VM through `tools/run_suite.sh` at every commit,
+path-scoped commits, every new test proved to fail against unfixed code in a
+scratch copy OUTSIDE the repo.
+
+### 3.2 Then: up to THREE more adversarial review iterations (9, 10, 11)
+
+Adnaan authorized three more on 2026-08-18 (supersedes the spent cap of 8).
+Each keeps the full composition: **whole-codebase + delta-since-loop-start +
+adversarial hunting for regressions from the previous iteration's own fixes +
+a tests-coverage lane**, multi-agent, findings verified with the **2-vote
+refute discipline** (a finding dies only if BOTH refuters defeat it). Fix
+every confirmed finding in the same iteration.
+
+- Run them in order — 9, then only if 9 is not quiet, 10; then 11 — never in
+  parallel: each must review the previous one's fixes.
+- **Stop at the first QUIET one.** "Quiet" stays as pre-registered in
+  `R5_TRIAGE_KICKOFF_PROMPT.md` §7: zero confirmed blockers AND every
+  confirmed major/minor fixed in that same iteration with the suite green on
+  both hosts. Judge it after fixing.
+- **If iteration 11 is still not quiet: STOP.** Hand Adnaan every
+  verified-but-unfixed finding, severity-ordered, and do NOT proceed to §3.3
+  or §3.4 without his explicit go-ahead. Clean is the gate to everything
+  after this point.
+- Reusable workflow (keeps the 2-vote discipline + accepted-behaviours list —
+  edit and re-invoke rather than rebuilding; keep the accepted list CURRENT
+  each round or agents re-litigate settled ground):
+  `/private/tmp/claude-501/-Users-adnaan-Documents-hl-projects-hl-gamedata/5d20eb3b-6734-4283-b92d-6f369beb2e08/scratchpad/flip-review-iter8.js`
+- Apply the tree-verification discipline after every iteration (§5).
+
+### 3.3 Then: independent REAL end-to-end verification
+
+Only once the loop has exited clean. A fresh agent that wrote and reviewed
+none of this code, exercising the actual system: real VLM calls, real Drive II
+`_pipeline_test/` uploads purged afterwards via `deliver.cleanup_test_folder`,
+real kill/resume. **Verdict relayed VERBATIM; a BLOCKED-with-error never
+becomes a pass.**
+
+### 3.4 Then: THE FLIP — this session executes it
+
+**Supersession (Adnaan, 2026-08-18):** the earlier ruling that "a different
+session executes the canary and flip" is WITHDRAWN. You proceed through the
+flip yourself, per `FLIP_RUNBOOK.md`:
+
+1. **Canary** — runbook §5: side checkout, `HL_PIPELINE_HOME=~/hl-pipeline-test`,
+   TEST-mode Telegram, Drive II `_pipeline_test/` only (purged after), the
+   3-leg kill matrix, autoscale observed, digest fires. Nothing in the real
+   pipeline home may be touched by any canary step.
+2. **Flip** — runbook §6, Telegram announce before and after: stop
+   `hl-recal-watch` then any rebuild-era unit still live; E2→C2D resize with
+   the balloon check (do not block the flip on a zone stockout — §6b carries
+   the undo); `CONT_DAILY_REPORTS = False` committed, deploy HEAD, verify,
+   `recal_refix_reset` dry-run → `--yes`, arm via
+   `vm_setup.sh --enable-continuous`, watch the first hour.
+3. **THE DEPLOY SET MUST CARRY ALL THE SHEET-PRODUCING LOGIC AND CODE.**
+   Deploying HEAD does this by construction, but VERIFY it on the VM after
+   rsync, before arming — expect ALL of:
+   ```bash
+   cd ~/hl-gamedata
+   grep -n "KEEP_GATE_MAX_S\|SCANNER_STATIC_MIN_S\|KEEP_GATE_MAX_FRAC" pipeline/config.py
+   #   -> KEEP_GATE_MAX_S = 5.0, SCANNER_STATIC_MIN_S = 0.8, NO KEEP_GATE_MAX_FRAC
+   grep -c "accepted_reported_at" pipeline/reports.py pipeline/ledger.py
+   #   -> non-zero in both (the RULED stamp split)
+   grep -n "read_counted_record\|write_counted_record" tools/recal_regen_sheets.py
+   #   -> both present (the r-loop-8 resume-record fix)
+   grep -n "first_pts_abs" translator/trim.py     # the trim-clock fix
+   ```
+   plus whatever grep-visible markers your r-loop-8 daily-send fix adds
+   (the durable counted record, §4c). If any check fails, the rsync did not
+   ship what you tested — stop and fix before arming.
+4. **Payment endgame** — runbook §7, the sheet-producing step itself: driver
+   stopped → `recal_regen_sheets.py` preview → sanity-read BOTH sheets →
+   `--send` (final invariant: anchor == `2026-08-16T05:32:50+00:00`) → flip
+   `CONT_DAILY_REPORTS = True`, commit, deploy, restart. Dailies resume from
+   the regen anchor. Update `NOTE_FOR_D3.md`; purge old sheet copies from the
+   GCS mirror after replacements verify.
+5. **Tree verify + LAST destructive act** — runbook §8.
+6. **Reject-reason table, final independent live verifier, final report** —
+   `FLIP_SESSION_KICKOFF_PROMPT.md` §6 steps 7–9. Mixed-methodology
+   comparisons labelled as such, verifier verdict verbatim.
+
+While in the docs: `FLIP_RUNBOOK.md` §6c still says the deploy set is "three
+things" — it is FOUR (driver, `a4f93de` tolerances, R1–R3, all r-loop fix
+sets); correct it, and make the docs say plainly that `CONT_DAILY_REPORTS`
+returns to True immediately after the regen `--send` (a gap-closer, not
+policy).
 
 ---
 
@@ -114,9 +189,7 @@ newest commits with the MOST suspicion, including everything in `869910d`.
 
 Full claims/scenarios/evidence in `R8_FINDINGS.md`. **Reviewers' proposed
 fixes have been wrong twice before in this loop** (the DISCOVERED age anchor;
-the payment defer that broke d3) — simulate before adopting, and every new
-test must be proved to fail against unfixed code in a scratch copy OUTSIDE the
-repo.
+the payment defer that broke d3) — simulate before adopting.
 
 **(a) BLOCKER — host carve-out re-runs a partially-applied plan**
 (`continuous.py:880` + `run.py:575`, one defect, two drivers). The r-loop-7
@@ -212,7 +285,7 @@ default to ~515 and keep raising it as the suite grows.
 
 ---
 
-## 5. Traps that keep biting (all learned this session — do not relearn them)
+## 5. Traps that keep biting (all learned this loop — do not relearn them)
 
 - **After every multi-agent step, verify your own tree before committing:**
   `git diff` every hunk, `grep -rn "MUTATION" --include="*.py" .`,
@@ -238,10 +311,13 @@ default to ~515 and keep raising it as the suite grows.
   Grepping is not reading. Never relay a reviewer's number without
   reproducing it.
 - **NEVER push.** Commits path-scoped per green step.
-- **Do NOT deploy. Do not touch `~/hl-gamedata` on the VM. Do not stop or
-  start any systemd unit.** R4: everything rides the flip.
+- **Nothing deploys before §3.4** — until the flip itself, do not touch
+  `~/hl-gamedata` on the VM and do not stop or start any systemd unit.
 - Drive I (`drive-collect:`) is **read-only forever** (R6).
 - Secrets in `~/.config/hl-gamedata/secrets.env` — never print, log or commit.
 - `pipeline/tests/conftest.py` has a guard that refuses real Drive listings —
   keep it.
 - Suite through `tools/run_suite.sh` on BOTH hosts for anything that ships.
+- The flip's destructive steps keep their runbook gates: parachute backup
+  before `recal_rebuild_reset`-class actions, preview before `--send`,
+  `recal_verify_tree.py` CLEAN before any deletion.
