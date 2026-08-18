@@ -44,18 +44,18 @@ the first unchecked item.
 - [x] Post-D8: SUITE_FLOOR 619 pinned (run_suite.sh + FLIP_RUNBOOK §6b, commit 55cc759); gates green BOTH hosts at the D8 set — Mac 623 (96s), VM side checkout 623 (294s), both floor 619; tree-verify (diff/status/MUTATION) clean
 - [x] Review iteration 10 RAN (2026-08-19, `tools/review/flip-review-iter10.js`, 41 agents, 0 errors) — 17 raised → 16 confirmed (0 blockers), 1 killed (R10_FINDINGS.md); ALL 16 FIXED IN-ITERATION (commit 6dd2e64: fail-first 13/13 behaviour + 5/5 mutation-pins); gates green BOTH hosts (Mac 641/117s, VM 641) at floor 619 → **QUIET per R5_TRIAGE §7**. Iteration 11 proceeds anyway by Adnaan's ruling (below)
 - [x] Review iteration 11 RAN (2026-08-19, `tools/review/flip-review-iter11.js`, 47 agents, 2 refuter deaths on usage credits) — **NOT QUIET: 20 raised → 20 confirmed (1 BLOCKER — the r10 wedge fix regressed the never-regenerate doctrine, found by 3 lanes), 0 killed**; findings of record `R11_FINDINGS.md`; fixes synthesized into §11 as F1–F11. Adnaan's ruling: not quiet ⇒ fix all, then TWO more iterations
-- [ ] F1 BLOCKER: pending/wedged TODAY never reaches the fresh path (#1/#14/#16) — §11
-- [ ] F2 orphan-void reconciles against DELIVERED nodes, loud on all-matched trees (#2/#13/#20) — §11
-- [ ] F3 fix_lagshift_csv guard re-raises host classes (#3) — §11
-- [ ] F4 hygiene judges the session's authoritative keybind (#4/#11) — §11
-- [ ] F5 wedge robustness: durable alert + no transient wedges (#5/#8/#10) — §11
-- [ ] F6 duration_raw_s=NULL roots stay payable: validate backfill + third re-entry arm (#6) — §11
-- [ ] F7 stamps compare-and-set on counted md5 (#7) — §11
-- [ ] F8 reclaim/stuck anchors scoped to the current intake stint (#9) — §11
-- [ ] F9 session_id sanitized to one path component (#12) — §11
-- [ ] F10 reset interlock covers the regen's resumable send (#15) — §11
-- [ ] F11 tests-only: watermark pin, three guard tests, fix_v1_to_v2 (check refuter first) (#17/#18/#19) — §11
-- [ ] Post-F11: new SUITE_FLOOR measured+pinned; full gate green Mac AND VM; tree-verify
+- [x] F1 BLOCKER: pending/wedged TODAY never reaches the fresh path (#1/#14/#16) — fail-first 1/1 + settled-quiet control; Mac 643 green; commit 82e42df
+- [x] F2 orphan-void reconciles against DELIVERED nodes, loud on all-matched trees (#2/#13/#20) — fail-first 3/3; Mac 646 green; commit b5cc713
+- [x] F3 fix_lagshift_csv guard re-raises host classes (#3) — fail-first 1/1 + session control; Mac 648 green; commit e6a1ccd
+- [x] F4 hygiene judges the session's authoritative keybind (#4/#11) — fail-first 1/1 + no-sidecar control; Mac 650 green; commit 206815c
+- [x] F5 wedge robustness: durable alert + no transient wedges (#5/#8/#10) — fail-first 3/3 + corrupt-record control; Mac 654 green; commit 88c7a4f
+- [x] F6 duration_raw_s=NULL roots stay payable: validate backfill + third re-entry arm (#6) — fail-first 3/3 + never-overwrite control; PAYMENT-SURFACE (report to Adnaan); Mac 658 green; commit cd178f3
+- [x] F7 stamps compare-and-set on counted md5 (#7) — fail-first 1/1; 5 test shims threaded (signature only); PAYMENT-SURFACE (report to Adnaan); Mac 659 green; commit 71c1087
+- [x] F8 reclaim/stuck anchors scoped to the current intake stint (#9) — fail-first 2/2 + never-successful control; Mac 662 green; commit 4ad510e
+- [x] F9 session_id sanitized to one path component (#12) — fail-first 5/5 + clean-id control; Mac 668 green; commit a8a1996
+- [x] F10 reset interlock covers the regen's resumable send (#15) — fail-first 1/1; Mac 669 green; commit 5696205
+- [x] F11 tests-only: watermark pin, guard pins, fix_v1_to_v2 round trip (#17/#18/#19) — refuter evidence read FIRST (function reachable, harm refuted → pin written, disposition in R11_FINDINGS.md); mutation-proof 5/5 vs the finders' exact mutations; Mac 674 green; commit 2f5ca04
+- [x] Post-F11: SUITE_FLOOR 670 pinned (674−4, commit 09cbf20); gates green BOTH hosts at the F set — Mac 674 (120s), VM side checkout 674 (375s), both floor 670; tree-verify (diff/status/MUTATION) clean; usage-credit headroom confirmed by Adnaan before iteration 12
 - [ ] Review iteration 12 (fix-in-iteration per §5; regressions lane targets the F-commits) — WARRANTED by Adnaan 2026-08-19
 - [ ] Review iteration 13 (confirmation pass, runs regardless of 12's verdict) — WARRANTED by Adnaan 2026-08-19; if 13 is not quiet: STOP, hand Adnaan the list
 - [ ] Independent REAL e2e verification (verdict relayed VERBATIM)
