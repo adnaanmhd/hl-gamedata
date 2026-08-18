@@ -162,6 +162,34 @@ class Ledger:
         self.db.commit()
 
     # ------------------------------------------------------------ supersede
+    def archive_dossier(self, session_id: str, dossier_root: Path) -> None:
+        """Move the current dossier generation under history/.
+
+        The dossier is the evidence of record behind payment (design §13),
+        and fix._append_fixlog APPENDS to fixlog.json while
+        validate._write_verdict overwrites verdict.json and
+        deliver.finalize_rejected overwrites coaching.md. So without this,
+        a second pass over DIFFERENT bytes silently merges into the first
+        one's record: the prior verdict is gone and the audit trail
+        contains fixes applied to bytes that are no longer there.
+
+        Extracted from supersede() so the QUARANTINED-path heal can call
+        it too (r-loop 5) — that branch states it is "a FRESH-upload
+        event: reset the slot like supersede does" and duplicated every
+        part of supersede EXCEPT this one.
+        """
+        dossier = Path(dossier_root) / session_id
+        if not dossier.exists():
+            return
+        hist = dossier / "history"
+        hist.mkdir(parents=True, exist_ok=True)
+        stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+        dst = hist / f"superseded-{stamp}"
+        dst.mkdir(exist_ok=True)
+        for f in dossier.iterdir():
+            if f.name != "history":
+                shutil.move(str(f), dst / f.name)
+
     def supersede(self, session_id: str, *, new_md5: str, new_bytes: int,
                   new_ctime: str, dossier_root: Path) -> None:
         """Same session-id re-uploaded with different video md5 after a
@@ -170,16 +198,7 @@ class Ledger:
         follow the latest state."""
         row = self.get(session_id)
         assert row is not None
-        dossier = dossier_root / session_id
-        if dossier.exists():
-            hist = dossier / "history"
-            hist.mkdir(parents=True, exist_ok=True)
-            stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-            dst = hist / f"superseded-{stamp}"
-            dst.mkdir(exist_ok=True)
-            for f in dossier.iterdir():
-                if f.name != "history":
-                    shutil.move(str(f), dst / f.name)
+        self.archive_dossier(session_id, dossier_root)
         now = _now()
         self.db.execute(
             "UPDATE sessions SET md5_video=?, bytes=?, drive_ctime=?,"

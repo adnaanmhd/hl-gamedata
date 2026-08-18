@@ -1244,12 +1244,42 @@ def analyze(sdir: Path, raw_by_sid: dict, gem: Gemini | None,
         write_report(a, out_dir)
         return a
 
-    s = json.loads((sdir / "session.json").read_text())
-    a.game_title = s.get("game_title", "")
-    a.id_slug = id_slug(s.get("session_id", sdir.name))
-    a.fps = float(s.get("fps") or 0)
-    a.duration_s = float(s.get("duration_seconds") or 0)
-    a.frames = int(s.get("frame_count") or 0)
+    # Guarded, and NOT an early return (r-loop 5). These reads happen
+    # BEFORE check_session_v2 below, so a raise here means the checker's
+    # actionable verdict is never produced at all: the exception escapes
+    # analyze() -> validate_session -> run.py wraps it -> the driver writes
+    # QUARANTINED "validation crashed" and the session sits in the manual
+    # queue holding its media for CONT_QUARANTINE_RECLAIM_H, instead of
+    # taking the one-attempt FIX_SESSIONJSON_REWRITE the checker describes.
+    # check_session_v2 already normalizes malformed numerics AFTER emitting
+    # the type FAIL (translator/v2.py), so the r-loop-1/r-loop-3 "FAIL,
+    # never crash" hardening bought nothing while these bare casts stood.
+    try:
+        s = json.loads((sdir / "session.json").read_text(
+            encoding="utf-8", errors="replace"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        s = {}
+    if not isinstance(s, dict):
+        s = {}
+
+    def _num(v, cast, default=0):
+        """Same isinstance normalization translator/v2.py uses: a bool is
+        not a number here, and a list/dict/None must not reach float()."""
+        if isinstance(v, bool) or not isinstance(v, (int, float, str)):
+            return default
+        try:
+            return cast(v or 0)
+        except (TypeError, ValueError):
+            return default
+
+    a.game_title = s.get("game_title", "") if isinstance(
+        s.get("game_title"), str) else ""
+    a.id_slug = id_slug(s.get("session_id", sdir.name)
+                        if isinstance(s.get("session_id"), str)
+                        else sdir.name)
+    a.fps = _num(s.get("fps"), float, 0.0)
+    a.duration_s = _num(s.get("duration_seconds"), float, 0.0)
+    a.frames = _num(s.get("frame_count"), int, 0)
 
     # §1 structural QA (includes PTS frame-sync + controls-to-video grounding)
     raw = raw_by_sid.get(sdir.name)
@@ -1272,11 +1302,22 @@ def analyze(sdir: Path, raw_by_sid: dict, gem: Gemini | None,
                            ("not checked (structural QA failure)"
                             if structural else "OK (≤100ms vs real PTS)"))
 
-    # §2 inventory
-    with (sdir / "frames.csv").open(newline="") as f:
-        reader = csv.reader(f)
-        header = next(reader)
-        rows = list(reader)
+    # §2 inventory — guarded (r-loop 5). Unlike the session.json reads
+    # above this one runs AFTER check_session_v2, so a.qa_issues already
+    # carries the actionable FAILs and an early return preserves them;
+    # the crash it replaces produced QUARANTINED "validation crashed".
+    # translator/v2.py guards its own read of this file the same way.
+    try:
+        with (sdir / "frames.csv").open(newline="", encoding="utf-8",
+                                        errors="replace") as f:
+            reader = csv.reader(f)
+            header = next(reader)
+            rows = list(reader)
+    except (OSError, UnicodeDecodeError, csv.Error, StopIteration) as e:
+        a.error = f"frames.csv unreadable: {type(e).__name__}"
+        a.verdict = "error"
+        write_report(a, out_dir)
+        return a
     col = {c: i for i, c in enumerate(header)}
     needed = {"frame_id", "timestamp_ms", "input_keys", "input_actions",
               "input_mouse_buttons", "input_mouse_dx", "input_mouse_dy"}
@@ -1285,7 +1326,19 @@ def analyze(sdir: Path, raw_by_sid: dict, gem: Gemini | None,
         a.verdict = "error"
         write_report(a, out_dir)
         return a
-    inv = inventory(rows, col, a.fps, int(s.get("duration_ms") or 0))
+    # Ragged rows must not crash the wrapper either (r-loop 5). A single
+    # corrupted delimiter merges two fields, so the row is SHORTER than the
+    # header and inventory()'s positional reads raise IndexError -- again
+    # escaping analyze() as "validation crashed" rather than the ragged-row
+    # FAIL check_session_v2 already emits for exactly this file.
+    _width = max(col.values()) + 1
+    _ragged = [r for r in rows if len(r) < _width]
+    if _ragged:
+        rows = [r for r in rows if len(r) >= _width]
+        a.qa_issues.append(f"WARN: {len(_ragged)} ragged row(s) skipped "
+                           f"for the inventory (structural QA reports "
+                           f"them as FAILs)")
+    inv = inventory(rows, col, a.fps, _num(s.get("duration_ms"), int, 0))
     a.inventory = inv
     if inv["tail_gap_ms"] is not None and inv["frame_interval_ms"] and \
             inv["tail_gap_ms"] > inv["frame_interval_ms"]:

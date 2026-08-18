@@ -207,6 +207,11 @@ CONT_QUARANTINE_RECLAIM_H = 48
 # ingest.download leaves whatever rclone already transferred in
 # work/<sid>. Same class as the QUARANTINED leak above (r-loop 5).
 CONT_DISCOVERED_RECLAIM_H = 12
+# H re-tries the daily/folder-issues duties at most this often. The
+# lane body ticks every ~20s and the send BUILDS the sheet before
+# sending, so a Telegram outage used to mean ~180 full sheet
+# generations an hour, each rewriting payment-<day>.csv (r-loop 5).
+CONT_DAILY_RETRY_S = 600.0
 # Shared translation_report.json lock (validate._locked_report_update).
 # INVARIANT: WAIT > STALE. Up to CONT_POOL_MAX workers race this file and a
 # waiter that runs out of patience writes UNLOCKED, which is the r1 #8 lost

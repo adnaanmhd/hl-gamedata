@@ -170,6 +170,24 @@ def _generate_once(url: str, headers: dict, body: dict, tag: str) -> str:
                 msg = msg.replace(key_in_url.group(1), "***")
             msg = re.sub(r"key=[^&\s]+", "key=***", msg)
             last = f"network error ({tag}): {msg}"
+            # Signal transport failures on the SAME channel as 429/5xx
+            # (r-loop 5). _pressure was called only from the HTTPError
+            # branch, so URLError / TimeoutError / SSL / ConnectionReset /
+            # HTTPException / JSONDecodeError produced p429_per_min == 0
+            # and the CONT_STEP_DOWN arm could never fire for them --
+            # while autoscale rule 3 (cpu < CONT_CPU_HIGH and depth >
+            # active) is SATISFIED by exactly the state a backoff storm
+            # creates, because every worker is asleep in time.sleep()
+            # rather than burning CPU. The pool then scaled UP into an
+            # outage until CONT_POOL_MAX, every runner paying a doomed
+            # sweep -> VLMError -> HOLD_VLM, HOLD_VLM counts in
+            # LOCAL_STATES so intake stopped at the media cap, and each
+            # held session re-paid the whole battery every 30 min forever.
+            # status 0 = transport (no HTTP status was ever returned).
+            # This is the design's own stated rationale for a FILE channel:
+            # "real-time backpressure even while every worker is asleep
+            # mid-backoff" (PIPELINE_CONTINUOUS_DESIGN.md §4).
+            _pressure(0, tag)
             if attempt < C.VLM_MAX_TRIES - 1:
                 time.sleep(min(C.VLM_BACKOFF_BASE_S * (2 ** attempt),
                                C.VLM_BACKOFF_MAX_S))

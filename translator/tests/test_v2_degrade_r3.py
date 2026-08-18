@@ -169,3 +169,41 @@ def test_ragged_rows_stay_unmapped_because_no_fix_clears_them():
     _map_qa_issues(["FAIL: frame_id column unparseable (non-integer or "
                     "short row)"], reasons, has_raw=False)
     assert [r["code"] for r in reasons] == ["QA_FAIL_UNMAPPED"]
+
+
+# --------------------------------------------------------------- r-loop 5
+# The CHECKER above is hardened. Its WRAPPER was not: analyze() re-reads
+# the same two untrusted files itself, with bare float()/int() casts and no
+# encoding or exception guard, so the r-loop-1/r-loop-3 "FAIL, never crash"
+# work never actually reached the pipeline.
+
+def test_analyze_wrapper_does_not_crash_on_malformed_session_json(
+        tmp_path, tiny_mp4):
+    """analyze() did `float(s.get('fps') or 0)` on the very field
+    check_session_v2 deliberately normalizes AFTER emitting its type FAIL.
+    fps as a list raised TypeError out of analyze() -> validate_session ->
+    the driver wrote QUARANTINED 'validation crashed' and held the media
+    for CONT_QUARANTINE_RECLAIM_H, instead of the one-attempt
+    FIX_SESSIONJSON_REWRITE the checker's own verdict describes."""
+    from tools.analyze_sample import analyze
+    for n, bad in enumerate(([30], {"v": 30}, "abc", None)):
+        d = _session(tmp_path / f"fps{n}", sj={"fps": bad}, video=tiny_mp4)
+        a = analyze(d, {}, None, 4.0, 0.5)        # must not raise
+        assert a.qa_status == "FAIL"
+
+
+def test_analyze_wrapper_does_not_crash_on_non_utf8_frames_csv(tmp_path,
+                                                               tiny_mp4):
+    """The checker guards its own frames.csv read; analyze() opened the
+    same file again with no encoding and no guard."""
+    from tools.analyze_sample import analyze
+    n = len(V2_FRAME_COLS)
+    good = (",".join(V2_FRAME_COLS) + "\n" + ",".join(["0"] * n) + "\n")
+    blob = bytearray(good.encode())
+    blob[-3] = 0xFF                     # invalid UTF-8
+    d = _session(tmp_path, frames_bytes=bytes(blob), video=tiny_mp4)
+    a = analyze(d, {}, None, 4.0, 0.5)            # must not raise
+    # reaching here at all is the assertion; the corrupted delimiter also
+    # SHORTENS the row, which used to raise IndexError out of inventory()
+    assert a.qa_status == "FAIL"
+    assert isinstance(a.verdict, str) and a.verdict

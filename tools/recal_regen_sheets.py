@@ -53,6 +53,21 @@ HI16 = WINDOWS[-1][2]
 TERMINAL = ("DELIVERED", "REJECTED", "SPLIT", "QUARANTINED", "DUPLICATE")
 
 
+def top_root_id(ledger, sid):
+    """The top-level recording a row belongs to (itself if it is one).
+
+    build_sheet_rows counts and labels ROOTS, so membership in its
+    counted_out must be tested against the root, never against a -pN
+    child's own id (r-loop 5).
+    """
+    for _ in range(10):
+        row = ledger.get(sid)
+        if row is None or not row["parent_id"]:
+            return sid
+        sid = row["parent_id"]
+    return sid
+
+
 def top_root_ctime(ledger, sid, cache):
     """Upload time of the top-level recording a row belongs to.
     created_at fallback for blank/unparseable drive_ctime mirrors
@@ -78,17 +93,34 @@ def top_root_ctime(ledger, sid, cache):
     return cache.get(sid)
 
 
-def cohort_reject_detail(ledger, lo_dt, hi_dt, cache):
-    """Rejected rows of trees whose ROOT uploaded in [lo, hi) — the
-    cohort view the regenerated sheet's columns already use. The stock
-    section windows on REJECTED-transition time, which is rebuild-time
-    for every row now (verified) and would print '- none'."""
+def cohort_reject_detail(ledger, lo_dt, hi_dt, cache, counted=None):
+    """Rejected rows of trees whose ROOT uploaded in [lo, hi), PLUS the
+    late arrivals the sheet's own columns counted. The stock section
+    windows on REJECTED-transition time, which is rebuild-time for every
+    row now (verified) and would print '- none'.
+
+    `counted` closes an r-loop-5 mismatch: build_sheet_rows has a
+    LATE-ARRIVAL guard that deliberately counts unstamped countable roots
+    with `up < lo_dt` into the current window — their hours AND their
+    *_rejection_reasons labels both land in the sheet — while this
+    function dropped them on a strict [lo, hi) test. The 08-15 sheet is
+    the exposed one: it is the first sheet of record (no anchor, so lo is
+    the 24h fallback), and recal_rebuild_reset nulled every pre-rebuild
+    stamp, so every earlier root enters through that guard. The published,
+    VOID-superseding payment document then named a reject class in a
+    player's row with no matching evidence line — and if a pre-window
+    reject was the only one that day, the section read "- none in this
+    upload cohort" above a table showing unpaid hours.
+    """
+    counted = set(counted or ())
     lines = []
     for r in ledger.db.execute(
             "SELECT session_id, reasons_json, dossier_path FROM sessions "
             "WHERE state='REJECTED' ORDER BY session_id"):
         ct = top_root_ctime(ledger, r["session_id"], cache)
-        if ct is None or not (lo_dt <= ct < hi_dt):
+        in_window = ct is not None and lo_dt <= ct < hi_dt
+        if not in_window and (not counted or top_root_id(
+                ledger, r["session_id"]) not in counted):
             continue
         try:
             reasons = json.loads(r["reasons_json"] or "[]")
@@ -189,15 +221,38 @@ def _locked_main(cfg) -> int:
         if p.exists():
             recorded |= set(json.loads(p.read_text()))
     stray = []
+    residual = []
     for r in ledger.db.execute(
-            "SELECT session_id FROM sessions WHERE parent_id IS NULL AND "
-            "uploaded_reported_at IS NOT NULL"):
+            "SELECT session_id, state FROM sessions WHERE parent_id IS NULL "
+            "AND uploaded_reported_at IS NOT NULL"):
         if r["session_id"] in recorded:
+            continue
+        # recal_rebuild_reset DELIBERATELY preserves uploaded_reported_at
+        # for QUARANTINED/DUPLICATE roots (its KEEP_STATES), so a root that
+        # carried a PRE-rebuild stamp and is now in one of those states
+        # still has it. Such stamps are reachable: build_sheet_rows stamps
+        # every in-window countable root regardless of state, and only
+        # skips DUPLICATE/QUARANTINED as evaluated AT GENERATION TIME — so
+        # a root counted and stamped while still INGESTED/VALIDATING, then
+        # quarantined by a validation crash, is exactly this shape. They
+        # are structurally uncountable by build_sheet_rows now, so their
+        # stamps cannot empty a superseding sheet. Aborting on them
+        # hard-blocked the payment endgame with no override flag, and
+        # named the wrong subsystem: the CONT_DAILY_REPORTS interlock was
+        # never breached (r-loop 5).
+        if r["state"] in ("QUARANTINED", "DUPLICATE"):
+            residual.append(r["session_id"])
             continue
         ct = top_root_ctime(ledger, r["session_id"], cache)
         if ct is not None and ct >= hi16_dt:
             continue                     # post-cohort: normal daily stamp
         stray.append(r["session_id"])
+    if residual:
+        print(f"note: {len(residual)} pre-rebuild residual stamp(s) on "
+              f"QUARANTINED/DUPLICATE root(s) ignored — recal_rebuild_reset "
+              f"preserves those by design and build_sheet_rows cannot count "
+              f"them: {', '.join(sorted(residual)[:5])}"
+              + (" ..." if len(residual) > 5 else ""))
     if stray:
         print(f"ABORT: {len(stray)} COHORT root(s) already stamped outside "
               f"our resume records — a daily send counted rebuild-cohort "
@@ -266,8 +321,12 @@ def _locked_main(cfg) -> int:
             counted = []
             csv_path, md_path = reports.write_payment_sheet(
                 cfg, ledger, day_dt, bounds=(lo, hi), counted_out=counted)
+            # pass the EXACT set the sheet counted, so the '## Reject
+            # detail' section describes the same population as the columns
+            # above it — late arrivals included (r-loop 5)
             rewrite_reject_section(
-                md_path, cohort_reject_detail(ledger, lo_dt, hi_dt, cache))
+                md_path, cohort_reject_detail(ledger, lo_dt, hi_dt, cache,
+                                              counted=counted))
             resumed = False
             if not send:
                 # publish ONLY the preview twins into the real reports dir;

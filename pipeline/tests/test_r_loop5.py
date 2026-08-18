@@ -478,3 +478,306 @@ def test_fix_plan_uses_the_rerouted_game_not_the_drive_folder(cfg, ledger,
         "a misfiled OW session must be rerouted, not rejected unfixable"
     assert seen.get("game") == "outer_wilds"
     assert ledger.get(sid)["game"] == "outer_wilds"
+
+
+# ------------------- the fix path must not render a video-sized rrd
+
+def test_retrim_dispatch_skips_the_rrd_render(tmp_path, monkeypatch):
+    """r-loop 5: in the fix path out_dir IS the work dir, and NOTHING
+    reads that rrd — translator/v2.py only checks session.rrd EXISTS
+    (which is why ingest.download touches a 0-byte stub) and
+    deliver.stage_session regenerates it inside the stage dir. The render
+    embeds the whole clip via rr.AssetVideo and logs 5 entries per frame,
+    so it came out roughly VIDEO-SIZED: minutes inside the runner's gate
+    slot, and ~2x that session's bytes on disk against a cap that counts
+    SESSIONS as its bytes bound."""
+    seen = {}
+
+    class _Tool:
+        @staticmethod
+        def retrim(work, head_s, out, **kw):
+            seen.update(kw)
+            return {"head_cut_s": head_s}
+    monkeypatch.setattr(fix, "_retrim_tool", lambda: _Tool)
+    fix._dispatch("FIX_RETRIM_HEAD", {"head_s": 7.0}, tmp_path, "kamla",
+                  tmp_path)
+    assert seen.get("make_rrd") is False
+
+
+# --------------- keybind.json / metadata.json are untrusted player files
+
+def test_keybind_with_non_utf8_bytes_does_not_raise(tmp_path):
+    """r-loop 4 hardened inputs.jsonl with errors='replace' and left its
+    two siblings strict. keybind.json consists ENTIRELY of key names, so a
+    single cp1252 byte from a non-US layout raised straight out of
+    FIX_RETRANSLATE: apply_fixes recorded the step failed, the reason
+    survived revalidation untouched, attempt 2 failed identically, and the
+    session was REJECTED 'fix retries exhausted' with only a bare
+    fix-failed marker for ops."""
+    from translator.translate import resolve_keybind
+    p = tmp_path / "keybind.json"
+    p.write_bytes('{"move_up": "w", "caf\xe9": "e"}'.encode("cp1252"))
+    kb = resolve_keybind(keybind_path=p, game_name="Kamla")
+    assert isinstance(kb, dict) and kb          # parsed, did not raise
+
+
+def test_unreadable_keybind_falls_back_to_the_builtin(tmp_path):
+    """Garbled beyond parsing must fall back, never hand
+    _as_semantic_to_literal something without .values()."""
+    from translator.keybinds import KEYBINDS
+    from translator.translate import resolve_keybind
+    p = tmp_path / "keybind.json"
+    p.write_text("{ not json at all")
+    assert resolve_keybind(keybind_path=p,
+                           game_name="Kamla") == KEYBINDS["kamla"]
+    p.write_text('["a", "list", "not", "a", "dict"]')
+    assert resolve_keybind(keybind_path=p,
+                           game_name="Kamla") == KEYBINDS["kamla"]
+
+
+# ------------- backpressure must see the outage shape that stalls the pool
+
+def test_transport_failure_writes_a_pressure_event(tmp_path, monkeypatch):
+    """r-loop 5: _pressure was called ONLY from the HTTPError 429/5xx
+    branch. URLError / TimeoutError / SSL / ConnectionReset /
+    HTTPException / JSONDecodeError slept the same exponential backoff and
+    wrote NOTHING, so p429_per_min stayed 0 and the step-down arm could
+    never fire — while autoscale rule 3 (cpu low, queue deep) is SATISFIED
+    by exactly the state a backoff storm creates, because every worker is
+    asleep in time.sleep() rather than burning CPU. The pool scaled UP
+    into the outage until CONT_POOL_MAX, each runner paying a doomed sweep
+    -> VLMError -> HOLD_VLM, which counts in LOCAL_STATES and so stopped
+    intake at the media cap."""
+    import urllib.error
+    from pipeline import vlm as vlmmod
+
+    path = tmp_path / "vlm-pressure.jsonl"
+    monkeypatch.setattr(vlmmod, "_pressure_path", path)
+    monkeypatch.setattr(C, "VLM_MAX_TRIES", 1)
+
+    def post_dead(url, headers, body, timeout_s=180):
+        raise urllib.error.URLError("connection reset by peer")
+    monkeypatch.setattr(vlmmod, "_post", post_dead)
+    with pytest.raises(vlmmod.VLMError):
+        vlmmod.generate("k" * 20, "gemini-3.7-flash", [{"text": "hi"}])
+
+    lines = [json.loads(x) for x in path.read_text().splitlines()]
+    assert lines, "a transport outage must reach the backpressure channel"
+    assert all("k" * 20 not in json.dumps(ev) for ev in lines)  # no secrets
+
+
+# ---------------- a fresh upload must not merge into the old evidence
+
+def test_archive_dossier_preserves_the_prior_generation(tmp_path, ledger):
+    """r-loop 5: the QUARANTINED-path heal says it is 'a FRESH-upload
+    event: reset the slot like supersede does' and duplicated every part
+    of supersede EXCEPT the dossier archive. fix._append_fixlog APPENDS to
+    fixlog.json while _write_verdict overwrites verdict.json, so the new
+    pass's audit trail silently contained fixes applied to bytes that were
+    no longer there — and a payment dispute is adjudicated against exactly
+    that record (design §13)."""
+    root = tmp_path / "dossiers"
+    d = root / "s1"
+    d.mkdir(parents=True)
+    (d / "verdict.json").write_text('{"bin": 3}')
+    (d / "fixlog.json").write_text('[{"fix": "FIX_KEY_HYGIENE"}]')
+
+    ledger.archive_dossier("s1", root)
+
+    assert not (d / "verdict.json").exists(), "prior generation left in place"
+    hist = list((d / "history").iterdir())
+    assert len(hist) == 1
+    assert (hist[0] / "verdict.json").read_text() == '{"bin": 3}'
+    assert (hist[0] / "fixlog.json").exists()
+
+    # idempotent / safe on a session that has no dossier yet
+    ledger.archive_dossier("never-seen", root)
+
+
+def test_heal_branch_archives_the_dossier(monkeypatch):
+    """Pin the call site itself: the heal must archive before it resets."""
+    import inspect
+    from pipeline import ingest
+    src = inspect.getsource(ingest.scan)
+    assert "archive_dossier" in src, \
+        "the QUARANTINED-path heal must archive the prior dossier"
+
+
+# ------------- a failed daily send must not regenerate the sheet every 20s
+
+def test_failed_daily_send_backs_off_instead_of_rebuilding_every_tick(
+        cfg, ledger, monkeypatch):
+    """r-loop 5: the H lane body runs every ~20s, and
+    send_daily_report_if_due BUILDS the sheet before it sends, returning
+    False without writing the marker or the anchor when Telegram fails.
+    Under the batch driver it was reached at most once per batch drain;
+    under the continuous driver a Telegram outage after 14:00 IST turned
+    it into ~180 full sheet generations an hour — each a whole-table
+    player_rollup + build_folder_issues scan, each rewriting
+    reports/<day>/payment-<day>.csv NON-atomically, so an scp of that path
+    during the payment endgame could capture a truncated file."""
+    monkeypatch.setattr(C, "CONT_DAILY_REPORTS", True)
+    calls = {"n": 0}
+    monkeypatch.setattr(runmod, "send_daily_report_if_due",
+                        lambda *a, **k: calls.__setitem__("n", calls["n"] + 1))
+    monkeypatch.setattr(runmod, "send_folder_issues_if_due",
+                        lambda *a, **k: None)
+
+    clock = [1000.0]
+    captured = {}
+    monkeypatch.setattr(
+        cont.ContinuousDriver, "_lane_loop",
+        lambda self, name, body, idle_s=0: captured.__setitem__("body", body))
+    drv = cont.ContinuousDriver(cfg, send_telegram=True,
+                                clocks=cont._Clocks(mono=lambda: clock[0]))
+    monkeypatch.setattr(drv, "_send_digest", lambda _led: None)
+    drv._housekeeping_thread()
+    body = captured["body"]
+    # isolate the duty under test: push the autoscale and hourly-sweep
+    # cadences out of reach so this exercises only the daily send
+    drv._next_scale = clock[0] + 1e9
+    drv._next_sweep = clock[0] + 1e9
+    drv.stop.set()          # body ends with stop.wait(20) — don't sleep it
+
+    body(ledger)
+    for _ in range(5):                 # five more 20s ticks
+        clock[0] += 20
+        body(ledger)
+    assert calls["n"] == 1, \
+        f"a failed send must back off, not rebuild every tick ({calls})"
+
+    clock[0] += C.CONT_DAILY_RETRY_S + 1
+    body(ledger)
+    assert calls["n"] == 2, "it must still retry once the backoff elapses"
+
+
+# --------- r-loop-4's delivery aging is untested: pin it (mutation survived)
+
+def test_stuck_list_ages_undelivered_rows_from_the_events_audit(cfg, ledger):
+    """r-loop 4 taught the stuck list to age READY/PACKAGED/UPLOADED from
+    the events audit, because every delivery retry bumps updated_at via
+    deliver_session's ledger.update(rrd_sampled=...) — so a permanently
+    failing upload never matched the updated_at<cut query and never
+    appeared. That fix had NO regression test: deleting the loop left the
+    suite green (r-loop 5), and the `rows` comprehension filters those
+    three states out, so they become structurally unreachable again.
+
+    At the flip the 3h digest is the only ops surface (CONT_DAILY_REPORTS
+    ships False), so the session is invisible until someone reads the
+    ledger by hand."""
+    from datetime import datetime, timedelta, timezone
+    sid = "s-stuck-ready"
+    ledger.insert_session(session_id=sid, game="kamla",
+                          operator_email="op@x.com", player_email="p@x.com",
+                          drive_path="kamla/op@x.com/p@x.com/" + sid,
+                          drive_ctime="2026-08-14T10:00:00.000Z",
+                          md5_video="a" * 32, bytes_=10, state="READY")
+    old = (datetime.now(timezone.utc)
+           - timedelta(hours=C.CONT_STUCK_H + 4)).isoformat(
+               timespec="seconds")
+    ledger.db.execute("DELETE FROM events WHERE session_id=?", (sid,))
+    ledger.db.execute(
+        "INSERT INTO events(session_id, from_state, to_state, ts, detail) "
+        "VALUES(?,?,?,?,?)", (sid, "VALIDATING", "READY", old, "staged"))
+    # the retry loop keeps updated_at FRESH — this is the whole trap
+    ledger.update(sid, rrd_sampled=1)
+    ledger.db.commit()
+
+    drv = cont.ContinuousDriver(cfg, send_telegram=False)
+    lines, total = drv._stuck_lines(ledger)
+    assert any(sid in ln for ln in lines), \
+        f"a forever-retrying delivery must appear in the stuck list: {lines}"
+
+
+# ------- R1's ruled-KEPT VLM label+confidence filter is executed by no test
+
+def _statics_aux(tmp_path, monkeypatch, *, label, conf,
+                 action_at=None, win=(3.0, 5.0), fps=10.0, dur=10.0):
+    """Drive _build_aux's scanner-statics arm through the module seams."""
+    from translator import video as Vmod
+    from translator.v2 import V2_FRAME_COLS
+    from pipeline import scanner as scannermod
+    from pipeline import vlm as vlmmod
+
+    n = int(dur * fps)
+    times = [round(i / fps, 3) for i in range(n)]
+    tl = scannermod.MotionTimeline(
+        n_frames=n, fps=fps, duration_s=dur, times_s=times,
+        diffs=[5.0] * (n - 1), luma=[100.0] * n)
+
+    work = tmp_path / "w"
+    work.mkdir(parents=True)
+    (work / "video.mp4").write_bytes(b"x")
+    col = {c: i for i, c in enumerate(V2_FRAME_COLS)}
+    rows = []
+    for i in range(n):
+        r = [""] * len(V2_FRAME_COLS)
+        r[col["frame_id"]] = str(i)
+        r[col["timestamp_ms"]] = str(int(times[i] * 1000))
+        if action_at is not None and i == action_at:
+            r[col["input_actions"]] = "interact"
+            r[col["input_keys"]] = "e"
+        rows.append(",".join(r))
+    (work / "frames.csv").write_text(
+        ",".join(V2_FRAME_COLS) + "\n" + "\n".join(rows) + "\n")
+
+    monkeypatch.setattr(Vmod, "frame_pts", lambda p: [
+        int(t * 1e6) for t in times])
+    monkeypatch.setattr(scannermod, "available", lambda: True)
+    monkeypatch.setattr(scannermod, "scan_video", lambda p, pts_us=None: tl)
+    monkeypatch.setattr(scannermod, "static_windows",
+                        lambda *a, **k: [win])
+    monkeypatch.setattr(scannermod, "zero_input_runs", lambda *a, **k: [])
+    mid = round((win[0] + win[1]) / 2, 2)
+    monkeypatch.setattr(vlmmod, "classify_stills",
+                        lambda *a, **k: [{"t": mid, "label": label,
+                                          "conf": conf}])
+
+    class _Eng:
+        class FrameGrabber:
+            def __init__(self, *a, **k): pass
+            def close(self): pass
+    monkeypatch.setattr(validate, "load_engine", lambda: _Eng)
+
+    rep = {"game_title": "Kamla", "duration_s": dur,
+           "vlm": {"samples": [{"t": 1.0, "label": "gameplay"}],
+                   "windows": []}}
+    return validate._build_aux(work, rep, object(), gemini_key="k",
+                               gemini_model="m", vlm_expected=True)
+
+
+def test_low_confidence_gameplay_still_produces_no_extra_window(tmp_path,
+                                                                monkeypatch):
+    """Ruling R1 KEEPS the VLM label+confidence filter. Replacing the whole
+    condition with `if True:` left the suite green, and inserting a raise
+    before load_engine failed exactly ONE unrelated test — so the statics
+    arm, the AFK carve-out and the inclusive-end count were executed by no
+    test at all (r-loop 5). Widening the filter while tuning R1 would make
+    every measured-still window an acted-on extra_window: a >5s window the
+    model calls 'gameplay' would raise CNT_MID_NONGAMEPLAY and cut a child
+    out of real play, re-arming the exact cascade R1 exists to stop."""
+    aux = _statics_aux(tmp_path, monkeypatch, label="gameplay", conf="high")
+    assert aux["extra_windows"] == []
+    aux = _statics_aux(tmp_path / "b", monkeypatch, label="loading",
+                       conf="low")
+    assert aux["extra_windows"] == [], "low confidence must not act"
+
+
+def test_high_confidence_nongameplay_label_produces_an_extra_window(
+        tmp_path, monkeypatch):
+    aux = _statics_aux(tmp_path, monkeypatch, label="loading", conf="high")
+    assert len(aux["extra_windows"]) == 1
+    assert aux["extra_windows"][0]["label"] == "loading"
+
+
+def test_action_frame_count_includes_the_window_end_frame(tmp_path,
+                                                          monkeypatch):
+    """r-loop 3: gate.gate_windows selects rows on `t0 <= t <= t1` and the
+    engine's rows_in_window uses bisect_right, so a half-open count missed
+    the frame AT the window end — and the input that ENDS a freeze (the
+    click dismissing the loading screen) lands exactly there, so the
+    window was reported 'kept (no inputs inside)' and shipped an action
+    recorded on a non-gameplay frame."""
+    aux = _statics_aux(tmp_path, monkeypatch, label="loading", conf="high",
+                       win=(3.0, 5.0), action_at=50)   # 5.0s at 10fps
+    assert aux["extra_windows"][0]["action_frames"] == 1

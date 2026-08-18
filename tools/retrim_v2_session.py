@@ -30,7 +30,8 @@ from translator.trim import plan_cuts         # noqa: E402
 from translator.v2 import V2_FRAME_COLS       # noqa: E402
 
 
-def retrim(session_dir: Path, head_s: float, out_dir: Path) -> dict:
+def retrim(session_dir: Path, head_s: float, out_dir: Path, *,
+           make_rrd: bool = True) -> dict:
     session_dir = Path(session_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     src = session_dir / "video.mp4"
@@ -108,7 +109,17 @@ def retrim(session_dir: Path, head_s: float, out_dir: Path) -> dict:
     (out_dir / "session.json").write_text(json.dumps(s, indent=2))
     if session_dir != out_dir:
         shutil.copy2(session_dir / "rrd_creation.py", out_dir / "rrd_creation.py")
-    rrd.generate(out_dir, timeout_s=1800)     # bounded, as deliver.py does
+    if make_rrd:
+        rrd.generate(out_dir, timeout_s=1800)  # bounded, as deliver.py does
+    else:
+        # Fix path: nothing reads this rrd (translator/v2.py only checks
+        # session.rrd EXISTS; deliver.stage_session regenerates it in the
+        # stage dir), and rendering it embeds the whole clip via
+        # rr.AssetVideo -- a roughly video-sized file written into the
+        # work dir, minutes inside the runner's gate slot, then deleted
+        # unread at the terminal wipe (r-loop 5). Touch the same 0-byte
+        # stub ingest.download writes for that presence gate.
+        (out_dir / "session.rrd").touch()
     return {"session": s["session_id"], "head_cut_s": round(head_cut, 3),
             "cut_rows": len(rows) - len(kept), "frames": len(kept),
             "duration_s": s["duration_seconds"], "out_dir": str(out_dir)}

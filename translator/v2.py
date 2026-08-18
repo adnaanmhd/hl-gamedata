@@ -240,7 +240,11 @@ def translate_bundle_v2(bundle_dir: Path, out_root: Path, *,
                         lag_correct: bool = True,
                         action_overrides: dict[int, str] | None = None) -> dict:
     bundle_dir = Path(bundle_dir)
-    meta = json.loads((bundle_dir / "metadata.json").read_text())
+    # metadata.json carries player-typed free text (session.role,
+    # session.objective_task), so it is strictly MORE exposed to a
+    # non-UTF-8 byte than inputs.jsonl, which r-loop 4 hardened (r-loop 5)
+    meta = json.loads((bundle_dir / "metadata.json").read_text(
+        encoding="utf-8", errors="replace"))
     game_info = meta.get("game", {})
     game_name = game_info.get("name") or meta.get("game_name")
     exe_name = game_info.get("exe_name")

@@ -259,6 +259,14 @@ def scan(cfg: C.Config, ledger: Ledger,
                     # the OLD bytes on payment sheets, and an inherited
                     # uploaded_reported_at blocked the new hours from the
                     # late-arrival guard forever (review-r5 #7)
+                    # ...including supersede's dossier archive, the one
+                    # part this branch did NOT duplicate (r-loop 5). The
+                    # new pass overwrote verdict.json and APPENDED to the
+                    # existing fixlog.json, so the audit trail for the new
+                    # bytes silently contained fixes applied to different
+                    # bytes, with no separator — and a payment dispute is
+                    # adjudicated against that record.
+                    ledger.archive_dossier(ds.session_id, cfg.dossiers)
                     ledger.update(ds.session_id,
                                   drive_path=ds.drive_path,
                                   drive_ctime=ds.ctime, md5_video=vmd5,

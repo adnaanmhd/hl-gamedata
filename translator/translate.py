@@ -60,7 +60,24 @@ def resolve_keybind(*, keybind_path: Path | None, game_name: str | None,
                     exe_name: str | None = None) -> dict:
     """Prefer an explicit keybind.json; else fall back to the built-in for the game."""
     if keybind_path and Path(keybind_path).exists():
-        raw = json.loads(Path(keybind_path).read_text())
+        # errors="replace" + a type guard, exactly as load_events does
+        # (r-loop 4 hardened inputs.jsonl and left its two siblings
+        # strict). keybind.json consists ENTIRELY of key names, so a
+        # single cp1252 byte from a non-US layout used to raise straight
+        # out of FIX_RETRANSLATE -- apply_fixes recorded the step as
+        # failed, the reason survived revalidation untouched, attempt 2
+        # failed identically, and the session was REJECTED "fix retries
+        # exhausted" with a bare fix-failed marker for ops (r-loop 5).
+        try:
+            raw = json.loads(Path(keybind_path).read_text(
+                encoding="utf-8", errors="replace"))
+        except (json.JSONDecodeError, OSError):
+            raw = None
+        if not isinstance(raw, dict):
+            # unreadable/garbled -> fall through to the built-in rather
+            # than hand _as_semantic_to_literal something without .values()
+            slug = game_key_from_name(game_name or "", exe_name)
+            return dict(KEYBINDS.get(slug, {})) if slug else {}
         # vendor file is semantic->literal; if it looks inverted (literal->[semantic]),
         # flip it back so we have a single canonical direction.
         return _as_semantic_to_literal(raw)

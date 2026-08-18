@@ -976,8 +976,14 @@ class ContinuousDriver:
                 except (json.JSONDecodeError, KeyError, TypeError,
                         ValueError):
                     continue
-                if int(ev.get("status", 0)) == 429:
-                    self._pressure_recent.append(ts)
+                # ANY pressure event counts (r-loop 5). Keeping the
+                # field name p429 while the writer emits 5xx and transport
+                # failures too, and the reader silently discarded both, was
+                # the second half of the bug: two of the three failure
+                # classes the retry ladder distinguishes could never move
+                # the pool down. A 5xx or a dropped TLS connection stalls
+                # the sweep exactly as hard as a rate-limit does.
+                self._pressure_recent.append(ts)
                 self._last_pressure_ep = max(self._last_pressure_ep, ts)
             # newly-read events can themselves be older than the window
             self._pressure_recent = [t for t in self._pressure_recent
@@ -1280,6 +1286,7 @@ class ContinuousDriver:
         # must survive a ledger reconnect (r-loop 2)
         self._next_scale = 0.0
         self._next_sweep = 0.0
+        self._next_daily = 0.0
 
         def _duty(label: str, fn) -> None:
             """Run one housekeeping duty in isolation.
@@ -1315,7 +1322,23 @@ class ContinuousDriver:
                 # misattribute the hours and deadlock recal_regen_sheets'
                 # stray-stamp gate (r-loop 1). The flip deploys False;
                 # True again after regen.
-                if C.CONT_DAILY_REPORTS:
+                if C.CONT_DAILY_REPORTS and now >= self._next_daily:
+                    # Own cadence stamp, like _next_sweep (r-loop 5). This
+                    # body runs every ~20s, and send_daily_report_if_due
+                    # BUILDS the sheet before it sends, returning False
+                    # without writing the marker or the anchor when
+                    # Telegram fails. Under the batch driver it was reached
+                    # at most once per batch drain; here a Telegram outage
+                    # after 14:00 IST turned it into ~180 full sheet
+                    # generations an hour, each a whole-table player_rollup
+                    # + build_folder_issues scan, each rewriting
+                    # reports/<day>/payment-<day>.csv NON-atomically — so
+                    # an scp/cat of that path during the payment endgame
+                    # could capture a truncated file. It also stretched H's
+                    # own cadence (up to three 60s urlopen timeouts per
+                    # tick), delaying the 60s autoscale ticks that are the
+                    # driver's only backpressure response.
+                    self._next_daily = now + C.CONT_DAILY_RETRY_S
                     _duty("daily payment report",
                           lambda: runmod.send_daily_report_if_due(
                               self.cfg, led))

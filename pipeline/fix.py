@@ -397,7 +397,16 @@ def _dispatch(fix_id: str, params: dict, work: Path, game: str,
         return res
     if fix_id == "FIX_RETRIM_HEAD":
         tool = _retrim_tool()
-        return tool.retrim(work, params["head_s"], work)
+        # make_rrd=False: in the fix path out_dir IS the work dir, and
+        # NOTHING reads that rrd -- v2.py only checks session.rrd EXISTS
+        # (which is why ingest.download touches a 0-byte stub), and
+        # deliver.stage_session regenerates it inside the stage dir. The
+        # render embeds the whole clip via rr.AssetVideo and logs 5
+        # entries per frame, so it came out roughly VIDEO-SIZED: minutes
+        # inside the runner's gate slot, and ~2x that session's bytes on
+        # disk against a cap (CONT_MEDIA_CAP_SESSIONS) that counts
+        # SESSIONS as its bytes bound (r-loop 5).
+        return tool.retrim(work, params["head_s"], work, make_rrd=False)
     if fix_id == "FIX_GATE_WINDOW":
         return gate.gate_windows(work, params["windows"])
     if fix_id == "FIX_KEY_HYGIENE":
@@ -523,7 +532,9 @@ def retranslate_from_sidecars(work: Path, *,
     corrected game governs, never the metadata-derived one (review-2 #5)."""
     from translator.v2 import GAME_TITLES
     raw = work / "raw"
-    meta = json.loads((raw / "metadata.json").read_text())
+    # see translator/v2.py: player-typed free text, non-UTF-8 reachable
+    meta = json.loads((raw / "metadata.json").read_text(
+        encoding="utf-8", errors="replace"))
     s = json.loads((work / "session.json").read_text())
     game_info = meta.get("game", {})
     if game_override:

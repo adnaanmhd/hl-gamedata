@@ -617,7 +617,13 @@ def test_pressure_read_and_rung_quiet_reset(cfg):
         f.write(json.dumps({"ts": now[0] - 20, "status": 503,
                             "rung": 0, "tag": "genlang r0"}) + "\n")
     drv._read_pressure()
-    assert len(drv._pressure_recent) == 3          # 5xx not counted as 429
+    # r-loop 5: ALL pressure events count, not just literal 429s. The
+    # writer emits 5xx and transport failures on this same channel and the
+    # reader used to discard both, so two of the three failure classes the
+    # retry ladder distinguishes could never move the pool down — while
+    # autoscale rule 3 scaled it UP into the outage, because workers
+    # asleep in backoff burn no CPU. (Previously asserted 3.)
+    assert len(drv._pressure_recent) == 4
     assert drv._last_pressure_ep == now[0] - 20
     # rung stickiness + quiet reset
     drv.absorb_rung(2)

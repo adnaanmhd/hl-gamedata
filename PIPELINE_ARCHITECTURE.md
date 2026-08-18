@@ -132,9 +132,9 @@ Canonical order (later steps depend on earlier):
 ```
 REMUX → V1_TO_V2 / TRANSLATE_RAW → REROUTE_GAME → RETRANSLATE (supersedes CSV fixes)
       → HEADER_REWRITE → ROWS_SURGERY → TSREPAIR_PTS      (structural, must precede any cut)
-      → RETRIM_HEAD / CUT_SEGMENTS
       → KEY_HYGIENE → ACTIONS_CONTEXT → other CSV writers
       → GATE_WINDOW                                       (LAST of the frames.csv writers)
+      → RETRIM_HEAD / CUT_SEGMENTS
       → SESSIONJSON_RECOMPUTE
 ```
 
@@ -148,13 +148,32 @@ on every frame that still had mouse motion — in the same pass that gated it �
 so `INP_FROZEN_ACTIONS` re-fired on revalidation and burned the second fix
 attempt. Do not "restore" the older order.
 
+**Why the trim/cut comes AFTER the gate** (r-loop 4 for the head trim,
+r-loop 5 for the cuts): gate windows carry PRE-trim timestamps — correct at
+the moment the gate runs — and both `FIX_RETRIM_HEAD` and `FIX_CUT_SEGMENTS`
+only slice rows and rebase the survivors; neither re-derives an input column,
+so the blanking survives them and the cutter copies it into every child.
+Dropping the gate instead (the pre-r-loop-4 behaviour, and the pre-r-loop-5
+behaviour on the three cut exits) cost a whole fix attempt on the head path,
+and on the cut path lost the parent's confirmed detection entirely: children
+are inserted with `reasons_json="[]"`, so a segment could ship semantic
+actions recorded during a confirmed freeze.
+
+The cut path still short-circuits the OTHER pending fixes (hygiene, context,
+…) — that asymmetry is deliberate. Their triggers are deterministic functions
+of the CSV (`INP_OSKEYS` is re-derived identically from the child's own rows),
+so nothing is lost by letting the child re-plan them with its own fresh
+budget. A confirmed frozen WINDOW is not: it took a paid VLM sweep plus a
+scanner measurement to establish, the child inherits no reasons, and a 3 s
+freeze can fall between the VLM's 4 s samples and never be found again.
+
 | Fix | Does |
 |---|---|
 | `FIX_RETRANSLATE` | **The universal strong fix.** Re-bins raw sidecar events onto the delivered video by real PTS, re-runs lag correction (≤3 iterations) and OW context gating, rewrites `frames.csv`. Requires `raw/`. |
 | `FIX_TSREPAIR_PTS` / `FIX_LAGSHIFT_CSV` | No sidecars: rewrite `timestamp_ms` from real PTS; or shift input columns by `round(lag/frame)` rows and re-measure (fails loudly if drifting, not constant). |
 | `FIX_CUT_SEGMENTS` | Lossless split around non-gameplay/AFK windows — keyframe-snapped video cut, CSV sliced to the real frame range, ids re-zeroed, timestamps rebased to each segment's own PTS. Segments <70 s dropped; parent → `SPLIT`; children `-pN` re-enter Phase II with their own budget. No survivor → reject. |
-| `FIX_RETRIM_HEAD` | Head-only trim (notification/menu at clip start). Gate windows are dropped with it — pre-trim timestamps would blank the wrong frames. |
-| `FIX_GATE_WINDOW` | Blanks `input_keys` **and** `input_actions` across a kept frozen window (spec §1.5.5 coupling). dx/dy and buttons stay — raw facts. |
+| `FIX_RETRIM_HEAD` | Head-only trim (notification/menu at clip start). Emitted **after** `GATE_WINDOW`: the gate's windows are pre-trim coordinates, correct at the moment it runs, and the retrim only slices head rows and rebases survivors — it never re-derives input columns. |
+| `FIX_GATE_WINDOW` | Blanks `input_keys` **and** `input_actions` across a kept frozen window (spec §1.5.5 coupling). dx/dy and buttons stay — raw facts. Emitted before any trim/cut in the same plan, never dropped for one. Its span is the scanner-MEASURED frozen run (+`GATE_PAD_FRAMES`) whenever the scanner produced one — VLM window bounds are midpoints between sample times and are not stable across passes (RULED, Adnaan 2026-08-18). Records the inventory it destroys, so the content bars cannot later blame the player for rows the pipeline blanked. |
 | `FIX_KEY_HYGIENE` | v2 token case, strip OS/system keys + control bytes, drop the spurious side of L+R bleed, re-resolve actions from surviving keys. |
 | `FIX_ACTIONS_CONTEXT` | Outer Wilds only: context table gates multi-bound keys (no-op elsewhere). Always follows hygiene on OW. |
 | `FIX_ROWS_SURGERY` · `FIX_HEADER_REWRITE` · `FIX_CAMERA_NULL` · `FIX_SENTINELS` | Mechanical CSV repairs. Row surgery only for \|Δ\| ≤ 2 tail rows — nothing is fabricated. |
