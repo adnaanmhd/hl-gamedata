@@ -199,10 +199,13 @@ def test_daily_send_stamps_exactly_the_counted_roots(cfg, ledger,
 
 def test_daily_resend_after_kill_before_marker_no_double_count(cfg, ledger,
                                                                monkeypatch):
-    """r5 #16(c): a kill in the interstice AFTER stamps+anchor but BEFORE
-    the marker leaves stamped rows, an advanced anchor and no day marker
-    — the next tick's regenerated sheet must NOT re-count the stamped
-    roots' hours (stamped-root guard, r5 #33/#43)."""
+    """r5 #16(c), REWRITTEN by r-loop 8 (C5): the old assertion pinned the
+    resend REGENERATING a smaller sheet — that was the bug's benign half
+    (conservation held, but a partial-stamp interruption shipped a
+    shrunken, even header-only, payment sheet). With the durable
+    .daily-counted.json record the resend RESUMES: the sheet is generated
+    exactly once, the resent CSV is byte-identical, and hours are still
+    counted exactly once."""
     send1 = _send_time()
     hi1 = _window_hi(send1)
     _mk_delivered_root(ledger, DROOT, hi1 - timedelta(hours=2))
@@ -217,12 +220,18 @@ def test_daily_resend_after_kill_before_marker_no_double_count(cfg, ledger,
     monkeypatch.setattr(reports, "build_sheet_rows", spy_rows)
     assert runmod.send_daily_report_if_due(cfg, ledger, send1) is True
     assert len(sheets) == 1 and sheets[0][0]["kamla_hrs_uploaded"] == 1.0
-    # the kill: marker never landed; stamps + advanced anchor persist
-    (cfg.reports_dir / send1.strftime("%Y-%m-%d") / ".sent").unlink()
+    day = send1.strftime("%Y-%m-%d")
+    csv_path = cfg.reports_dir / day / f"payment-{day}.csv"
+    first_bytes = csv_path.read_bytes()
+    # the kill: marker never landed; stamps + anchor + record persist
+    (cfg.reports_dir / day / ".sent").unlink()
     assert runmod.send_daily_report_if_due(cfg, ledger,
                                            _send_time(hour=15)) is True
-    assert sheets[1] == []       # stamped root NOT back as a late arrival
-    # conservation: 1.0 h across both generations, once
+    assert len(sheets) == 1, \
+        "the resend must RESUME from the record, never regenerate (r-loop 8)"
+    assert csv_path.read_bytes() == first_bytes
+    assert (cfg.reports_dir / day / ".sent").exists()
+    # conservation: 1.0 h generated once, across both sends
     assert sum(r["total_uploaded_hours"]
                for s in sheets for r in s) == 1.0
 

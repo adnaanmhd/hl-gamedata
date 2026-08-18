@@ -349,3 +349,106 @@ def test_alertbook_failed_send_does_not_consume_the_ttl(cfg, monkeypatch):
     now[0] += 10
     book.alert("disk low")               # second send SUCCEEDED — deduped
     assert len(calls) == 2
+
+
+# --------------- C5 BLOCKER: the daily send's durable counted record
+
+def _daily_seed(cfg, ledger, monkeypatch, docs=None):
+    """A countable DELIVERED root in the send window + counting telegram
+    stubs. Returns (send_time, sid, csv_path, day)."""
+    from pipeline.tests.test_review_r5_driver import (_mk_delivered_root,
+                                                      _send_time,
+                                                      _window_hi)
+    send = _send_time()
+    hi = _window_hi(send)
+    sid = "2026-08-15T05-00-00Z_kamla_c_00000000000000c5"
+    _mk_delivered_root(ledger, sid, hi - timedelta(hours=2))
+    monkeypatch.setattr(runmod.telegram, "send_message",
+                        lambda c, t: None)
+    monkeypatch.setattr(
+        runmod.telegram, "send_document",
+        lambda c, p, caption="": (docs.append(Path(p).read_bytes())
+                                  if docs is not None else None))
+    day = send.strftime("%Y-%m-%d")
+    return send, sid, cfg.reports_dir / day / f"payment-{day}.csv", day
+
+
+def test_daily_partial_stamp_crash_resumes_never_regenerates(
+        cfg, ledger, monkeypatch):
+    """One `database is locked` inside the accepted-stamp loop left the
+    marker absent with the uploads already stamped; the retry then
+    REGENERATED, and post-stamp build_sheet_rows excludes every stamped
+    root — a smaller (even header-only) sheet overwrote payment-<day>.csv
+    and was sent as the payment document."""
+    import sqlite3
+    from pipeline import reports
+    from pipeline.tests.test_review_r5_driver import _send_time
+    docs: list[bytes] = []
+    send, sid, csv_path, day = _daily_seed(cfg, ledger, monkeypatch,
+                                           docs=docs)
+    calls = {"n": 0}
+    real = reports.mark_accepted_reported
+
+    def flaky(led_, sids):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise sqlite3.OperationalError("database is locked")
+        return real(led_, sids)
+    monkeypatch.setattr(reports, "mark_accepted_reported", flaky)
+    with pytest.raises(sqlite3.OperationalError):
+        runmod.send_daily_report_if_due(cfg, ledger, send)
+    first = csv_path.read_bytes()
+    assert b"p@x.com" in first                # the root was on the sheet
+    assert not (cfg.reports_dir / day / ".sent").exists()
+
+    # the retry (fault cleared) must RESUME, not regenerate
+    assert runmod.send_daily_report_if_due(
+        cfg, ledger, _send_time(hour=15)) is True
+    assert csv_path.read_bytes() == first, \
+        "the resent sheet must be byte-identical, never a regeneration"
+    assert docs and docs[-1] == first          # document re-sent, same bytes
+    row = ledger.get(sid)
+    assert row["uploaded_reported_at"] and row["accepted_reported_at"]
+    from pipeline.tests.test_review_r5_driver import _window_hi
+    assert (cfg.reports_dir / ".last_daily_sent").read_text() == \
+        _window_hi(send).isoformat(timespec="seconds")
+    assert (cfg.reports_dir / day / ".sent").exists()
+
+
+def test_daily_post_stamp_kill_resends_the_identical_csv(cfg, ledger,
+                                                         monkeypatch):
+    """All stamps landed, marker missing (kill between anchor and marker):
+    the retry re-sends the CSV on disk — pre-fix it regenerated a
+    header-only sheet because every root was already stamped."""
+    from pipeline import reports
+    from pipeline.tests.test_review_r5_driver import _send_time
+    docs: list[bytes] = []
+    send, sid, csv_path, day = _daily_seed(cfg, ledger, monkeypatch,
+                                           docs=docs)
+    assert runmod.send_daily_report_if_due(cfg, ledger, send) is True
+    first = csv_path.read_bytes()
+    (cfg.reports_dir / day / ".sent").unlink()
+    builds = []
+    monkeypatch.setattr(
+        reports, "build_sheet_rows",
+        lambda *a, **k: builds.append(1) or [])
+    assert runmod.send_daily_report_if_due(
+        cfg, ledger, _send_time(hour=15)) is True
+    assert builds == [], "the resume path must never rebuild the sheet"
+    assert csv_path.read_bytes() == first
+    assert docs[-1] == first
+
+
+def test_daily_unreadable_record_refuses_loudly(cfg, ledger, monkeypatch,
+                                                capsys):
+    """A torn record is an unknown: regenerating post-stamp could ship a
+    shrunken sheet, so the send refuses and says so — a human reconciles."""
+    from pipeline.tests.test_review_r5_driver import _send_time
+    send, sid, csv_path, day = _daily_seed(cfg, ledger, monkeypatch)
+    csv_path.parent.mkdir(parents=True, exist_ok=True)
+    csv_path.write_bytes(b"SENTINEL-SHEET")
+    (cfg.reports_dir / day / ".daily-counted.json").write_text("{torn")
+    assert runmod.send_daily_report_if_due(cfg, ledger, send) is False
+    assert csv_path.read_bytes() == b"SENTINEL-SHEET"
+    assert not (cfg.reports_dir / day / ".sent").exists()
+    assert "REFUSING to regenerate" in capsys.readouterr().err

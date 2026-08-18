@@ -789,6 +789,132 @@ def _pace_now(ledger: Ledger) -> pace.PaceStatus:
         n_players=n_players)
 
 
+def _build_daily_stats(ledger: Ledger, now_ist: datetime,
+                       lo: str, hi: str) -> reports.DailyStats:
+    """The DailyStats message figures over [lo, hi) — shared by the fresh
+    send and the durable-record resume (r-loop 8), which must rebuild the
+    message from the STORED bounds without regenerating the sheet."""
+    row = ledger.db.execute(
+        "SELECT COUNT(*) n, COALESCE(SUM(duration_delivered_s),0) s "
+        "FROM sessions WHERE state='DELIVERED' AND delivered_at>=? AND "
+        "delivered_at<?", (lo, hi)).fetchone()
+    # windowed on the REJECTED transition ts (immutable events row), not
+    # updated_at — finalize_rejected bumps updated_at after the report is
+    # sent, which re-counted the session in the NEXT day's window
+    rej_rows = ledger.db.execute(
+        f"SELECT reasons_json FROM sessions WHERE state='REJECTED' AND "
+        f"{reports.REJECT_TS}>=? AND {reports.REJECT_TS}<?",
+        (lo, hi)).fetchall()
+    # unfixable-only per stored fixable fields, ALL labels per session,
+    # fix-failed marker for all-fixable rejects (Adnaan 08-15); the count
+    # orders the line but is not printed
+    counts: dict[str, int] = {}
+    for r in rej_rows:
+        try:
+            labels = reports.session_reject_labels(
+                json.loads(r["reasons_json"] or "[]"), daily=True)
+        except json.JSONDecodeError:
+            labels = [reports.UNREADABLE_MARKER]   # unknown ≠ fix-failed
+        for lbl in labels:
+            counts[lbl] = counts.get(lbl, 0) + 1
+    dups = ledger.db.execute(
+        f"SELECT COUNT(*) n FROM sessions WHERE state='REJECTED' AND "
+        f"{reports.REJECT_TS}>=? AND {reports.REJECT_TS}<? AND "
+        f"reasons_json LIKE '%INT_DUP_CROSS%'", (lo, hi)).fetchone()["n"]
+    return reports.DailyStats(
+        day_ist=now_ist,
+        delivered_hours_today=row["s"] / 3600.0,
+        delivered_sessions_today=row["n"],
+        rejected_sessions_today=len(rej_rows),
+        hours_kamla=ledger.delivered_hours("kamla"),
+        hours_ow=ledger.delivered_hours("outer_wilds"),
+        collected_kamla=ledger.collected_hours("kamla"),
+        collected_ow=ledger.collected_hours("outer_wilds"),
+        days_left=max(int((C.DEADLINE_IST - now_ist).total_seconds()
+                          // 86400), 0),
+        reject_counts=sorted(counts.items(),
+                             key=lambda kv: (-kv[1], kv[0])),
+        integrity_lines=([f"{dups} cross-player duplicate"
+                          f"{'s' if dups > 1 else ''} (kept earlier upload)"]
+                         if dups else []),
+        # the folder-issues heartbeat (Adnaan via d3, 08-15) — a snapshot
+        # count at payment-send time; the list itself follows in the
+        # folder-issues message minutes later
+        folder_issues=len(reports.build_folder_issues(ledger)))
+
+
+def _send_sheet_document(cfg: C.Config, csv_path: Path) -> None:
+    try:
+        telegram.send_document(cfg, csv_path, caption="payment sheet")
+    except telegram.TelegramError as e:
+        print(f"[daily-sheet-undelivered] {e} — sheet remains at "
+              f"{csv_path}", file=sys.stderr)
+        # the message channel just worked, so an alert has a good chance
+        # even when the attachment path fails (review-r2 #40/#46)
+        try:
+            telegram.send_message(
+                cfg, f"⚠️ payment sheet attachment failed to send — "
+                     f"file is on the VM at {csv_path}")
+        except telegram.TelegramError:
+            pass
+
+
+def _resume_daily_send(cfg: C.Config, ledger: Ledger, now_ist: datetime,
+                       day: str, record: Path, marker: Path) -> bool:
+    """A `.daily-counted.json` without a `.sent` marker means a prior send
+    was interrupted somewhere in message->stamps->anchor->marker->document.
+    NEVER regenerate (r-loop 8 BLOCKER): after any partial stamp,
+    build_sheet_rows excludes every stamped root, so a regenerated sheet
+    is smaller — even header-only — yet would overwrite payment-<day>.csv
+    and be sent as the payment document. Resume from the stored record:
+    re-send the message rebuilt over the STORED bounds (recomputed
+    counters may drift; the attached sheet is authoritative — a duplicate
+    message is the accepted cost), re-stamp idempotently, finish
+    anchor+marker, and send the CSV already on disk. Same pattern as
+    tools/recal_regen_sheets' .regen-v2-counted.json."""
+    try:
+        rec = json.loads(record.read_text())
+        lo, hi = rec["lo"], rec["hi"]
+        counted = list(rec["counted"])
+        accepted = list(rec["accepted"])
+    except (OSError, json.JSONDecodeError, KeyError, TypeError):
+        print(f"[daily] resume record unreadable — REFUSING to regenerate "
+              f"post-stamp; reconcile by hand ({record})", file=sys.stderr)
+        return False
+    csv_path = cfg.reports_dir / day / f"payment-{day}.csv"
+    if not csv_path.exists():
+        # the record is written AFTER the CSV, so this is unreachable
+        # except by external deletion — alert, never regenerate
+        try:
+            telegram.send_message(
+                cfg, f"⚠️ daily resume: {csv_path} is missing while its "
+                     f"counted record exists — the sheet cannot be "
+                     f"re-sent; reconcile by hand")
+        except telegram.TelegramError as e:
+            print(f"[daily-resume-alert-undelivered] {e}", file=sys.stderr)
+        return False
+    d = _build_daily_stats(ledger, now_ist, lo, hi)
+    msg = reports.build_daily_message(d, _pace_now(ledger))
+    try:
+        telegram.send_message(cfg, msg)
+    except telegram.TelegramError as e:
+        print(f"[daily-report-undelivered] {e}", file=sys.stderr)
+        return False
+    # idempotent re-stamps of exactly what the interrupted send counted;
+    # ordering (stamps -> anchor -> marker) preserved from the fresh path
+    stamped = reports.mark_uploads_reported(ledger, lo, hi, sids=counted)
+    if stamped:
+        print(f"[daily] resume: re-stamped {stamped} root upload(s)")
+    acc_stamped = reports.mark_accepted_reported(ledger, accepted)
+    if acc_stamped:
+        print(f"[daily] resume: re-stamped {acc_stamped} accepted node(s)")
+    (cfg.reports_dir / ".last_daily_sent").write_text(hi)
+    marker.parent.mkdir(parents=True, exist_ok=True)
+    marker.touch()
+    _send_sheet_document(cfg, csv_path)
+    return True
+
+
 def send_daily_report_if_due(cfg: C.Config, ledger: Ledger,
                              now_ist: datetime | None = None) -> bool:
     # payment-endgame interlock, enforced HERE so it binds every caller —
@@ -808,6 +934,11 @@ def send_daily_report_if_due(cfg: C.Config, ledger: Ledger,
     marker = cfg.reports_dir / day / ".sent"
     if marker.exists():
         return False
+    record = cfg.reports_dir / day / ".daily-counted.json"
+    if record.exists():
+        # an interrupted send left its durable record — resume, never
+        # regenerate (r-loop 8 BLOCKER; see _resume_daily_send)
+        return _resume_daily_send(cfg, ledger, now_ist, day, record, marker)
     # the reporting window ENDS REPORT_OFFSET_H before send time (Adnaan
     # 08-15: OFFSET over restate) so every cohort in it has settled at
     # generation, and RUNS FROM the previous window's end. A fixed
@@ -841,60 +972,28 @@ def send_daily_report_if_due(cfg: C.Config, ledger: Ledger,
             window_clamped = True
     except (OSError, ValueError):
         pass
-    row = ledger.db.execute(
-        "SELECT COUNT(*) n, COALESCE(SUM(duration_delivered_s),0) s "
-        "FROM sessions WHERE state='DELIVERED' AND delivered_at>=? AND "
-        "delivered_at<?", (lo, hi)).fetchone()
-    # windowed on the REJECTED transition ts (immutable events row), not
-    # updated_at — finalize_rejected bumps updated_at after the report is
-    # sent, which re-counted the session in the NEXT day's window
-    rej_rows = ledger.db.execute(
-        f"SELECT reasons_json FROM sessions WHERE state='REJECTED' AND "
-        f"{reports.REJECT_TS}>=? AND {reports.REJECT_TS}<?",
-        (lo, hi)).fetchall()
-    # unfixable-only per stored fixable fields, ALL labels per session,
-    # fix-failed marker for all-fixable rejects (Adnaan 08-15); the count
-    # orders the line but is not printed
-    counts: dict[str, int] = {}
-    for r in rej_rows:
-        try:
-            labels = reports.session_reject_labels(
-                json.loads(r["reasons_json"] or "[]"), daily=True)
-        except json.JSONDecodeError:
-            labels = [reports.UNREADABLE_MARKER]   # unknown ≠ fix-failed
-        for lbl in labels:
-            counts[lbl] = counts.get(lbl, 0) + 1
-    dups = ledger.db.execute(
-        f"SELECT COUNT(*) n FROM sessions WHERE state='REJECTED' AND "
-        f"{reports.REJECT_TS}>=? AND {reports.REJECT_TS}<? AND "
-        f"reasons_json LIKE '%INT_DUP_CROSS%'", (lo, hi)).fetchone()["n"]
     p = _pace_now(ledger)
-    d = reports.DailyStats(
-        day_ist=now_ist,
-        delivered_hours_today=row["s"] / 3600.0,
-        delivered_sessions_today=row["n"],
-        rejected_sessions_today=len(rej_rows),
-        hours_kamla=ledger.delivered_hours("kamla"),
-        hours_ow=ledger.delivered_hours("outer_wilds"),
-        collected_kamla=ledger.collected_hours("kamla"),
-        collected_ow=ledger.collected_hours("outer_wilds"),
-        days_left=max(int((C.DEADLINE_IST - now_ist).total_seconds()
-                          // 86400), 0),
-        reject_counts=sorted(counts.items(),
-                             key=lambda kv: (-kv[1], kv[0])),
-        integrity_lines=([f"{dups} cross-player duplicate"
-                          f"{'s' if dups > 1 else ''} (kept earlier upload)"]
-                         if dups else []),
-        # the folder-issues heartbeat (Adnaan via d3, 08-15) — a snapshot
-        # count at payment-send time; the list itself follows in the
-        # folder-issues message minutes later
-        folder_issues=len(reports.build_folder_issues(ledger)))
+    d = _build_daily_stats(ledger, now_ist, lo, hi)
     counted: list[str] = []
     accepted: list[str] = []
     csv_path, _md = reports.write_payment_sheet(cfg, ledger, now_ist,
                                                 bounds=(lo, hi),
                                                 counted_out=counted,
                                                 accepted_out=accepted)
+    # DURABLE COUNTED RECORD (r-loop 8 BLOCKER), written atomically after
+    # the CSV and before anything sends or stamps: nothing between
+    # sheet-build and marker used to persist counted/accepted, so any
+    # interruption after a partial stamp (one `database is locked` inside
+    # the per-root stamp loop, ENOSPC on the anchor write) left the marker
+    # absent and the CONT_DAILY_RETRY_S retry REGENERATED — post-stamp,
+    # build_sheet_rows excludes every stamped root, so a smaller (even
+    # header-only) sheet overwrote payment-<day>.csv and went out as the
+    # payment document. From here on a retry RESUMES instead (see
+    # _resume_daily_send).
+    tmp = record.with_name(record.name + f".tmp{os.getpid()}")
+    tmp.write_text(json.dumps({"lo": lo, "hi": hi, "counted": counted,
+                               "accepted": accepted}))
+    os.replace(tmp, record)
     msg = reports.build_daily_message(d, p)
     if window_clamped:
         msg += ("\n\n⚠️ Window note: the stored anchor was older than 48 h "
@@ -928,19 +1027,7 @@ def send_daily_report_if_due(cfg: C.Config, ledger: Ledger,
     anchor.write_text(hi)          # next report's window starts here
     marker.parent.mkdir(parents=True, exist_ok=True)
     marker.touch()
-    try:
-        telegram.send_document(cfg, csv_path, caption="payment sheet")
-    except telegram.TelegramError as e:
-        print(f"[daily-sheet-undelivered] {e} — sheet remains at "
-              f"{csv_path}", file=sys.stderr)
-        # the message channel just worked, so an alert has a good chance
-        # even when the attachment path fails (review-r2 #40/#46)
-        try:
-            telegram.send_message(
-                cfg, f"⚠️ payment sheet attachment failed to send — "
-                     f"file is on the VM at {csv_path}")
-        except telegram.TelegramError:
-            pass
+    _send_sheet_document(cfg, csv_path)
     return True
 
 
