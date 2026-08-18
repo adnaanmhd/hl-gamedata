@@ -550,12 +550,16 @@ def _propagate_gate_record(parent_dossier: Path, dossier_root: Path,
         # INP_KEYS_MISSING to an advisory, so a segment with 2 distinct
         # actions and zero key frames shipped — violating two locked
         # delivery bars — under two operator advisories that were false
-        # statements about it. Accepted behaviour #6 permits shipping
-        # under the bar only when restoring what the gate destroyed would
-        # clear it; here it destroyed nothing in that segment, so the
-        # "only when" guard is exactly what was broken.
-        mine = [e for e in gate_entries
-                if _gate_entry_touches(e, seg.get("t0"), seg.get("t1"))]
+        # statements about it. And per WINDOW, not just per entry
+        # (r-loop 8): one FIX_GATE_WINDOW step carries ALL windows with
+        # ONE aggregate inventory, so with frozen windows in two
+        # different segments BOTH inherited the FULL inventory and a
+        # sibling's genuine deficit was downgraded by inventory destroyed
+        # elsewhere. Entries with per_window notes hand each segment only
+        # its overlapping windows' share; legacy entries keep the
+        # whole-entry behaviour.
+        mine = _entries_for_segment(gate_entries, seg.get("t0"),
+                                    seg.get("t1"), parent_dossier.name)
         if not mine:
             continue
         try:
@@ -564,17 +568,13 @@ def _propagate_gate_record(parent_dossier: Path, dossier_root: Path,
             pass
 
 
-def _gate_entry_touches(entry: dict, t0, t1) -> bool:
-    """Does a gate entry's blanked span overlap [t0, t1) on the parent
-    clock? Unknown or unreadable bounds propagate (today's behaviour) —
-    a record must never be dropped silently, only withheld from a segment
-    proved not to contain it."""
-    if t0 is None or t1 is None:
+def _spans_touch(spans, t0, t1) -> bool:
+    """Does ANY [a, b] span overlap [t0, t1)? Empty/unknown/unreadable
+    spans count as touching — a record must never be dropped silently,
+    only withheld from a segment proved not to contain it."""
+    if not spans:
         return True
-    windows = (entry.get("params") or {}).get("windows") or []
-    if not windows:
-        return True
-    for w in windows:
+    for w in spans:
         try:
             a, b = float(w[0]), float(w[1])
         except (TypeError, ValueError, IndexError, KeyError):
@@ -582,6 +582,71 @@ def _gate_entry_touches(entry: dict, t0, t1) -> bool:
         if a < float(t1) and b > float(t0):
             return True
     return False
+
+
+def _gate_entry_touches(entry: dict, t0, t1) -> bool:
+    """Does a gate entry's blanked span overlap [t0, t1) on the parent
+    clock? Tested against the note's ACTUALLY-blanked spans (pads
+    included, r-loop 8) when present, falling back to the requested
+    params. Unknown or unreadable bounds propagate."""
+    if t0 is None or t1 is None:
+        return True
+    note = entry.get("note") if isinstance(entry.get("note"), dict) else {}
+    windows = note.get("windows") or \
+        (entry.get("params") or {}).get("windows") or []
+    return _spans_touch(windows, t0, t1)
+
+
+def _entries_for_segment(gate_entries: list[dict], t0, t1,
+                         parent: str) -> list[dict]:
+    """The gate entries (or synthetic per-window shares) one segment
+    inherits (r-loop 8). An entry whose note carries `per_window` is
+    narrowed to the windows whose APPLIED spans (fallback: requested)
+    overlap [t0, t1): none -> the entry is withheld; some -> a SYNTHETIC
+    entry with only their union inventory. Anything unreadable, and every
+    legacy entry without per_window, propagates whole (never drop
+    silently)."""
+    out: list[dict] = []
+    for e in gate_entries:
+        note = e.get("note") if isinstance(e.get("note"), dict) else {}
+        pw = note.get("per_window")
+        if not (isinstance(pw, list) and pw) or t0 is None or t1 is None:
+            if _gate_entry_touches(e, t0, t1):
+                out.append(e)
+            continue
+        selected = []
+        unreadable = False
+        for w in pw:
+            if not isinstance(w, dict):
+                unreadable = True
+                break
+            spans = w.get("windows") or [w.get("requested")]
+            if _spans_touch(spans, t0, t1):
+                selected.append(w)
+        if unreadable:
+            out.append(e)               # never drop what we cannot read
+            continue
+        if not selected:
+            continue
+        acts = sorted({a for w in selected
+                       for a in ((w.get("destroyed") or {}).get("actions")
+                                 or []) if isinstance(a, str)})
+        keys = 0
+        for w in selected:
+            try:
+                keys += int((w.get("destroyed") or {}).get("key_frames")
+                            or 0)
+            except (TypeError, ValueError):
+                pass
+        out.append({"fix": "FIX_GATE_WINDOW", "ok": True,
+                    "params": {"windows": [w.get("requested")
+                                           for w in selected]},
+                    "note": {"windows": [s for w in selected
+                                         for s in (w.get("windows") or [])],
+                             "destroyed": {"actions": acts,
+                                           "key_frames": keys},
+                             "propagated_from": parent}})
+    return out
 
 
 def _propagate_shift_record(parent: Path, children: list[Path]) -> None:

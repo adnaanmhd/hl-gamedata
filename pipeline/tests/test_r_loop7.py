@@ -219,6 +219,22 @@ def test_has_raw_means_the_same_thing_everywhere(tmp_path):
 
 # ----------------------------- MAJOR: the gate record is per-SEGMENT
 
+def make_gate_csv(d, n=400, inputs=None):
+    """A synthetic v2 frames.csv at 1 row/second; `inputs` maps a second
+    to (key, action). Shared with test_r_loop8's C7 tests."""
+    import csv as _csv
+
+    from translator.v2 import V2_FRAME_COLS
+    cam = [""] * (len(V2_FRAME_COLS) - 7)
+    with (Path(d) / "frames.csv").open("w", newline="") as f:
+        w = _csv.writer(f)
+        w.writerow(V2_FRAME_COLS)
+        for i in range(n):
+            k, a = (inputs or {}).get(i, ("", ""))
+            w.writerow([str(i), str(i * 1000)] + cam
+                       + [k, a, "", "0.0", "0.0"])
+
+
 def test_gate_record_only_reaches_the_segment_that_holds_the_window(
         tmp_path):
     """cutter gives each child its own row slice, so blanked rows land in
@@ -226,19 +242,36 @@ def test_gate_record_only_reaches_the_segment_that_holds_the_window(
     validate._gate_destroyed downgrade that sibling's GENUINE
     CNT_ACTIONS_FEW / INP_KEYS_MISSING to an advisory, shipping a segment
     that violates two locked delivery bars under advisories that were
-    false statements about it."""
+    false statements about it.
+
+    REWRITTEN against the REAL writer (r-loop 8): the hand-built note
+    shape passed while production's one-entry-many-windows shape gave
+    both segments the FULL inventory — this run gates windows in TWO
+    segments and asserts each child inherits only its own share."""
+    from pipeline import gate
+    from pipeline.validate import _gate_destroyed
+    work = tmp_path / "S"
+    work.mkdir()
+    make_gate_csv(work, inputs={40: ("E", "interact"),
+                                41: ("E", "interact"),
+                                42: ("E", "interact"),
+                                300: ("Q", "general_cancel"),
+                                301: ("Q", "general_cancel"),
+                                302: ("Q", "general_cancel")})
+    note = gate.gate_windows(work, [(40.0, 42.0), (300.0, 302.0)])
+    applied = [{"fix": "FIX_GATE_WINDOW", "ok": True,
+                "params": {"windows": [[40.0, 42.0], [300.0, 302.0]]},
+                "note": note}]
     parent = tmp_path / "dossiers" / "P"
     parent.mkdir(parents=True)
-    applied = [{"fix": "FIX_GATE_WINDOW", "ok": True,
-                "params": {"windows": [[40.0, 42.0]]},
-                "note": {"actions": ["interact"], "key_frames": 65}}]
-    segments = [{"id": "P-p1", "t0": 0.0, "t1": 75.0},
-                {"id": "P-p2", "t0": 80.0, "t1": 160.0}]
+    segments = [{"id": "P-p1", "t0": 0.0, "t1": 100.0},
+                {"id": "P-p2", "t0": 200.0, "t1": 400.0}]
     fixmod._propagate_gate_record(parent, tmp_path / "dossiers",
                                   applied, segments)
-    assert (tmp_path / "dossiers" / "P-p1" / "fixlog.json").exists()
-    assert not (tmp_path / "dossiers" / "P-p2" / "fixlog.json").exists(), \
-        "a segment whose rows were never blanked must inherit nothing"
+    g1 = _gate_destroyed(tmp_path / "dossiers" / "P-p1")
+    g2 = _gate_destroyed(tmp_path / "dossiers" / "P-p2")
+    assert g1 == {"actions": ["interact"], "key_frames": 3}, g1
+    assert g2 == {"actions": ["general_cancel"], "key_frames": 3}, g2
 
 
 def test_gate_record_propagates_when_bounds_are_unknown(tmp_path):

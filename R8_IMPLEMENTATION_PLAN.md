@@ -27,7 +27,7 @@ the first unchecked item.
 - [x] C4 ops surfaces: stuck-list stint, digest retry stamp, AlertBook — fail-first 3/3; two existing stuck tests minimally re-seeded (stint events); Mac 561 green
 - [x] C5 BLOCKER daily send durable counted record — .daily-counted.json + resume path; fail-first 4/4; Mac 564 green
 - [x] C6 seal semantics (tree_sealed_at) + late-arrival deferral removal — fail-first 9/9; two payment tests deliberately rewritten (recorded in commit msg for Adnaan); Mac 571 green
-- [ ] C7 per-window gate record
+- [x] C7 per-window gate record — real-writer rewrite of the r7 test closes the hand-built-shape trap; fail-first 2/2 (+1 legacy control); Mac 573 green
 - [ ] C8 STR_SJ_INVALID rewrite validates
 - [ ] C9 suite knob-independence + SUITE_FLOOR + doc corrections
 - [ ] Full gate green on Mac AND VM at final r8-fix HEAD; tree-verify discipline done

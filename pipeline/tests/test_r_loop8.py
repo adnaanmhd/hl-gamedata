@@ -439,6 +439,70 @@ def test_daily_post_stamp_kill_resends_the_identical_csv(cfg, ledger,
     assert docs[-1] == first
 
 
+# --------------- C7: the gate record is per-WINDOW, not just per-entry
+
+def test_sibling_with_genuine_zero_keys_still_rejects(tmp_path):
+    """One FIX_GATE_WINDOW step carries ALL windows with ONE aggregate
+    inventory. A segment containing a window that destroyed NOTHING
+    (blanked rows were already empty) inherited the OTHER segment's
+    destroyed key frames, and validate downgraded its GENUINE
+    INP_KEYS_MISSING to an advisory — a mouse-only segment shipped under
+    a locked delivery bar on a false statement about it."""
+    from pipeline import gate
+    from pipeline import validate
+    from pipeline.tests.test_r_loop7 import make_gate_csv
+    work = tmp_path / "S"
+    work.mkdir()
+    # inputs only inside the FIRST window; the second window's rows are
+    # already empty, so its share of the destroyed inventory is zero
+    make_gate_csv(work, inputs={40: ("E", "interact"),
+                                41: ("E", "interact"),
+                                42: ("E", "interact")})
+    note = gate.gate_windows(work, [(40.0, 42.0), (300.0, 302.0)])
+    applied = [{"fix": "FIX_GATE_WINDOW", "ok": True,
+                "params": {"windows": [[40.0, 42.0], [300.0, 302.0]]},
+                "note": note}]
+    parent = tmp_path / "dossiers" / "P"
+    parent.mkdir(parents=True)
+    fixmod._propagate_gate_record(
+        parent, tmp_path / "dossiers", applied,
+        [{"id": "P-p1", "t0": 0.0, "t1": 100.0},
+         {"id": "P-p2", "t0": 200.0, "t1": 400.0}])
+    g2 = validate._gate_destroyed(tmp_path / "dossiers" / "P-p2")
+    assert g2["key_frames"] == 0, g2
+
+    rep = {"duration_s": 100.0, "qa_issues": [], "vlm": {},
+           "inventory": {"rows": 400, "distinct_actions": 3,
+                         "actions": {"a": 1, "b": 1, "c": 1},
+                         "key_frames": 0, "motion_frames": 50,
+                         "btn_frames": 5, "irregular_pct": 0.0}}
+    aux = {"has_raw": False, "vlm_required": False, "gate_destroyed": g2}
+    res = validate.map_reasons(rep, aux)
+    assert any(r["code"] == "INP_KEYS_MISSING" for r in res.reasons), \
+        "a genuine zero-keys segment must still reject — pre-fix the " \
+        "sibling's inherited key frames downgraded it to an advisory"
+
+
+def test_legacy_gate_entries_still_propagate_whole(tmp_path):
+    """Entries without per_window (older fixlogs) keep the r-loop-7
+    whole-entry behaviour — never dropped, never narrowed."""
+    parent = tmp_path / "dossiers" / "Q"
+    parent.mkdir(parents=True)
+    applied = [{"fix": "FIX_GATE_WINDOW", "ok": True,
+                "params": {"windows": [[40.0, 42.0]]},
+                "note": {"windows": [[38.0, 44.0]],
+                         "destroyed": {"actions": ["interact"],
+                                       "key_frames": 7}}}]
+    fixmod._propagate_gate_record(
+        parent, tmp_path / "dossiers", applied,
+        [{"id": "Q-p1", "t0": 0.0, "t1": 100.0},
+         {"id": "Q-p2", "t0": 200.0, "t1": 400.0}])
+    from pipeline.validate import _gate_destroyed
+    assert _gate_destroyed(tmp_path / "dossiers" / "Q-p1") == \
+        {"actions": ["interact"], "key_frames": 7}
+    assert not (tmp_path / "dossiers" / "Q-p2" / "fixlog.json").exists()
+
+
 # ------------- C6: seal semantics — tree_sealed_at, one meaning per mark
 
 def test_daily_send_self_mark_is_not_a_tree_seal(tmp_path):
