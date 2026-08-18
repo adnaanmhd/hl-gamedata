@@ -113,8 +113,37 @@ def frame_pts(path: Path) -> list[int]:
     return [int(round((t - t0) * 1_000_000.0)) for t in times]
 
 
+def first_pts_abs(path: Path) -> float:
+    """Absolute pts_time (seconds) of the first video packet.
+
+    `frame_pts` subtracts this; `keyframe_times` does NOT. Anything that
+    mixes the two clocks must rebase with this value, and anything handing
+    a time back to ffmpeg's `-ss`/`-to` must add it again — measured on a
+    real capture, `-ss` takes an ABSOLUTE container timestamp. Real
+    captures carry a start_time of ~0.035-0.048 s (1-1.5 frames at 30 fps),
+    which is small enough to hide under the 50 ms sync target forever.
+    Returns 0.0 when the pts cannot be read, which is the no-offset case.
+    """
+    out = subprocess.run(
+        ["ffprobe", "-v", "error", "-select_streams", "v:0",
+         "-show_entries", "packet=pts_time", "-of", "csv=p=0",
+         "-read_intervals", "%+#1", str(path)],
+        capture_output=True, text=True, timeout=120)
+    for line in out.stdout.splitlines():
+        line = line.strip().rstrip(",")
+        if line:
+            try:
+                return float(line)
+            except ValueError:
+                pass
+    return 0.0
+
+
 def keyframe_times(path: Path, within_s: float | None = None) -> list[float]:
-    """Return keyframe PTS (seconds). Lossless cuts may only land on these."""
+    """Return keyframe PTS (seconds), on the ABSOLUTE container clock —
+    unlike `frame_pts`, which is rebased to the first frame. Callers that
+    compare the two must rebase with `first_pts_abs` (see cutter.py and
+    trim.py). Lossless cuts may only land on these."""
     cmd = [
         "ffprobe", "-v", "error", "-select_streams", "v:0",
         "-skip_frame", "nokey", "-show_entries", "frame=pts_time",

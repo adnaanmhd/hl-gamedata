@@ -244,6 +244,29 @@ _COACHING = {
                      "only the first upload counts.",
 }
 
+# The F3 DEVIATION case rejects the player who uploaded FIRST: their copy
+# has the earlier createdTime, but the other copy was already in flight or
+# already shipped when it arrived, so "accept earliest" degrades to
+# "accept earliest, else flag" (PIPELINE_CONTINUOUS_DESIGN §6). Sending
+# them "only the first upload counts" states the opposite of what happened
+# and reads as an accusation of copying (r-loop 6).
+_COACHING_DUP_F3 = ("This video was also uploaded by another player. Yours "
+                    "has the EARLIER upload time, but the other copy had "
+                    "already been processed by the time yours was read, so "
+                    "that copy was kept. Nothing was done wrong here — but "
+                    "recordings must never be shared between players.")
+
+
+def _coaching_for(reason: dict) -> str | None:
+    """Per-INSTANCE coaching: one code can describe two opposite
+    situations, and the note must be true for the player receiving it."""
+    code = reason.get("code")
+    if code == "INT_DUP_CROSS":
+        params = reason.get("params")
+        if isinstance(params, dict) and params.get("f3_deviation"):
+            return _COACHING_DUP_F3
+    return _COACHING.get(code)
+
 
 def finalize_rejected(cfg: C.Config, ledger: Ledger,
                       session_id: str) -> None:
@@ -272,7 +295,7 @@ def finalize_rejected(cfg: C.Config, ledger: Ledger,
     lines = [f"# Rejection — {session_id}", ""]
     for r in reasons:
         lines.append(f"- **{r.get('code')}**: {r.get('evidence', '')}")
-        tip = _COACHING.get(r.get("code"))
+        tip = _coaching_for(r)
         if tip:
             lines.append(f"  - Coaching: {tip}")
     (dossier / "coaching.md").write_text("\n".join(lines) + "\n")

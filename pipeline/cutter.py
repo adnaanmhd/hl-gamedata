@@ -218,17 +218,8 @@ def _cut_loop(session_dir: Path, keep, out_root: Path, sid: str, s: dict,
 
 
 def _first_pts_abs(video: Path) -> float:
-    """Absolute pts_time of the first video packet (frame_pts subtracts it)."""
-    out = subprocess.run(
-        ["ffprobe", "-v", "error", "-select_streams", "v:0",
-         "-show_entries", "packet=pts_time", "-of", "csv=p=0",
-         "-read_intervals", "%+#1", str(video)],
-        capture_output=True, text=True, timeout=120)
-    for line in out.stdout.splitlines():
-        line = line.strip().rstrip(",")
-        if line:
-            try:
-                return float(line)
-            except ValueError:
-                pass
-    return 0.0
+    """Absolute pts_time of the first video packet (frame_pts subtracts it).
+
+    Now one implementation shared with translator/trim.py, which had the
+    identical need and was missing it entirely (r-loop 6)."""
+    return V.first_pts_abs(video)

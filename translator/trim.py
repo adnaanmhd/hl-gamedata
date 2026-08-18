@@ -26,6 +26,10 @@ MIN_CLIP_S = 70.0
 @dataclass
 class TrimResult:
     out_path: Path
+    # Both times are on the SOURCE-RELATIVE clock (first frame == 0), the
+    # same clock `V.frame_pts` and the raw event stream use. They are NOT
+    # container timestamps — ffmpeg gets `+ first_pts_abs` added back at
+    # the call site, exactly as cutter.py does.
     head_cut_s: float        # source time that becomes new frame 0
     end_cut_s: float         # source time of the (exclusive) end
     new_duration_s: float
@@ -55,7 +59,19 @@ def trim(src: Path, out_path: Path, *, info: V.VideoInfo | None = None,
          head_s: float = HEAD_S, tail_s: float = TAIL_S) -> TrimResult:
     """Stream-copy `src` minus a head/tail (default ~5 s each) into `out_path`."""
     info = info or V.probe(src)
-    kf = V.keyframe_times(src)
+    # keyframe_times is on the ABSOLUTE container clock; frame_pts, the raw
+    # event stream and `head_s` are all source-RELATIVE. Rebase before
+    # planning, exactly as cutter.py does — otherwise `head_cut_s` comes
+    # back as a container timestamp and rebase_events shifts every event by
+    # the container's start_time too much. Real captures carry ~0.035-0.048 s
+    # there, so every delivered frames.csv was misplaced by 1-1.5 frames:
+    # invisible to qa-v2 (build_session_json advances created_at_utc by the
+    # SAME wrong number, so the two agree with each other) and invisible to
+    # the sync checker (35 ms sits under the 50 ms target). Measured on a
+    # real capture: reported 8.368034 s, actual content offset 8.333333 s,
+    # delta +1.041 frames (r-loop 6).
+    first_abs = V.first_pts_abs(src)
+    kf = [k - first_abs for k in V.keyframe_times(src)]
     head_cut, end_cut = plan_cuts(kf, info.duration_s, head_s=head_s, tail_s=tail_s)
     warnings: list[str] = []
     new_dur = end_cut - head_cut
@@ -66,7 +82,11 @@ def trim(src: Path, out_path: Path, *, info: V.VideoInfo | None = None,
     out_path.parent.mkdir(parents=True, exist_ok=True)
     cmd = [
         "ffmpeg", "-y", "-v", "error",
-        "-ss", f"{head_cut:.6f}", "-to", f"{end_cut:.6f}",
+        # ffmpeg wants the ABSOLUTE container timestamp back (measured: an
+        # `-ss` of 8.368034 on a file whose first packet is at 0.034701
+        # lands on the frame at relative 8.333333)
+        "-ss", f"{head_cut + first_abs:.6f}",
+        "-to", f"{end_cut + first_abs:.6f}",
         "-i", str(src),
         "-map", "0",            # keep ALL streams (video/audio/data/metadata)
         "-c", "copy",           # no re-encode → lossless

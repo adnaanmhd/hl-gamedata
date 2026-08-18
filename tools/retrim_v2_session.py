@@ -38,6 +38,14 @@ def retrim(session_dir: Path, head_s: float, out_dir: Path, *,
     info = V.probe(src)
     kfs = V.keyframe_times(src)
     head_cut, _ = plan_cuts(kfs, info.duration_s, head_s=head_s, tail_s=0.0)
+    # NOTE (r-loop 6): keyframe_times is on the absolute container clock
+    # while head_s is relative, the same asymmetry that misplaced every
+    # row in translator/trim.py. It is HARMLESS here and deliberately left
+    # alone: `head_cut` only chooses the cut point (already snapped to a
+    # whole GOP, so a ~35 ms shift is immaterial) and is returned for the
+    # fixlog line only. Every alignment below is re-derived from what
+    # ffmpeg actually produced — the row slice from new_info.frame_count
+    # and created_at from src_pts[i0] — never from head_cut.
 
     with tempfile.NamedTemporaryFile(suffix=".mp4", delete=False,
                                      dir=out_dir) as tf:

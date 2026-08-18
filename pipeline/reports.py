@@ -628,8 +628,13 @@ def write_payment_sheet(cfg: C.Config, ledger: Ledger, day_ist: datetime,
     day = day_ist.strftime("%Y-%m-%d")
     out = cfg.reports_dir / day
     out.mkdir(parents=True, exist_ok=True)
+    # keep our own copy even when the caller wants one: the '## Reject
+    # detail' section below is built from EXACTLY what this sheet counted
+    accepted_here: list[str] = []
     rows = build_sheet_rows(ledger, day_ist, bounds, counted_out=counted_out,
-                            accepted_out=accepted_out)
+                            accepted_out=accepted_here)
+    if accepted_out is not None:
+        accepted_out.extend(accepted_here)
     csv_path = out / f"payment-{day}.csv"
     with csv_path.open("w", newline="") as f:
         w = csv.DictWriter(f, fieldnames=SHEET_COLS)
@@ -658,11 +663,25 @@ def write_payment_sheet(cfg: C.Config, ledger: Ledger, day_ist: datetime,
         md.append("| " + op + " | "
                   + " | ".join(f"{o[c]:.2f}" for c in num_cols) + " |")
 
-    lo, hi = bounds or _day_bounds_utc(day_ist)
-    rejects = ledger.db.execute(
-        f"SELECT session_id, reasons_json, dossier_path FROM sessions "
-        f"WHERE state='REJECTED' AND {REJECT_TS}>=? AND {REJECT_TS}<? "
-        f"ORDER BY session_id", (lo, hi)).fetchall()
+    # The detail section must describe the SAME population as the columns
+    # above it. It used to window on REJECTED-transition time while the
+    # columns window on upload COHORT, so the two disagreed in both
+    # directions: a reject whose root uploaded in an earlier window was
+    # named in a player's *_rejection_reasons cell with no evidence line
+    # under it, and a reject whose root uploaded later got an evidence
+    # line for a row that is not on this sheet (r-loop 6). Building it
+    # from the counted set makes the mismatch structurally impossible —
+    # and with the accepted-side mark, each reject is evidenced exactly
+    # once, on the sheet that named it. (recal_regen_sheets solved the
+    # same mismatch its own way for the two flip-time sheets; its
+    # rewrite_reject_section still overrides this one.)
+    rejects = []
+    if accepted_here:
+        q = ",".join("?" for _ in accepted_here)
+        rejects = ledger.db.execute(
+            f"SELECT session_id, reasons_json, dossier_path FROM sessions "
+            f"WHERE state='REJECTED' AND session_id IN ({q}) "
+            f"ORDER BY session_id", accepted_here).fetchall()
     md += ["", "## Reject detail", ""]
     if rejects:
         for r in rejects:

@@ -493,6 +493,12 @@ def scan(cfg: C.Config, ledger: Ledger,
                 clobberable = all(r["state"] in ("DISCOVERED", "INCOMPLETE")
                                   for r in dupes)
                 if is_earlier or shipped or not clobberable:
+                    # F3 DEVIATION = we kept a LATER copy, so the player we
+                    # are about to reject is the one who uploaded FIRST.
+                    # Recorded structurally (not sniffed out of the evidence
+                    # text) so the coaching note can stop telling them "only
+                    # the first upload counts" (r-loop 6)
+                    deviation = not is_earlier
                     if is_earlier:
                         why = f"kept earlier upload {earliest['session_id']}"
                     elif shipped:
@@ -532,7 +538,9 @@ def scan(cfg: C.Config, ledger: Ledger,
                     ledger.set_reasons(
                         ds.session_id,
                         [{"code": "INT_DUP_CROSS", "blocking": True,
-                          "fixable": False, "params": {},
+                          "fixable": False,
+                          "params": {"f3_deviation": True} if deviation
+                          else {},
                           "evidence": f"video md5 identical to "
                                       f"{earliest['session_id']}; {why}"}], 3)
                     res.dup_cross.append(ds.session_id)

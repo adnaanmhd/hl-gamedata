@@ -98,7 +98,6 @@ _QA_STR_MAP = [
     ("camera mapping", "STR_SJ_INVALID", True),
     ("non-camera mapping", "STR_SJ_INVALID", True),
     ("video duration", "STR_SJ_INVALID", True),
-    ("frame_id not zero-based", "STR_ROWS_MISMATCH", True),
     ("!= record_*_px", "STR_SJ_INVALID", True),
     # r-loop 3: the r-loop-1/2 "FAIL, never crash" hardening introduced FAIL
     # strings that matched NO needle here, so they fell through to
@@ -119,6 +118,17 @@ _QA_STR_MAP = [
     # spent reaching the same reject, with the operator-facing reason
     # degraded to the bare fix-failed marker (r-loop 4). Same trap the
     # ragged-row note above avoids.
+    # "frame_id not zero-based sequential" WAS mapped to STR_ROWS_MISMATCH
+    # and is now unmapped for exactly that reason (r-loop 6): the ids are
+    # parseable but wrong, so with no sidecars surgery is planned, and at
+    # the usual delta of 0 it truncates nothing, appends nothing, rewrites
+    # the identical rows and REPORTS SUCCESS — two attempts and three paid
+    # sweeps to reach the same reject under the bare fix-failed marker.
+    # Nothing is lost by unmapping: QA_FAIL_UNMAPPED still plans the
+    # retranslate whenever sidecars exist (which is the only repair that
+    # re-zeroes ids), still downgrades to advisory when a genuinely
+    # repairable FAIL rides along (r-loop 5), and otherwise rejects at once
+    # with a truthful reason instead of a burned budget.
     ("session.json numeric fields malformed", "STR_SJ_INVALID", True),
     ("session.json timestamps", "STR_SJ_INVALID", True),
     ("game_title not a string", "STR_SJ_INVALID", True),

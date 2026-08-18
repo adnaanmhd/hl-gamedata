@@ -1238,6 +1238,33 @@ def write_batch_report(analyses: list[SessionAnalysis], parent: Path) -> None:
 
 # ---------------------------------------------------------------- pipeline
 
+def frame_sync_line(r) -> str:
+    """The report's frame-sync verdict, from a qa-v2 result.
+
+    NOT a loose-needle search: the irregular-spacing WARN also mentions
+    "REAL frame PTS". And "OK" is asserted from the checker's POSITIVE
+    marker, never inferred from the absence of a complaint —
+    check_session_v2 has nine early returns, and the old two-needle guess
+    ("missing delivery file" / "header != v2 schema") recognised two of
+    them. The other seven — session.json unreadable or not an object,
+    frames.csv unreadable / empty / ragged, frame_id unparseable,
+    timestamp_ms unparseable, and a key_binding-only failure — every one
+    printed "OK (<=100ms vs real PTS)" for a check that never executed
+    (r-loop 6). All of those are blocking FAILs, so nothing shipped
+    unchecked; what shipped was a false OK in the report and the dossier.
+    """
+    drift = next((i for i in r.issues if "frame-sync drift" in i), None)
+    if drift:
+        return drift
+    unverif = next((i for i in r.issues
+                    if "cannot verify frame sync" in i), None)
+    if unverif:
+        return unverif
+    if "frame_sync" in getattr(r, "checked", ()):
+        return "OK (≤100ms vs real PTS)"
+    return "not checked (QA stopped before the frame-sync check)"
+
+
 def analyze(sdir: Path, raw_by_sid: dict, gem: Gemini | None,
             interval: float, refine_step: float) -> SessionAnalysis:
     out_dir = sdir.parent / f"{sdir.name}-analysis"
@@ -1305,17 +1332,7 @@ def analyze(sdir: Path, raw_by_sid: dict, gem: Gemini | None,
             a.lag["summary"] = i.split("controls-to-video sync", 1)[1]\
                 .lstrip(":— ").strip()
     a.lag["applied_shift_ms"] = _applied_shift_us(sdir) / 1000.0
-    # NOT a loose-needle search: the irregular-spacing WARN also mentions
-    # "REAL frame PTS", and a structural early-return means the frame-sync
-    # check never ran at all.
-    drift = next((i for i in r.issues if "frame-sync drift" in i), None)
-    unverif = next((i for i in r.issues
-                    if "cannot verify frame sync" in i), None)
-    structural = any("missing delivery file" in i or "header != v2 schema" in i
-                     for i in r.issues)
-    a.lag["frame_sync"] = (drift or unverif or
-                           ("not checked (structural QA failure)"
-                            if structural else "OK (≤100ms vs real PTS)"))
+    a.lag["frame_sync"] = frame_sync_line(r)
 
     # §2 inventory — guarded (r-loop 5). Unlike the session.json reads
     # above this one runs AFTER check_session_v2, so a.qa_issues already

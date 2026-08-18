@@ -449,6 +449,15 @@ class V2Result:
         self.session = session
         self.status = "PASS"
         self.issues: list[str] = []
+        # Checks that actually RAN. check_session_v2 has nine early
+        # returns, and a check that passes silently is indistinguishable
+        # from one that never executed — analyze_sample guessed with a
+        # two-needle list and reported "OK (<=100ms vs real PTS)" on seven
+        # of them (r-loop 6). A positive marker cannot fall behind the
+        # checker's FAIL strings the way a needle list does. Deliberately
+        # NOT in `issues`: the qa strings are pattern-matched by
+        # validate._map_qa_issues and must not grow a new needle.
+        self.checked: set[str] = set()
 
     def fail(self, m):
         self.status = "FAIL"
@@ -532,6 +541,18 @@ def _check_session_json(s: dict, r: V2Result) -> None:
     if conv["maps_to"] == "other" and not conv.get("maps_to_other"):
         r.fail("maps_to='other' requires maps_to_other")
     if conv["maps_to"] in _CAMERA_MAPS:
+        # `x not in {...}` HASHES x, so a list or dict in any of these four
+        # raised TypeError and the session was QUARANTINED as "validation
+        # crashed" — no reason recorded, media held, manual queue — instead
+        # of getting the actionable FAIL the fix registry can act on. These
+        # are the four fields r-loop 2's container-type guard skipped
+        # (r-loop 6). The non-camera branch below uses `!=`, which never
+        # raises, so it needs no guard.
+        nonstr = [k for k in need[1:] if not isinstance(conv[k], str)]
+        if nonstr:
+            r.fail(f"camera mapping: dx/dy fields must be strings, got "
+                   f"non-string {nonstr}")
+            return
         if conv["dx_positive"] not in {"right", "left"} or \
            conv["dx_negative"] not in {"right", "left"}:
             r.fail("camera mapping: dx_positive/dx_negative must be right|left")
@@ -748,6 +769,7 @@ def check_session_v2(session_dir: Path, raw_bundle: Path | None = None) -> V2Res
 
     # frame-sync: per-row timestamp vs real frame PTS
     pts = V.frame_pts(session_dir / "video.mp4")
+    r.checked.add("frame_sync")          # reached here == the check ran
     if pts and len(pts) == len(rows):
         worst = max(abs(ts[i] - pts[i] / 1000.0) for i in range(len(rows)))
         if worst > 100.0:
