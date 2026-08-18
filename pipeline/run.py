@@ -1118,6 +1118,34 @@ def send_daily_report_if_due(cfg: C.Config, ledger: Ledger,
                   file=sys.stderr)
         return _resume_daily_send(cfg, ledger, now_ist, d_dir.name,
                                   recp, sentp)
+    # A pending/wedged TODAY must never reach the fresh path (r-loop 11
+    # BLOCKER #1/#14/#16 — regression from the r-loop 10 wedge fix):
+    # every record the scan above did NOT resume is by definition wedged
+    # or settled, but this path guarded only on `.sent` — so a same-day
+    # wedge (the COMMON case: an interrupted 14:00 send wedges on the
+    # 14:10 retry) fell through, REGENERATED post-stamp, overwrote the
+    # payment CSV and the counted record (destroying the human's
+    # reconciliation evidence) and sent the smaller regenerated sheet as
+    # the payment document — the r-loop-8 BLOCKER doctrine violated.
+    today_dir = cfg.reports_dir / day
+    recp = today_dir / ".daily-counted.json"
+    if (today_dir / ".wedged").exists() or recp.is_file():
+        # A fully-settled today also lands here (the scan `continue`d on
+        # sent + doc_sent, or sent + unreadable record — "nothing safe to
+        # redo"): refuse SILENTLY exactly like the old marker check, so a
+        # normal settled day does not print a scare line every tick.
+        quiet = False
+        if not (today_dir / ".wedged").exists() and \
+                (today_dir / ".sent").exists():
+            try:
+                quiet = bool(json.loads(recp.read_text()).get("doc_sent"))
+            except (OSError, json.JSONDecodeError):
+                quiet = True
+        if not quiet:
+            print(f"[daily] today {day} is WEDGED/pending — refusing the "
+                  f"fresh path; reconcile by hand (rm "
+                  f"reports/{day}/.wedged after)", file=sys.stderr)
+        return False
     marker = cfg.reports_dir / day / ".sent"
     if marker.exists():
         return False
