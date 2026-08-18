@@ -503,6 +503,66 @@ def test_legacy_gate_entries_still_propagate_whole(tmp_path):
     assert not (tmp_path / "dossiers" / "Q-p2" / "fixlog.json").exists()
 
 
+# ---------------- C8: the STR_SJ_INVALID rewrite validates what it keeps
+
+def _sj_round_trip(tmp_path, field, bad):
+    """corrupt one field -> checker FAIL -> map -> plan -> apply -> checker.
+    Returns the AFTER result."""
+    from pipeline import validate
+    from pipeline.tests.test_fix_cut_gate import _make_session
+    from translator.v2 import check_session_v2
+    d = _make_session(tmp_path, seconds=80)
+    s = json.loads((d / "session.json").read_text())
+    s[field] = bad(s[field]) if callable(bad) else bad
+    (d / "session.json").write_text(json.dumps(s))
+    before = check_session_v2(d)
+    assert before.status == "FAIL", "the corruption must trip the checker"
+    reasons: list = []
+    validate._map_qa_issues(before.issues, reasons, has_raw=False)
+    assert any(r["code"] == "STR_SJ_INVALID" for r in reasons), reasons
+    plan = fixmod.plan_fixes(reasons, game="kamla", has_raw=False)
+    out = fixmod.apply_fixes(d, plan, game="kamla",
+                             dossier_dir=tmp_path / "dossier")
+    assert out["error"] is None, out
+    return check_session_v2(d)
+
+
+@needs_ffmpeg
+@pytest.mark.parametrize("field,bad", [
+    ("platform", "Windows"),
+    ("localization", "english"),
+    ("input_mouse_convention", {"maps_to": "camera_look_velocity"}),
+    ("input_mouse_convention",
+     {"maps_to": "camera_look_velocity", "dx_positive": "up",
+      "dx_negative": "down", "dy_positive": "left",
+      "dy_negative": "right"}),
+    ("input_mouse_convention",
+     {"maps_to": "look", "dx_positive": "right", "dx_negative": "left",
+      "dy_positive": "down", "dy_negative": "up"}),
+    ("created_at_utc", lambda orig: orig[:19].replace("T", " ") + "+00:00"),
+    ("created_at_utc", lambda orig: orig[:19] + "+0000"),
+], ids=["bad_platform", "bad_localization", "conv_partial",
+        "conv_bad_axes", "conv_bad_mapsto", "space_separated_ts",
+        "plus0000_ts"])
+def test_sj_invalid_rewrite_actually_repairs(tmp_path, field, bad):
+    """The rewrite defaulted only ABSENT/FALSY fields while the checker
+    rejects PRESENT-but-invalid values — each of these survived BOTH
+    attempts into a fix-failed reject with three paid sweeps. Unmapping
+    instead would reject sessions the rewrite CAN repair, so the rewrite
+    validates-and-overwrites."""
+    after = _sj_round_trip(tmp_path, field, bad)
+    assert after.status != "FAIL", after.issues
+
+
+@needs_ffmpeg
+def test_sj_naive_ts_control_still_repairs(tmp_path):
+    """Control: the naive-stamp repair predates r-loop 8 and must keep
+    working through the same chain."""
+    after = _sj_round_trip(tmp_path, "created_at_utc",
+                           lambda orig: orig[:19])
+    assert after.status != "FAIL", after.issues
+
+
 # ------------- C6: seal semantics — tree_sealed_at, one meaning per mark
 
 def test_daily_send_self_mark_is_not_a_tree_seal(tmp_path):

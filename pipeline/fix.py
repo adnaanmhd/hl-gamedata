@@ -1129,10 +1129,50 @@ def fix_sentinels(work: Path) -> str:
            f"({'float 0.0' if has_motion else 'blank — no mouse capture'})"
 
 
+def _conv_valid(conv) -> bool:
+    """Replicates check_session_v2's acceptance of input_mouse_convention
+    (translator/v2._check_session_json). The rewrite must overwrite
+    anything the checker would FAIL — it used to default only
+    ABSENT/FALSY fields, so a PRESENT-but-invalid convention survived
+    both attempts into a fix-failed reject (r-loop 8)."""
+    from translator.v2 import _CAMERA_MAPS, _MAPS_TO
+    if not isinstance(conv, dict):
+        return False
+    need = ("maps_to", "dx_positive", "dx_negative",
+            "dy_positive", "dy_negative")
+    if any(k not in conv for k in need):
+        return False
+    m = conv["maps_to"]
+    if not isinstance(m, str) or m not in _MAPS_TO:
+        return False
+    if m == "other" and not conv.get("maps_to_other"):
+        return False
+    if m in _CAMERA_MAPS:
+        if any(not isinstance(conv[k], str) for k in need[1:]):
+            return False
+        if conv["dx_positive"] not in {"right", "left"} or \
+                conv["dx_negative"] not in {"right", "left"}:
+            return False
+        if conv["dy_positive"] not in {"down", "up"} or \
+                conv["dy_negative"] not in {"down", "up"}:
+            return False
+        return True
+    return all(conv[k] == "not_applicable" for k in need[1:])
+
+
 def fix_sessionjson_recompute(work: Path, game: str) -> str:
     """Recompute session.json from video + CSV ground truth (the final
-    consistency pass of every fix chain)."""
-    from translator.v2 import GAME_TITLES, LOCALIZATIONS
+    consistency pass of every fix chain).
+
+    VALIDATES what it keeps (r-loop 8): the rewrite used to default only
+    ABSENT/FALSY fields while the checker rejects PRESENT-but-invalid
+    values — platform 'Windows', localization 'english', a partial or
+    wrong-axis input_mouse_convention, an aware-but-nonconforming
+    created_at_utc all survived both attempts into a fix-failed reject
+    with three paid sweeps. The checker's own enums/regexes are the
+    acceptance tests here, so the two can never drift apart silently."""
+    from translator.v2 import (GAME_TITLES, LOCALIZATIONS, _LOC_RE,
+                               _PLATFORMS, _TS_RE)
     info = V.probe(work / "video.mp4")
     # unreadable / non-object session.json starts from {} and is rebuilt
     # from ground truth — this IS the fix for a broken session.json, so it
@@ -1145,15 +1185,25 @@ def fix_sessionjson_recompute(work: Path, game: str) -> str:
             # a naive stamp is UTC by contract — repair it in place so
             # .astimezone below can't shift it by the host's offset
             created = created.replace(tzinfo=timezone.utc)
-            s["created_at_utc"] = created.strftime(
-                "%Y-%m-%dT%H:%M:%S.%f") + "Z"
     except (AttributeError, ValueError):
         created = datetime.now(timezone.utc)
-        s["created_at_utc"] = created.strftime(
+    # re-emit canonically whenever the ORIGINAL string is not
+    # checker-conformant: covers the naive case (already handled above)
+    # AND the aware-nonconforming ones — '+0000' offsets and space
+    # separators parse fine but fail _TS_RE, so they used to be kept
+    # verbatim and re-FAILed identically (r-loop 8)
+    if not isinstance(created_raw, str) or not _TS_RE.match(created_raw):
+        s["created_at_utc"] = created.astimezone(timezone.utc).strftime(
             "%Y-%m-%dT%H:%M:%S.%f") + "Z"
     ended = created + timedelta(seconds=info.duration_s)
     slug = game if game in C.GAMES else \
         (game_key_from_name(s.get("game_title", "")) or game)
+    plat = s.get("platform")
+    if not (isinstance(plat, str) and plat in _PLATFORMS):
+        plat = "PC"
+    loc = s.get("localization")
+    if not (isinstance(loc, str) and _LOC_RE.match(loc)):
+        loc = LOCALIZATIONS.get(slug, "en-US")
     s.update(
         vendor_name=C.VENDOR,
         game_title=GAME_TITLES.get(slug, s.get("game_title", slug)),
@@ -1163,14 +1213,12 @@ def fix_sessionjson_recompute(work: Path, game: str) -> str:
         duration_seconds=round(info.duration_s, 3),
         fps=info.fps, frame_count=info.frame_count,
         record_width_px=info.width, record_height_px=info.height,
-        platform=s.get("platform") or "PC",
-        localization=s.get("localization")
-        or LOCALIZATIONS.get(slug, "en-US"))
+        platform=plat,
+        localization=loc)
     s.setdefault("session_id", work.name)
     s.setdefault("screen_width_px", info.width)
     s.setdefault("screen_height_px", info.height)
-    conv = s.get("input_mouse_convention")
-    if not isinstance(conv, dict) or "maps_to" not in conv:
+    if not _conv_valid(s.get("input_mouse_convention")):
         s["input_mouse_convention"] = dict(MOUSE_CONVENTION)
     tmp = work / "session.json.tmp"
     tmp.write_text(json.dumps(s, indent=2))
