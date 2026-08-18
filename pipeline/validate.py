@@ -360,6 +360,19 @@ def _map_windows(rep: dict, aux: dict, reasons: list[dict],
             continue
         w0, w1 = refined if refined else (w["t0"], w["t1"])
         span = w1 - w0
+        # RULED (Adnaan 2026-08-18): when the scanner measured the frozen
+        # run, the TRIGGER moves onto it too -- count actions over exactly
+        # the span we are going to blank. That preserves review-r3 #3's
+        # invariant (gate everything the trigger measured) by moving the
+        # trigger rather than widening the gate; widening GATE_PAD_FRAMES
+        # to cover the drift was REJECTED because it blanks up to ~2s of
+        # genuine input per gate to protect a counter. With no refined
+        # span the VLM window IS the measurement, so both stay as they
+        # were.
+        raf = (aux.get("refined_action_frames") or {}).get(
+            (w["t0"], w["t1"]))
+        if refined is not None and raf is not None:
+            action_frames = raf
         # the frozen SPAN (refined) drives the keep-vs-cut decision, but a
         # cut must remove the whole flagged window (VLM bounds included) —
         # fade-in/out residue left at a segment head re-triggers detection
@@ -392,12 +405,20 @@ def _map_windows(rep: dict, aux: dict, reasons: list[dict],
                 # budget wrongly rejected the session (review-r3 #3).
                 # Same doctrine as the cut path: cover everything the
                 # trigger measured.
+                # Gate the span the trigger counted: the measured
+                # frozen run when we have one (+ GATE_PAD_FRAMES, applied
+                # by gate.gate_windows, correctly sized for the +-1-frame
+                # scanner jitter it was built for), else the full flagged
+                # window as before.
+                g0, g1 = ((w0, w1) if (refined is not None
+                                       and raf is not None)
+                          else (cut0, cut1))
                 reasons.append(_reason(
                     "INP_FROZEN_ACTIONS", True, True,
-                    {"t0": cut0, "t1": cut1},
+                    {"t0": g0, "t1": g1},
                     f"{desc}: {action_frames} action frames inside a kept "
                     f"<= {C.KEEP_GATE_MAX_S:.0f}s frozen window "
-                    f"(gating full window {cut0}-{cut1}s)"))
+                    f"(gating measured span {g0}-{g1}s)"))
             else:
                 advisories.append(
                     f"{desc}: {span:.1f}s frozen blip kept (no inputs "
@@ -1120,6 +1141,7 @@ def _build_aux(work_dir: Path, rep: dict, gem, *, gemini_key: str,
 
         # 1-frame-accurate bounds for the engine's gating windows
         refined: dict = {}
+        refined_af: dict = {}
         engine_windows = [w for w in vlm_rep.get("windows", [])
                           if w.get("gating")]
         for w in engine_windows:
@@ -1130,7 +1152,29 @@ def _build_aux(work_dir: Path, rep: dict, gem, *, gemini_key: str,
                                       baseline=baseline)
             if r:
                 refined[(w["t0"], w["t1"])] = r
+                # Count action frames over the MEASURED frozen run, not
+                # the VLM window (RULED, Adnaan 2026-08-18; r-loop-3 #6).
+                # analyze_sample._windows sets window bounds as MIDPOINTS
+                # between VLM sample times, so both the trigger and the
+                # gate span were derived from VLM label boundaries -- which
+                # are not stable across passes. One boundary sample
+                # flipping label moves a bound 15-30 frames; the recheck
+                # recounts, re-raises INP_FROZEN_ACTIONS, spends attempt 2
+                # re-gating and rejects on pass 3. "Frozen" is a
+                # MEASUREMENT: an action on a MOVING frame outside the
+                # VLM's fuzzy edge is real gameplay, so counting it is a
+                # false positive and blanking it destroys real data. The
+                # VLM stays the CLASSIFIER (is this stretch menu/loading/
+                # pause rather than a legitimately still moment of play?)
+                # and stops being a boundary-finder. Same inclusive-end
+                # count the scanner path uses for extra_windows below.
+                lo = tl.frame_at(r[0])
+                hi = tl.frame_at(r[1])
+                refined_af[(w["t0"], w["t1"])] = sum(
+                    1 for i in range(lo, min(hi + 1, len(has_action)))
+                    if has_action[i])
         aux["refined"] = refined
+        aux["refined_action_frames"] = refined_af
 
         # only HIGH-tier windows already gate; a low-tier (single-sample)
         # engine window must NOT shadow the scanner's independent static

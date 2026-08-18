@@ -250,3 +250,55 @@ def test_unmapped_fail_with_sidecars_stays_fixable():
     """R3: retranslate is the universal strong fix when raw exists."""
     got = _codes(["FAIL: frame_id column unparseable (row 1801)"], True)
     assert got["QA_FAIL_UNMAPPED"] == (True, True)
+
+
+# ------------- RULED (Adnaan 2026-08-18): the trigger rides the MEASURED span
+
+def _frozen_window(t0, t1, vlm_action_frames):
+    return {"t0": t0, "t1": t1, "labels": ["pause"], "tier": "high",
+            "gating": True, "n_samples": 3,
+            "inputs": {"action_frames": vlm_action_frames},
+            "stillness_ratio": 0.05}
+
+
+def _map_one(w, refined_span, refined_af, dur=300.0):
+    rep = {"duration_s": dur, "vlm": {"windows": [w]}}
+    aux = {"refined": {(w["t0"], w["t1"]): refined_span},
+           "refined_action_frames": {(w["t0"], w["t1"]): refined_af},
+           "extra_windows": [], "afk_windows": []}
+    reasons, advisories = [], []
+    validate._map_windows(rep, aux, reasons, advisories)
+    return reasons, advisories
+
+
+def test_same_frozen_run_gates_identically_across_vlm_boundary_drift():
+    """RULED (Adnaan 2026-08-18, r-loop-3 #6). analyze_sample._windows sets
+    window bounds as MIDPOINTS between VLM sample times, so both the
+    trigger and the gate span were derived from VLM label boundaries —
+    which are not stable across passes. One boundary sample flipping label
+    moves a bound 15-30 frames; the recheck recounts, re-raises
+    INP_FROZEN_ACTIONS, spends attempt 2 re-gating and rejects on pass 3.
+    The measured frozen run is identical in both passes, so the verdict
+    and the gate params must be identical too."""
+    span = (60.0, 63.0)          # what the scanner actually measured
+    a, _ = _map_one(_frozen_window(59.5, 63.5, 9), span, 4)
+    b, _ = _map_one(_frozen_window(59.0, 64.0, 14), span, 4)
+
+    assert [r["code"] for r in a] == ["INP_FROZEN_ACTIONS"]
+    assert [r["code"] for r in b] == ["INP_FROZEN_ACTIONS"]
+    assert a[0]["params"] == b[0]["params"] == {"t0": 60.0, "t1": 63.0}, \
+        "gate params must follow the measurement, not the VLM boundary"
+
+
+def test_action_on_a_moving_frame_outside_the_run_is_not_counted():
+    """'Frozen' is a MEASUREMENT. An action on a MOVING frame outside the
+    VLM's fuzzy edge is real gameplay: counting it is a false positive and
+    blanking it destroys real data. The VLM stays the classifier, not the
+    boundary-finder."""
+    # the VLM window claims 5 action frames; none of them are inside the
+    # measured frozen run
+    reasons, advisories = _map_one(_frozen_window(59.0, 64.0, 5),
+                                   (60.0, 63.0), 0)
+    assert [r["code"] for r in reasons] == [], \
+        "an action outside the measured freeze must not raise a reason"
+    assert any("no inputs inside" in a for a in advisories)
