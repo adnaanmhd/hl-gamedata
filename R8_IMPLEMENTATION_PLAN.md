@@ -26,7 +26,7 @@ the first unchecked item.
 - [x] C3 BLOCKER host carve-out, both drivers — partial-applied → REVALIDATING; fail-first 3/4 (nothing-applied case is the r7-preserving control); Mac 558 green
 - [x] C4 ops surfaces: stuck-list stint, digest retry stamp, AlertBook — fail-first 3/3; two existing stuck tests minimally re-seeded (stint events); Mac 561 green
 - [x] C5 BLOCKER daily send durable counted record — .daily-counted.json + resume path; fail-first 4/4; Mac 564 green
-- [ ] C6 seal semantics (tree_sealed_at) + late-arrival deferral removal
+- [x] C6 seal semantics (tree_sealed_at) + late-arrival deferral removal — fail-first 9/9; two payment tests deliberately rewritten (recorded in commit msg for Adnaan); Mac 571 green
 - [ ] C7 per-window gate record
 - [ ] C8 STR_SJ_INVALID rewrite validates
 - [ ] C9 suite knob-independence + SUITE_FLOOR + doc corrections

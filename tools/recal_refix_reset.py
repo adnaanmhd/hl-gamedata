@@ -170,6 +170,33 @@ def _locked_main(cfg, args) -> int:
                     print(f"WARN: {sid} state={row['state']} but no "
                           f"UPLOADED event — verify manually")
         plan.append((root, kids, moves))
+    # MIXED trees are REFUSED, before any Drive move (r-loop 8): a tree
+    # holding BOTH paid (accepted-counted) and unpaid DELIVERED nodes has
+    # no automatable answer — sealing swallows the unpaid delivered hours,
+    # not sealing double-pays the counted ones, and the teardown DELETEs
+    # the child rows so no per-node fidelity survives to reconcile with
+    # later. A human reconciles; every other root proceeds.
+    skipped_mixed: list[dict] = []
+    kept_plan = []
+    for root, kids, moves in plan:
+        delivered = [(s, n) for s in [root] + kids
+                     if (n := ledger.get(s)) is not None
+                     and n["state"] == "DELIVERED"]
+        paid = [s for s, n in delivered if n["accepted_reported_at"]]
+        unpaid = [(s, (n["duration_delivered_s"] or 0.0) / 3600.0)
+                  for s, n in delivered if not n["accepted_reported_at"]]
+        if paid and unpaid:
+            skipped_mixed.append({
+                "root": root, "paid_nodes": paid,
+                "unpaid_delivered_nodes": [
+                    {"sid": s, "hours": round(h, 2)} for s, h in unpaid]})
+            print(f"REFUSED (mixed tree): {root} holds paid node(s) "
+                  f"{paid} AND unpaid delivered node(s) "
+                  f"{[s for s, _ in unpaid]} — reconcile by hand; "
+                  f"other roots proceed")
+            continue
+        kept_plan.append((root, kids, moves, paid))
+    plan = kept_plan
     # Already-REPORTED roots need a human, not an automatic re-run. Their
     # hours are on a sheet that has been sent (and may have been paid); the
     # re-run re-delivers the same footage, and since the stamp is now
@@ -196,6 +223,7 @@ def _locked_main(cfg, args) -> int:
         "fix_failed_hours": round(hours, 2),
         "roots": [p[0] for p in plan],
         "already_reported_roots": stamped,
+        "skipped_mixed": skipped_mixed,
         "subtree_rows": sum(len(p[1]) for p in plan),
         "drive_moves": [m for p in plan for m in
                         [f"{s} -> {d}" for s, d in p[2]]],
@@ -209,7 +237,7 @@ def _locked_main(cfg, args) -> int:
 
     # 1) Drive II moves FIRST — abort before DB on any hard failure
     moved = []
-    for root, kids, moves in plan:
+    for root, kids, moves, _paid in plan:
         for sid, rd in moves:
             if not rd.startswith("humynlabs/"):
                 print(f"skip move {sid}: path {rd!r} not under humynlabs/ "
@@ -231,7 +259,7 @@ def _locked_main(cfg, args) -> int:
     reset = 0
     deleted = 0
     sealed_roots: list = []
-    for root, kids, _moves in plan:
+    for root, kids, _moves, paid_nodes in plan:
         row = ledger.get(root)
         for sid in [root] + kids:
             dossier = cfg.dossiers / sid
@@ -264,30 +292,25 @@ def _locked_main(cfg, args) -> int:
         # superseded-refix-*/ so the first copy is gone from Drive II.
         # (ledger.supersede clears it correctly, because there the md5 is
         # new and the hours genuinely are new.)
-        # accepted_reported_at: SEAL the tree only when accepted hours
-        # were actually COUNTED for it (RULED split, Adnaan 2026-08-18;
-        # corrected r-loop 7). The seal exists for one job — this subtree
-        # is torn down and re-delivered, so hours already ON A SENT SHEET
-        # must not be counted a second time. Keying it on the UPLOADED
-        # stamp was wrong: this tool selects fix-failed REJECTED trees,
-        # which contributed accepted_hrs 0.00 to the sheet that stamped
-        # them, so the seal protected nothing and permanently blocked the
-        # re-run's genuinely new delivered hours from every future sheet —
-        # exactly the loss the split was written to close, on the one path
-        # that recovers the 08-16 recalibration's false-positive rejects.
-        # A REJECTED node carrying an accepted mark had its LABELS counted,
-        # not its hours, so it does not seal either.
-        paid_nodes = [s for s in [root] + kids
-                      if (n := ledger.get(s)) is not None
-                      and n["state"] == "DELIVERED"
-                      and n["accepted_reported_at"]]
+        # SEAL via tree_sealed_at, its OWN column (r-loop 8; RULED split
+        # Adnaan 2026-08-18, corrected r-loop 7). The seal exists for one
+        # job — this subtree is torn down and re-delivered, so hours
+        # already ON A SENT SHEET must not be counted a second time. It
+        # fires only for a FULLY-PAID tree (paid DELIVERED nodes, no
+        # unpaid ones — the mixed case was refused at plan time above); a
+        # never-paid tree re-opens completely. The root's own
+        # accepted_reported_at is cleared in BOTH cases: it now means only
+        # "this root node's own count", and the re-run's root may itself
+        # deliver genuinely new hours. A REJECTED node carrying an
+        # accepted mark had its LABELS counted, not hours — it neither
+        # seals nor blocks.
         if paid_nodes:
             sealed_roots.append({"root": root, "paid_nodes": paid_nodes})
         ledger.db.execute(
             "UPDATE sessions SET state='DISCOVERED', bin=NULL,"
             " reasons_json='[]', fix_attempts=0, duration_delivered_s=NULL,"
-            " rrd_sampled=0, delivered_at=NULL, accepted_reported_at=?,"
-            " updated_at=? WHERE session_id=?",
+            " rrd_sampled=0, delivered_at=NULL, accepted_reported_at=NULL,"
+            " tree_sealed_at=?, updated_at=? WHERE session_id=?",
             (now if paid_nodes else None, now, root))
         ledger.db.execute(
             "INSERT INTO events(session_id, ts, from_state, to_state,"
@@ -308,6 +331,7 @@ def _locked_main(cfg, args) -> int:
                       # NOT counted again, so sheet and Drive II disagree
                       # until a human reconciles them
                       "sealed_roots": sealed_roots,
+                      "skipped_mixed": skipped_mixed,
                       "drive_dirs_moved": moved,
                       "superseded_refix_prefix":
                           f"superseded-refix-{stamp}/",

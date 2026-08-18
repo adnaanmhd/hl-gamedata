@@ -278,7 +278,8 @@ def scan(cfg: C.Config, ledger: Ledger,
                                   duration_delivered_s=None,
                                   rrd_sampled=0, delivered_at=None,
                                   uploaded_reported_at=None,
-                                  accepted_reported_at=None)
+                                  accepted_reported_at=None,
+                                  tree_sealed_at=None)
                     # the INT_PATH reasons died with the bad path — left
                     # in place, a LATER re-quarantine (download/validation
                     # crash) put this session on the folder-issues bad_path

@@ -88,6 +88,15 @@ class Ledger:
         if "accepted_reported_at" not in cols:
             self.db.execute("ALTER TABLE sessions "
                             "ADD COLUMN accepted_reported_at TEXT NULL")
+        # tree_sealed_at is the whole-tree SEAL (r-loop 8), written ONLY by
+        # recal_refix_reset when it tears down a tree whose accepted hours
+        # are already on a SENT sheet. The root's accepted_reported_at used
+        # to carry this second meaning too, so an ordinary daily send
+        # stamping a DELIVERED/REJECTED root's own count locked its live
+        # children's future hours out of every sheet forever.
+        if "tree_sealed_at" not in cols:
+            self.db.execute("ALTER TABLE sessions "
+                            "ADD COLUMN tree_sealed_at TEXT NULL")
         self.db.commit()
 
     def close(self) -> None:
@@ -153,7 +162,7 @@ class Ledger:
                    "delivered_at", "dossier_path", "md5_video", "bytes",
                    "game", "drive_path", "drive_ctime", "parent_id",
                    "operator_email", "player_email", "uploaded_reported_at",
-                   "accepted_reported_at"}
+                   "accepted_reported_at", "tree_sealed_at"}
         bad = set(fields) - allowed
         assert not bad, f"unknown ledger fields: {bad}"
         sets = ", ".join(f"{k}=?" for k in fields)
@@ -215,7 +224,7 @@ class Ledger:
             " fix_attempts=0, bin=NULL, reasons_json='[]',"
             " duration_delivered_s=NULL, duration_raw_s=NULL, rrd_sampled=0,"
             " delivered_at=NULL, uploaded_reported_at=NULL,"
-            " accepted_reported_at=NULL, updated_at=?"
+            " accepted_reported_at=NULL, tree_sealed_at=NULL, updated_at=?"
             " WHERE session_id=?",
             (new_md5, new_bytes, new_ctime, now, session_id))
         # uploaded_reported_at cleared above: the stamp belonged to the
@@ -224,7 +233,9 @@ class Ledger:
         # sheet (review-r5 #7). accepted_reported_at goes with it for the
         # same reason: the new bytes' delivered hours are genuinely new,
         # and an inherited accepted mark would seal them out of every
-        # future sheet (the §4 bug in its other form)
+        # future sheet (the §4 bug in its other form). tree_sealed_at
+        # likewise (r-loop 8): new bytes = new hours; a stale whole-tree
+        # seal would lock the re-upload's tree out of every sheet.
         self.db.execute(
             "INSERT INTO events(session_id, ts, from_state, to_state, detail)"
             " VALUES(?,?,?,?,?)",

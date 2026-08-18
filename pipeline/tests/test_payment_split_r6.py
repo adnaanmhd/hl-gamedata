@@ -389,15 +389,22 @@ def test_refix_seal_only_fires_where_hours_were_actually_counted(
 
     led = Ledger(cfg.ledger_path)
     try:
-        got = {r["session_id"]: r["accepted_reported_at"] for r in
-               led.db.execute("SELECT session_id, accepted_reported_at "
-                              "FROM sessions")}
-        assert got[a] is None, \
+        got = {r["session_id"]: r for r in
+               led.db.execute("SELECT session_id, accepted_reported_at, "
+                              "tree_sealed_at FROM sessions")}
+        # r-loop 8: the seal lives in its OWN column; the root's
+        # accepted_reported_at goes back to meaning only "this root
+        # node's own count" and is cleared on every reset
+        assert got[a]["tree_sealed_at"] is None, \
             "a tree that was never paid an accepted hour must re-open"
-        assert got[b], \
+        assert got[a]["accepted_reported_at"] is None
+        assert got[b]["tree_sealed_at"], \
             "a tree with counted DELIVERED hours must stay sealed"
-        assert got[c] is None, \
+        assert got[b]["accepted_reported_at"] is None, \
+            "the seal must live in tree_sealed_at, not the node mark"
+        assert got[c]["tree_sealed_at"] is None, \
             "an uncounted DELIVERED child is not a reason to seal"
+        assert got[c]["accepted_reported_at"] is None
     finally:
         led.close()
 

@@ -464,11 +464,15 @@ def _sheet_and_mark(led, bounds):
 
 
 def test_late_arrival_incomplete_folder_counted_once(tmp_path, capsys):
-    """d3/r4 route 2 (LIVE): a folder stamped with its earliest file's
-    ctime completes AFTER that window was reported. r5 #29 refinement:
-    while its tree is IN FLIGHT the late root is DEFERRED (loudly) —
-    counting it instantly froze accepted_hrs at 0 under the stamp; once
-    settled it appears on exactly ONE sheet with full hours."""
+    """d3/r4 route 2 (LIVE), POST-SPLIT shape (r-loop 8): a folder stamped
+    with its earliest file's ctime completes AFTER that window was
+    reported. The late root is now counted the moment it is countable —
+    uploaded hours immediately (with a loud in-flight note while the tree
+    is unsettled), accepted hours via the per-node marks on later sheets.
+    The r5 #29 settle-check deferral predates the mark split and had
+    become pure loss (a HOLD_VLM node could block the tree from EVERY
+    sheet, since HOLD re-enters itself forever). Conservation unchanged:
+    uploaded 1.0 once, accepted 0.94 once."""
     from pipeline.ledger import Ledger
     led = Ledger(tmp_path / "l.db")
     sid = "2026-08-15T06-00-00Z_kamla_c_0000000000000fb0"
@@ -480,16 +484,17 @@ def test_late_arrival_incomplete_folder_counted_once(tmp_path, capsys):
     # folder completes: session created late, ctime STILL inside window 1,
     # still mid-pipeline (DISCOVERED) at window 2's generation
     _mk_root(led, sid, "2026-08-15T06:00:00.000Z", raw=3600.0)
-    assert _sheet_and_mark(led, w2) == []          # deferred, not dropped
-    assert "LATE ARRIVAL DEFERRED" in capsys.readouterr().err
-    # tree settles before window 3: counted ONCE with full hours
+    s2 = _sheet_and_mark(led, w2)
+    assert len(s2) == 1 and s2[0]["kamla_hrs_uploaded"] == 1.0
+    assert s2[0]["kamla_accepted_hrs"] == 0.0      # not settled yet
+    assert "tree still in flight" in capsys.readouterr().err
+    # tree settles before window 3: accepted hours follow, once
     led.update(sid, duration_delivered_s=3400.0,
                delivered_at="2026-08-16T08:00:00+00:00")
     led.set_state(sid, "DELIVERED")
     s3 = _sheet_and_mark(led, w3)
-    assert len(s3) == 1 and s3[0]["kamla_hrs_uploaded"] == 1.0
-    assert s3[0]["kamla_accepted_hrs"] == 0.94     # NOT frozen at 0
-    assert "LATE ARRIVAL" in capsys.readouterr().err
+    assert len(s3) == 1 and s3[0]["kamla_hrs_uploaded"] == 0.0
+    assert s3[0]["kamla_accepted_hrs"] == 0.94     # not frozen at 0
     # window 4: never again
     s4 = _sheet_and_mark(
         led, ("2026-08-17T06:45:22+00:00", "2026-08-18T06:45:22+00:00"))

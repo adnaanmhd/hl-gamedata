@@ -92,7 +92,7 @@ def main() -> int:
             "UPDATE sessions SET state='DISCOVERED', bin=NULL,"
             " reasons_json='[]', fix_attempts=0, duration_delivered_s=NULL,"
             " rrd_sampled=0, delivered_at=NULL, uploaded_reported_at=NULL,"
-            " accepted_reported_at=NULL,"
+            " accepted_reported_at=NULL, tree_sealed_at=NULL,"
             " updated_at=? WHERE session_id=?", (now, sid))
         cur.execute(
             "INSERT INTO events(session_id, ts, from_state, to_state,"

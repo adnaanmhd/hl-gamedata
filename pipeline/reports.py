@@ -445,7 +445,7 @@ def build_sheet_rows(ledger: Ledger, day_ist: datetime,
         "SELECT session_id, game, operator_email, player_email, parent_id,"
         " state, drive_ctime, created_at, duration_raw_s,"
         " duration_delivered_s, reasons_json, uploaded_reported_at,"
-        " accepted_reported_at"
+        " accepted_reported_at, tree_sealed_at"
         " FROM sessions WHERE player_email != ''").fetchall()
     children: dict[str, list] = {}
     for r in rows:
@@ -500,21 +500,31 @@ def build_sheet_rows(ledger: Ledger, day_ist: datetime,
         # (measured: 135 of 309 countable roots, 16.84 h, on the 08-18
         # rebuild dump). It now comes back carrying accepted hours only,
         # with uploaded 0. `up < hi_dt` keeps a root whose cohort window
-        # has not opened yet out of this sheet; the root-level accepted
-        # mark is a whole-tree SEAL, applied only by recal_refix_reset
-        # when it tears down an already-reported tree.
-        sealed = bool(root["accepted_reported_at"])
+        # has not opened yet out of this sheet. The whole-tree SEAL lives
+        # in its OWN column, tree_sealed_at, written only by
+        # recal_refix_reset when it tears down an already-paid tree
+        # (r-loop 8): the root's accepted_reported_at means only "this
+        # root NODE's own count" — reading it as a seal let an ordinary
+        # daily send that counted a DELIVERED/REJECTED root's own
+        # hours/labels lock its live children's future hours out forever.
+        sealed = bool(root["tree_sealed_at"])
         accepted_due = (up < hi_dt and not sealed
                         and bool(root["uploaded_reported_at"])
                         and _tree_has_uncounted_accepted(root, children))
         if not in_window and not late and not accepted_due:
             continue
         if late:
-            # settling (review-r5 #29): the in-window path gets
-            # REPORT_OFFSET_H before its sheet; a late root counted the
-            # moment it was probed would freeze accepted_hrs at 0 and the
-            # stamp would lock that in forever. Defer until the tree is
-            # settled — the next sheet retries, loudly.
+            # POST-SPLIT shape (r-loop 8; kickoff §4d): a late root is
+            # counted IMMEDIATELY, exactly like an in-window one —
+            # uploaded hours now, accepted hours whenever each node
+            # settles, via the per-node accepted marks (accepted_due on
+            # later sheets). The old settle-check deferral (review-r5 #29)
+            # predates the mark split — back then the stamp froze
+            # accepted_hrs at whatever the sheet saw. Post-split it was
+            # pure loss: an unsettled late tree reached NO sheet at all
+            # while a HOLD_VLM node blocked it (HOLD re-enters itself
+            # every 30 min, so "settled" could be never), though the
+            # identical in-window tree was paid incrementally.
             stack_s = [root]
             unsettled = False
             while stack_s:
@@ -525,15 +535,15 @@ def build_sheet_rows(ledger: Ledger, day_ist: datetime,
                     unsettled = True
                     break
             if unsettled:
-                print(f"[sheet] LATE ARRIVAL DEFERRED: "
-                      f"{root['session_id']} is countable but its tree is "
-                      f"still in flight — retried on the next sheet",
+                print(f"[sheet] LATE ARRIVAL (tree still in flight — "
+                      f"uploaded counted now; accepted hours follow on "
+                      f"later sheets): {root['session_id']}",
                       file=sys.stderr)
-                continue
-            print(f"[sheet] LATE ARRIVAL: {root['session_id']} uploaded "
-                  f"{root['drive_ctime'] or root['created_at']} — its "
-                  f"window was already reported; counted in the current "
-                  f"sheet (conservation)", file=sys.stderr)
+            else:
+                print(f"[sheet] LATE ARRIVAL: {root['session_id']} uploaded "
+                      f"{root['drive_ctime'] or root['created_at']} — its "
+                      f"window was already reported; counted in the "
+                      f"current sheet (conservation)", file=sys.stderr)
         if (in_window or late) and counted_out is not None and \
                 (r_countable(root) or root["state"] == "REJECTED"):
             # exactly what mark_uploads_reported must stamp: counted

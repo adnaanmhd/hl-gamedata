@@ -439,6 +439,216 @@ def test_daily_post_stamp_kill_resends_the_identical_csv(cfg, ledger,
     assert docs[-1] == first
 
 
+# ------------- C6: seal semantics — tree_sealed_at, one meaning per mark
+
+def test_daily_send_self_mark_is_not_a_tree_seal(tmp_path):
+    """A REJECTED root whose labels a sheet counted gets its own
+    accepted_reported_at — which the old code read as a WHOLE-TREE seal,
+    locking its live child's future hours out of every sheet forever."""
+    from pipeline.ledger import Ledger
+    from pipeline.tests.test_payment_split_r6 import (
+        UNFIXABLE, W1, W2, W3, _put, _row, _sheet)
+    led = Ledger(tmp_path / "l.db")
+    root = "2026-08-14T09-00-00Z_kamla_c_0000000000000sa1"
+    _put(led, root, state="REJECTED", raw=3600.0, reasons=UNFIXABLE,
+         player="seal@x.com")
+    _put(led, f"{root}-p1", state="VALIDATING", parent=root, raw=1800.0,
+         player="seal@x.com")
+    s1 = _row(_sheet(led, W1), "seal@x.com")
+    assert s1["kamla_rejection_reasons"] == "black-frozen"
+    assert led.get(root)["accepted_reported_at"], "labels were counted"
+
+    led.update(f"{root}-p1", duration_delivered_s=1700.0,
+               delivered_at="2026-08-15T10:00:00+00:00")
+    led.set_state(f"{root}-p1", "DELIVERED")
+    s2 = _row(_sheet(led, W2), "seal@x.com")
+    assert s2 is not None, \
+        "pre-fix: the root's own mark sealed the child's hours out forever"
+    assert s2["kamla_accepted_hrs"] == round(1700 / 3600.0, 2)
+    assert _row(_sheet(led, W3), "seal@x.com") is None      # once
+    led.close()
+
+
+def test_late_root_with_hold_vlm_node_is_not_deferred(tmp_path, capsys):
+    """Post-split the late-arrival settle-deferral was pure loss: HOLD_VLM
+    re-enters itself every 30 min, so 'settled' could be never and the
+    whole tree reached NO sheet at all. Counted immediately now, loudly;
+    each node's hours land via its own mark."""
+    from pipeline.ledger import Ledger
+    from pipeline.tests.test_payment_split_r6 import (W2, W3, _put, _row,
+                                                      _sheet)
+    led = Ledger(tmp_path / "l.db")
+    root = "2026-08-14T09-00-00Z_kamla_c_0000000000000sb1"
+    _put(led, root, state="SPLIT", raw=3600.0, player="hold@x.com")
+    _put(led, f"{root}-p1", state="HOLD_VLM", parent=root, raw=1800.0,
+         player="hold@x.com")
+    _put(led, f"{root}-p2", state="DELIVERED", parent=root, raw=1800.0,
+         delivered=1700.0, player="hold@x.com")
+    # W1 never generated: the root arrives LATE at W2's generation
+    s2 = _row(_sheet(led, W2), "hold@x.com")
+    assert s2 is not None, "pre-fix: deferred to no sheet at all"
+    assert s2["kamla_hrs_uploaded"] == 1.0
+    assert s2["kamla_accepted_hrs"] == round(1700 / 3600.0, 2)
+    assert "tree still in flight" in capsys.readouterr().err
+
+    led.update(f"{root}-p1", duration_delivered_s=1600.0,
+               delivered_at="2026-08-16T10:00:00+00:00")
+    led.set_state(f"{root}-p1", "DELIVERED")
+    s3 = _row(_sheet(led, W3), "hold@x.com")
+    assert s3 is not None and s3["kamla_accepted_hrs"] == \
+        round(1600 / 3600.0, 2)
+    s4 = _row(_sheet(led, ("2026-08-17T06:45:22+00:00",
+                           "2026-08-18T06:45:22+00:00")), "hold@x.com")
+    assert s4 is None
+    led.close()
+
+
+def test_refix_mixed_tree_is_refused_with_both_lists(cfg, monkeypatch,
+                                                     capsys):
+    """A tree holding BOTH paid and unpaid DELIVERED nodes has no
+    automatable answer (sealing swallows unpaid hours; not sealing
+    double-pays; teardown deletes the per-node fidelity). Refused before
+    any Drive move, both lists reported, other roots proceed."""
+    from pipeline.ledger import Ledger
+    from pipeline.tests.test_payment_split_r6 import FIXABLE, _put, _refix
+    led = Ledger(cfg.ledger_path)
+    m = "2026-08-14T09-00-00Z_kamla_c_0000000000000sm1"
+    o = "2026-08-14T09-00-00Z_kamla_c_0000000000000so1"
+    try:
+        _put(led, m, state="SPLIT", raw=3600.0, player="mixed@x.com")
+        _put(led, f"{m}-p1", state="DELIVERED", parent=m, raw=1800.0,
+             delivered=1700.0, player="mixed@x.com")
+        led.update(f"{m}-p1",
+                   accepted_reported_at="2026-08-15T00:00:00+00:00")
+        _put(led, f"{m}-p2", state="DELIVERED", parent=m, raw=1800.0,
+             delivered=1600.0, player="mixed@x.com")     # unpaid
+        _put(led, f"{m}-p3", state="REJECTED", parent=m, raw=100.0,
+             player="mixed@x.com", reasons=FIXABLE)
+        led.update(m, uploaded_reported_at="2026-08-15T00:00:00+00:00")
+        _put(led, o, state="REJECTED", raw=3600.0, player="plain@x.com",
+             reasons=FIXABLE)
+        led.update(o, uploaded_reported_at="2026-08-15T00:00:00+00:00")
+    finally:
+        led.close()
+
+    _refix(cfg, monkeypatch)
+    out = capsys.readouterr().out
+    assert "REFUSED (mixed tree)" in out
+    assert '"skipped_mixed"' in out
+    assert f"{m}-p1" in out and f"{m}-p2" in out
+
+    led = Ledger(cfg.ledger_path)
+    try:
+        assert led.get(m)["state"] == "SPLIT"          # untouched
+        p2 = led.get(f"{m}-p2")
+        assert p2 is not None and p2["state"] == "DELIVERED"
+        assert p2["duration_delivered_s"] == 1600.0    # hours untouched
+        assert p2["accepted_reported_at"] is None      # still payable
+        assert led.get(o)["state"] == "DISCOVERED"     # others proceeded
+    finally:
+        led.close()
+
+
+def test_refix_fully_paid_tree_never_recounted_end_to_end(cfg,
+                                                          monkeypatch):
+    """The seal's one legitimate job, end-to-end through the sheet: a
+    fully-paid torn-down tree re-delivers, and no sheet ever counts it
+    again — via tree_sealed_at, with the root's own accepted mark clear."""
+    from pipeline.ledger import Ledger
+    from pipeline.tests.test_payment_split_r6 import (FIXABLE, W2, W3,
+                                                      _put, _refix, _row,
+                                                      _sheet)
+    led = Ledger(cfg.ledger_path)
+    root = "2026-08-14T09-00-00Z_kamla_c_0000000000000sf1"
+    try:
+        _put(led, root, state="SPLIT", raw=3600.0, player="fp@x.com")
+        _put(led, f"{root}-p1", state="DELIVERED", parent=root, raw=1800.0,
+             delivered=1700.0, player="fp@x.com")
+        led.update(f"{root}-p1",
+                   accepted_reported_at="2026-08-15T00:00:00+00:00")
+        _put(led, f"{root}-p2", state="REJECTED", parent=root, raw=1800.0,
+             player="fp@x.com", reasons=FIXABLE)
+        led.update(root, uploaded_reported_at="2026-08-15T00:00:00+00:00")
+    finally:
+        led.close()
+
+    _refix(cfg, monkeypatch)
+
+    led = Ledger(cfg.ledger_path)
+    try:
+        row = led.get(root)
+        assert row["tree_sealed_at"], "fully-paid tree must seal"
+        assert row["accepted_reported_at"] is None
+        # the re-run re-delivers the root itself
+        led.update(root, duration_delivered_s=3400.0,
+                   delivered_at="2026-08-15T10:00:00+00:00")
+        led.set_state(root, "DELIVERED")
+        assert _row(_sheet(led, W2), "fp@x.com") is None
+        assert _row(_sheet(led, W3), "fp@x.com") is None
+    finally:
+        led.close()
+
+
+def test_supersede_clears_the_tree_seal(tmp_path):
+    from pipeline.ledger import Ledger
+    from pipeline.tests.test_payment_split_r6 import _put
+    led = Ledger(tmp_path / "l.db")
+    sid = "2026-08-14T09-00-00Z_kamla_c_0000000000000ss1"
+    _put(led, sid, state="DELIVERED", raw=3600.0, delivered=3400.0)
+    led.update(sid, tree_sealed_at="2026-08-15T00:00:00+00:00")
+    led.supersede(sid, new_md5="zz", new_bytes=2,
+                  new_ctime="2026-08-16T00:00:00.000Z",
+                  dossier_root=tmp_path / "dossiers")
+    assert led.get(sid)["tree_sealed_at"] is None
+    led.close()
+
+
+def test_rebuild_reset_clears_the_tree_seal(cfg, monkeypatch):
+    import sys as _sys
+
+    from pipeline.ledger import Ledger
+    from pipeline.tests.test_payment_split_r6 import _load, _put
+    reset = _load("recal_rebuild_reset")
+    led = Ledger(cfg.ledger_path)
+    sid = "2026-08-14T09-00-00Z_kamla_c_0000000000000sr1"
+    try:
+        _put(led, sid, state="DELIVERED", raw=3600.0, delivered=3400.0)
+        led.update(sid, tree_sealed_at="2026-08-15T00:00:00+00:00")
+    finally:
+        led.close()
+    parachute = cfg.home / "parachute.db"
+    parachute.write_bytes(b"x" * 2048)
+    monkeypatch.setenv("HL_PIPELINE_HOME", str(cfg.home))
+    monkeypatch.setattr(_sys, "argv",
+                        ["recal_rebuild_reset.py", "--yes",
+                         "--backup", str(parachute)])
+    assert reset.main() == 0
+    led = Ledger(cfg.ledger_path)
+    try:
+        assert led.get(sid)["tree_sealed_at"] is None
+    finally:
+        led.close()
+
+
+def test_quarantine_heal_clears_the_tree_seal(cfg, ledger, monkeypatch):
+    from pipeline import ingest
+    from pipeline.tests.conftest import make_session_entries
+    sid = "2026-08-14T10-00-00Z_kamla_c_0123456789abcdef"
+    ledger.insert_session(
+        session_id=sid, game="kamla", operator_email="op@x.com",
+        player_email="p1@x.com", drive_path="kamla/BADPATH",
+        drive_ctime="2026-08-14T10:00:00.000Z", md5_video="old",
+        bytes_=1, state="DISCOVERED")
+    ledger.set_state(sid, "QUARANTINED")
+    ledger.update(sid, tree_sealed_at="2026-08-15T00:00:00+00:00")
+    entries = make_session_entries(sid=sid)
+    monkeypatch.setattr(ingest, "list_drive", lambda _c: entries)
+    ingest.scan(cfg, ledger, entries)
+    row = ledger.get(sid)
+    assert row["state"] == "DISCOVERED"
+    assert row["tree_sealed_at"] is None
+
+
 def test_daily_unreadable_record_refuses_loudly(cfg, ledger, monkeypatch,
                                                 capsys):
     """A torn record is an unknown: regenerating post-stamp could ship a
