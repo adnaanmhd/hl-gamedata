@@ -1349,13 +1349,22 @@ class ContinuousDriver:
         # which can NEVER exist for these rows (INGESTED is written only on
         # a SUCCESSFUL download), so it silently degraded to first sight on
         # Drive -- hours or days early (r-loop 6).
+        # Scoped to the CURRENT intake stint (r-loop 11 #9), like the
+        # reclaim sweep: supersede/heal re-entries otherwise inherit the
+        # gen-1 anchor and a 25-minute-old gen-2 failure reported as
+        # "DISCOVERED(media) 29.0h".
         disc_media = led.db.execute(
             "SELECT s.session_id, "
             "(SELECT MIN(e.ts) FROM events e "
             "  WHERE e.session_id=s.session_id AND e.to_state='DISCOVERED' "
             "    AND e.ts > (SELECT MIN(e2.ts) FROM events e2 "
             "        WHERE e2.session_id=s.session_id "
-            "          AND e2.to_state='DOWNLOADING')) first_disc "
+            "          AND e2.to_state='DOWNLOADING' "
+            "          AND e2.ts > COALESCE((SELECT MAX(e3.ts) "
+            "              FROM events e3 "
+            "              WHERE e3.session_id=s.session_id "
+            "                AND e3.to_state NOT IN "
+            "                ('DISCOVERED','DOWNLOADING')), ''))) first_disc "
             "FROM sessions s WHERE s.state='DISCOVERED'").fetchall()
         held_now = self._held_discovered(led)
         for r in disc_media:

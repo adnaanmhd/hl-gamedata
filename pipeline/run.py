@@ -1968,12 +1968,24 @@ def _sweep_terminal_work(cfg: C.Config, ledger: Ledger) -> None:
                 # event is exact, and MIN (not MAX) means the 5-min retry
                 # bounce cannot reset it. No DOWNLOADING event -> no age ->
                 # never reclaimed, which is right: nothing was downloaded.
+                # Scoped to the CURRENT intake stint (r-loop 11 #9):
+                # supersede/heal re-enter a slot as DISCOVERED without
+                # deleting events, so the first-DOWNLOADING-EVER anchor
+                # landed on a stale gen-1 event and the 12h grace
+                # collapsed to ~0 for re-entered slots — a 25-minute-old
+                # gen-2 partial was swept as "29h old". The inner anchor
+                # is the first claim AFTER the last event outside the
+                # DISCOVERED/DOWNLOADING retry set (the supersede's
+                # REJECTED/QUARANTINED exit); never-successful rows have
+                # no outside events and are unchanged.
                 first_disc = ledger.db.execute(
                     "SELECT MIN(ts) t FROM events WHERE session_id=? "
                     "AND to_state='DISCOVERED' AND ts > (SELECT MIN(ts) "
                     "FROM events WHERE session_id=? AND "
-                    "to_state='DOWNLOADING')",
-                    (sid, sid)).fetchone()
+                    "to_state='DOWNLOADING' AND ts > COALESCE((SELECT "
+                    "MAX(ts) FROM events WHERE session_id=? AND to_state "
+                    "NOT IN ('DISCOVERED','DOWNLOADING')), ''))",
+                    (sid, sid, sid)).fetchone()
                 t = first_disc["t"] if first_disc else None
                 if t and _iso_age_h(t) >= C.CONT_DISCOVERED_RECLAIM_H:
                     shutil.rmtree(p, ignore_errors=True)

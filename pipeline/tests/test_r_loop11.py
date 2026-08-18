@@ -459,6 +459,88 @@ def test_validate_backfills_null_duration_batch(cfg, ledger, monkeypatch):
     assert ledger.get(sid)["duration_raw_s"] == 99.0
 
 
+# ------- r11 #9: reclaim/stuck anchors scoped to the current intake
+# ------- stint
+
+def _gen2_history(ledger, sid):
+    """gen-1 failure 29h ago, terminal exit 2h ago, supersede re-entry
+    1h ago, gen-2 transient failure 25 min ago leaving a partial —
+    the r11 #9 probe timeline."""
+    from datetime import datetime
+    now = datetime.now(timezone.utc)
+
+    def iso(d):
+        return d.isoformat(timespec="seconds")
+    ledger.db.execute("DELETE FROM events WHERE session_id=?", (sid,))
+    rows = [
+        (sid, None, "DISCOVERED", iso(now - timedelta(hours=72)),
+         "scanned"),
+        (sid, "DISCOVERED", "DOWNLOADING",
+         iso(now - timedelta(hours=29.5)), "claimed by D"),
+        (sid, "DOWNLOADING", "DISCOVERED", iso(now - timedelta(hours=29)),
+         "download failed"),
+        (sid, "DISCOVERED", "REJECTED", iso(now - timedelta(hours=2)),
+         "rejected"),
+        (sid, "REJECTED", "DISCOVERED", iso(now - timedelta(hours=1)),
+         "superseded: new bytes"),
+        (sid, "DISCOVERED", "DOWNLOADING",
+         iso(now - timedelta(minutes=30)), "claimed by D"),
+        (sid, "DOWNLOADING", "DISCOVERED",
+         iso(now - timedelta(minutes=25)), "download failed"),
+    ]
+    ledger.db.executemany(
+        "INSERT INTO events(session_id, from_state, to_state, ts, detail) "
+        "VALUES(?,?,?,?,?)", rows)
+    ledger.db.commit()
+
+
+def _gen2_media(cfg, ledger, sid):
+    from pipeline.tests.test_r_loop5 import _seed_disc
+    _seed_disc(ledger, sid)
+    (cfg.work / sid).mkdir(parents=True)
+    (cfg.work / sid / "video.mp4").write_bytes(b"x" * 16)
+    _gen2_history(ledger, sid)
+
+
+def test_gen2_partial_survives_the_sweep(cfg, ledger):
+    """The DISCOVERED-media sweep anchored on the first DOWNLOADING event
+    EVER, so a supersede re-entry inherited the gen-1 anchor and its
+    12h grace collapsed to ~0 — a 25-minute-old partial swept as
+    '29h old' (a transfer rclone --checksum would have resumed)."""
+    sid = "s-gen2-sweep"
+    _gen2_media(cfg, ledger, sid)
+    runmod._sweep_terminal_work(cfg, ledger)
+    assert (cfg.work / sid).exists(), \
+        "a 25-minute-old gen-2 partial must keep its 12h grace"
+
+
+def test_gen2_partial_not_stuck_listed_at_gen1_age(cfg, ledger):
+    """The digest's disc_media query used the same cross-generation
+    anchor and printed 'DISCOVERED(media) 29.0h' for the 25-minute-old
+    failure."""
+    from pipeline import continuous as cont
+    drv = cont.ContinuousDriver(cfg, send_telegram=False)
+    sid = "s-gen2-digest"
+    _gen2_media(cfg, ledger, sid)
+    lines, _n = drv._stuck_lines(ledger)
+    assert sid not in " ".join(lines), lines
+
+
+def test_never_successful_row_still_reclaimed(cfg, ledger):
+    """Control: rows with no event outside the retry set keep today's
+    behaviour — anchored on their first failure, reclaimed past grace."""
+    from pipeline import config as C
+    from pipeline.tests.test_r_loop5 import _age_discovered_event, \
+        _seed_disc
+    sid = "s-neversucc"
+    _seed_disc(ledger, sid)
+    (cfg.work / sid).mkdir(parents=True)
+    (cfg.work / sid / "video.mp4").write_bytes(b"x" * 16)
+    _age_discovered_event(ledger, sid, C.CONT_DISCOVERED_RECLAIM_H + 5)
+    runmod._sweep_terminal_work(cfg, ledger)
+    assert not (cfg.work / sid).exists()
+
+
 # ------- r11 #7: stamps compare-and-set on the counted bytes
 
 def test_stamps_skip_a_root_superseded_mid_send(cfg, ledger, monkeypatch,
