@@ -28,6 +28,15 @@ KEEP_STATES = ("QUARANTINED", "DUPLICATE")
 
 
 def main() -> int:
+    """HOLDS the run lock for the tool's whole duration (the r-loop 1
+    shape every sibling flip tool already has, adopted here in r-loop 12
+    #3/#12): the bare existence check left a TOCTOU where systemd
+    Restart=always / a timer tick could start the continuous driver
+    mid-teardown — the blanket child DELETE and the work-dir wipes would
+    then race live validation and cut work. acquire_lock also reclaims a
+    stale lock from a killed driver, closing the false-refusal case for
+    free."""
+    from pipeline.run import acquire_lock, release_lock
     ap = argparse.ArgumentParser()
     ap.add_argument("--backup", required=True,
                     help="path of the already-taken ledger backup")
@@ -35,9 +44,17 @@ def main() -> int:
     args = ap.parse_args()
 
     cfg = C.load()
-    if cfg.lock_dir.exists():
-        print(f"ABORT: {cfg.lock_dir} exists — a run is (or looks) alive")
+    if not acquire_lock(cfg):
+        print("ABORT: run lock held — stop the driver "
+              "(hl-continuous.service / hl-pipeline.timer) first")
         return 2
+    try:
+        return _locked_main(cfg, args)
+    finally:
+        release_lock(cfg)
+
+
+def _locked_main(cfg, args) -> int:
     bk = Path(args.backup)
     if not bk.exists() or bk.stat().st_size < 1024:
         print(f"ABORT: backup {bk} missing/empty — take the parachute first")

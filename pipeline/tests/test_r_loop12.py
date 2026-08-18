@@ -98,6 +98,36 @@ def test_deferral_adjudicated_new_bytes_still_skip(cfg, ledger,
     assert "SKIPPED" in capsys.readouterr().err
 
 
+# ------- r12 #3/#12: recal_rebuild_reset HOLDS the run lock
+
+def test_rebuild_reset_holds_the_run_lock(cfg, monkeypatch):
+    """The tool kept the bare lock-existence check r-loop 1 condemned in
+    every sibling: a systemd Restart=always respawn (or timer tick)
+    landing mid-teardown found the lock FREE and ran a full pipeline
+    concurrently with the blanket child DELETE and work-dir wipes."""
+    import sys as _sys
+
+    from pipeline import reports
+    from pipeline.tests.test_payment_split_r6 import _load
+    reset = _load("recal_rebuild_reset")
+    parachute = cfg.home / "parachute.db"
+    parachute.write_bytes(b"x" * 2048)
+    monkeypatch.setenv("HL_PIPELINE_HOME", str(cfg.home))
+    seen: dict = {}
+    real = reports.pending_daily_send
+
+    def spy(c):
+        seen["lock_held"] = cfg.lock_dir.exists()
+        return real(c)
+    monkeypatch.setattr(reports, "pending_daily_send", spy)
+    monkeypatch.setattr(_sys, "argv", ["recal_rebuild_reset.py", "--yes",
+                                       "--backup", str(parachute)])
+    assert reset.main() == 0
+    assert seen.get("lock_held") is True, \
+        "the lock must be HELD across the teardown, not just checked"
+    assert not cfg.lock_dir.exists(), "and released afterwards"
+
+
 def test_real_vs_real_mismatch_still_skips(cfg, ledger, monkeypatch,
                                            capsys):
     """Control: the motivating F7 race (supersede writes a REAL new md5)
