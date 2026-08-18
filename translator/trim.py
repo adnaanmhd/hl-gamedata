@@ -132,16 +132,26 @@ def rebase_events(events: list[dict], head_cut_s: float, new_duration_s: float) 
             continue
         if t < head_us:
             et, act = e.get("type"), e.get("action")
-            if et == "key" and e.get("key") is not None:
-                if act == "down":
-                    held_keys[e["key"]] = e
-                else:
-                    held_keys.pop(e["key"], None)
-            elif et == "mouse_button" and e.get("button") is not None:
-                if act == "down":
-                    held_btns[e["button"]] = e
-                else:
-                    held_btns.pop(e["button"], None)
+            # str identities only: a container key/button (a list or dict
+            # from a hand-edited/foreign-tool sidecar) is unhashable, so
+            # using it as a dict key raised TypeError and crashed the WHOLE
+            # translate/retranslate whenever one such event fell before the
+            # head cut (r-loop 8). Nothing is lost — normalize_event_key /
+            # the binner drop every non-str identity two steps later anyway.
+            if et == "key":
+                k = e.get("key")
+                if isinstance(k, str):
+                    if act == "down":
+                        held_keys[k] = e
+                    else:
+                        held_keys.pop(k, None)
+            elif et == "mouse_button":
+                b = e.get("button")
+                if isinstance(b, str):
+                    if act == "down":
+                        held_btns[b] = e
+                    else:
+                        held_btns.pop(b, None)
             continue
         if t < end_us:
             ne = dict(e)

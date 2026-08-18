@@ -644,32 +644,38 @@ def fix_translate_raw(work: Path) -> str:
     """ARR_RAW_ONLY: the folder is a raw bundle — full translate-v2 (with
     the implicit 5 s trim) into a temp out, then adopt the delivery files."""
     out = work / "_translated"
-    res = translate_bundle_v2(work, out, make_rrd=False)
-    src = Path(res["out_dir"])
-    for name in ("video.mp4", "frames.csv", "session.json",
-                 "rrd_creation.py"):
-        shutil.copy2(src / name, work / name)
-    (work / "session.rrd").touch()
-    raw = work / "raw"
-    raw.mkdir(exist_ok=True)
-    for name in ("inputs.jsonl", "metadata.json", "keybind.json"):
-        if (work / name).exists():
-            shutil.move(str(work / name), raw / name)
-    # the applied sync shift must survive the temp-out cleanup — qa's raw
-    # recomputation reads it from the work root (review finding #10)
+    # try/finally: the cleanup was success-path-only, so every FAILED
+    # attempt leaked a video-sized `_translated/` tree inside the working
+    # copy — twice per session against a media cap that counts sessions
+    # as its bytes bound (r-loop 8)
     try:
-        rep = json.loads((out / "translation_report.json").read_text())
-    except (FileNotFoundError, json.JSONDecodeError):
-        rep = {}
-    entry = rep.get(json.loads((work / "session.json").read_text())
-                    .get("session_id")) or rep.get(src.name)
-    if entry:
-        # locked + atomic (review-r3 #8)
-        from .validate import _locked_report_update
-        _locked_report_update(work.parent / "translation_report.json",
-                              work.name, entry)
-    shutil.rmtree(out, ignore_errors=True)
-    return f"translated raw bundle: {res['data_quality']}"
+        res = translate_bundle_v2(work, out, make_rrd=False)
+        src = Path(res["out_dir"])
+        for name in ("video.mp4", "frames.csv", "session.json",
+                     "rrd_creation.py"):
+            shutil.copy2(src / name, work / name)
+        (work / "session.rrd").touch()
+        raw = work / "raw"
+        raw.mkdir(exist_ok=True)
+        for name in ("inputs.jsonl", "metadata.json", "keybind.json"):
+            if (work / name).exists():
+                shutil.move(str(work / name), raw / name)
+        # the applied sync shift must survive the temp-out cleanup — qa's
+        # raw recomputation reads it from the work root (review finding #10)
+        try:
+            rep = json.loads((out / "translation_report.json").read_text())
+        except (FileNotFoundError, json.JSONDecodeError):
+            rep = {}
+        entry = rep.get(json.loads((work / "session.json").read_text())
+                        .get("session_id")) or rep.get(src.name)
+        if entry:
+            # locked + atomic (review-r3 #8)
+            from .validate import _locked_report_update
+            _locked_report_update(work.parent / "translation_report.json",
+                                  work.name, entry)
+        return f"translated raw bundle: {res['data_quality']}"
+    finally:
+        shutil.rmtree(out, ignore_errors=True)
 
 
 def retranslate_from_sidecars(work: Path, *,

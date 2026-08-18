@@ -51,7 +51,12 @@ def _binding_groups(value) -> list[tuple[list[tuple[str, ...]], str | None]]:
     out: list[tuple[list[tuple[str, ...]], str | None]] = []
     if isinstance(value, str):
         tok = normalize_literal(value)
-        if is_motion_literal(tok):
+        # an empty normalized token (whitespace, or normalize_literal's ""
+        # for junk) must never become a group: "" in bound_literals would
+        # defeat resolve_keybind's parsed-but-unusable fallback (r-loop 8)
+        if not tok:
+            pass
+        elif is_motion_literal(tok):
             out.append(([], _MOTION_AXES[tok]))
         else:
             out.append(([_alts(tok)], None))
@@ -63,9 +68,18 @@ def _binding_groups(value) -> list[tuple[list[tuple[str, ...]], str | None]]:
         key = value.get("key")
         groups: list[tuple[str, ...]] = []
         if mod:
-            groups.append(_alts(normalize_literal(mod)))
+            m = normalize_literal(mod)
+            # a modifier that normalizes empty (a VK number) is dropped
+            # ALONE — the key-only group still binds (r-loop 8)
+            if m:
+                groups.append(_alts(m))
         if key:
             t = normalize_literal(key)
+            if not t:
+                # a key that normalizes empty makes the WHOLE binding
+                # unusable — emitting the bare modifier group would fire
+                # the semantic on the modifier alone (r-loop 8)
+                return out
             if is_motion_literal(t):
                 out.append(([], _MOTION_AXES[t]))
                 return out

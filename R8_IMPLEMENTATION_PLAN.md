@@ -21,7 +21,7 @@ never by remembered line number** once edits land.
 Mark each item when its commit is green on Mac (and VM where noted). Resume from
 the first unchecked item.
 
-- [ ] C1 translator minors (trim/binner/keys/v2 + fix_translate_raw cleanup)
+- [x] C1 translator minors (trim/binner/keys/v2 + fix_translate_raw cleanup) — Mac suite 552 green; fail-first 29 failed pre-fix
 - [ ] C2 BLOCKER fix.py retranslate guard (split children)
 - [ ] C3 BLOCKER host carve-out, both drivers
 - [ ] C4 ops surfaces: stuck-list stint, digest retry stamp, AlertBook

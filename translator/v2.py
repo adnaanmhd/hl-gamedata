@@ -33,6 +33,14 @@ from .keybinds import (AMBIGUOUS_PAIRS, CONTEXT_ALLOWED, KEYBINDS,
 from .translate import VENDOR, load_events, resolve_keybind
 
 
+class BundleError(Exception):
+    """A raw bundle's metadata.json cannot support a translate — unreadable
+    file or an unusable required field. Typed and field-naming so the fix
+    lane records an attributable session-level error instead of a bare
+    JSONDecodeError/AttributeError/ValueError burning both attempts under
+    an unattributable message (r-loop 8)."""
+
+
 def _utc_aware(ts: str) -> datetime:
     """Parse an ISO stamp, ASSUMING UTC when it carries no offset.
     HumynCapture's metadata.json sometimes writes a naive
@@ -207,11 +215,34 @@ def _v2_rows(rows: list[list], bound: frozenset[str], strip_stats: dict) -> list
 
 def build_session_json(*, slug: str, session_id: str, meta: dict,
                        info: V.VideoInfo, head_cut_s: float) -> dict:
-    started_raw = meta.get("recording", {}).get("started_at_utc")
-    started = _utc_aware(started_raw)
+    # every read below is from the player-supplied metadata.json — guard
+    # shapes, and NAME the field when a required value is unusable, the
+    # same contract fix.py's `_utc` gives the retranslate path (r-loop 8)
+    rec = meta.get("recording") if isinstance(meta, dict) else None
+    if not isinstance(rec, dict):
+        rec = {}
+    started_raw = rec.get("started_at_utc")
+    if not isinstance(started_raw, str):
+        raise BundleError(
+            f"metadata recording.started_at_utc unusable: {started_raw!r}")
+    try:
+        started = _utc_aware(started_raw)
+    except ValueError:
+        raise BundleError(
+            f"metadata recording.started_at_utc unusable: {started_raw!r}")
     created = started + timedelta(seconds=head_cut_s)
     ended = created + timedelta(seconds=info.duration_s)
-    system = meta.get("system", {})
+    system = meta.get("system") if isinstance(meta, dict) else None
+    if not isinstance(system, dict):
+        system = {}
+
+    def _px(v, fallback: int) -> int:
+        """Tolerant screen-dimension cast: junk degrades to the probed
+        video size, exactly what an absent value already did."""
+        try:
+            return int(float(v)) if v else fallback
+        except (TypeError, ValueError):
+            return fallback
     return {
         "vendor_name": VENDOR,
         "game_title": GAME_TITLES.get(slug, slug),
@@ -224,8 +255,8 @@ def build_session_json(*, slug: str, session_id: str, meta: dict,
         "frame_count": info.frame_count,
         "record_width_px": info.width,
         "record_height_px": info.height,
-        "screen_width_px": int(system.get("screen_width") or info.width),
-        "screen_height_px": int(system.get("screen_height") or info.height),
+        "screen_width_px": _px(system.get("screen_width"), info.width),
+        "screen_height_px": _px(system.get("screen_height"), info.height),
         "localization": LOCALIZATIONS.get(slug, "en-US"),
         "platform": "PC",
         "input_mouse_convention": dict(MOUSE_CONVENTION),
@@ -242,10 +273,21 @@ def translate_bundle_v2(bundle_dir: Path, out_root: Path, *,
     bundle_dir = Path(bundle_dir)
     # metadata.json carries player-typed free text (session.role,
     # session.objective_task), so it is strictly MORE exposed to a
-    # non-UTF-8 byte than inputs.jsonl, which r-loop 4 hardened (r-loop 5)
-    meta = json.loads((bundle_dir / "metadata.json").read_text(
-        encoding="utf-8", errors="replace"))
-    game_info = meta.get("game", {})
+    # non-UTF-8 byte than inputs.jsonl, which r-loop 4 hardened (r-loop 5).
+    # Truncated/malformed shapes raise a typed BundleError (or degrade to
+    # {} for wrong-typed containers) rather than a bare JSONDecodeError/
+    # AttributeError out of the raw-only fix path (r-loop 8).
+    try:
+        meta = json.loads((bundle_dir / "metadata.json").read_text(
+            encoding="utf-8", errors="replace"))
+    except (OSError, json.JSONDecodeError) as e:
+        raise BundleError(f"metadata.json unreadable: {type(e).__name__}: "
+                          f"{str(e)[:200]}")
+    if not isinstance(meta, dict):
+        meta = {}
+    game_info = meta.get("game")
+    if not isinstance(game_info, dict):
+        game_info = {}
     game_name = game_info.get("name") or meta.get("game_name")
     exe_name = game_info.get("exe_name")
     session_id = meta.get("session_id") or bundle_dir.name

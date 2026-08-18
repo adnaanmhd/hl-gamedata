@@ -75,10 +75,13 @@ def raw_int(v) -> int:
     bin_session, so every retranslate fix failed too and the session was
     rejected under the bare fix-failed marker (r-loop 7). A malformed
     value contributes 0 motion, which the raw-vs-CSV comparison then sees
-    as an ordinary mismatch and reports honestly."""
+    as an ordinary mismatch and reports honestly. OverflowError too:
+    json.loads accepts `Infinity`, `1e999` and 10**400, and int() on any
+    of them raised straight past the two arms above — same crash, same
+    wrongful QUARANTINED (r-loop 8; NaN already lands in ValueError)."""
     try:
         return int(float(v or 0))
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         return 0
 
 

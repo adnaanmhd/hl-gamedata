@@ -88,8 +88,16 @@ def normalize_event_key(raw: str, *, bound: frozenset[str] = frozenset(),
     return s
 
 
-def normalize_literal(raw: str) -> str:
-    """Keybind literal ("LCtrl", "Spacebar", "MouseRight") -> canonical token."""
+def normalize_literal(raw) -> str:
+    """Keybind literal ("LCtrl", "Spacebar", "MouseRight") -> canonical token.
+
+    Non-str input returns "" instead of raising: the `{modifier, key}`
+    keybind form carries Windows VK numbers in the wild, and r-loop 7's
+    resolve_keybind hardening covered only the flat form — `raw.strip()`
+    on a number crashed the translate. Callers (_binding_groups) drop
+    empty tokens so "" can never enter bound_literals (r-loop 8)."""
+    if not isinstance(raw, str):
+        return ""
     s = raw.strip().lower()
     return _LITERAL_ALIASES.get(s, s)
 

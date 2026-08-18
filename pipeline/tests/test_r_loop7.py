@@ -261,6 +261,11 @@ def test_gate_record_propagates_when_bounds_are_unknown(tmp_path):
     {"move_up": 87, "interact": 69},          # Windows VK codes
     {"version": 1, "binds": {"move_up": "w"}},   # wrapper object
     {"move_up": None, "interact": None},      # nulls
+    # {modifier, key} form carrying VK numbers — r-loop 7 covered only the
+    # flat form; normalize_literal crashed on the numbers before the
+    # usable-binding check could fall back (r-loop 8)
+    {"move_up": {"modifier": None, "key": 87}},
+    {"move_up": [{"modifier": "ctrl", "key": 87}]},
 ])
 def test_unusable_keybind_falls_back_to_the_builtin(tmp_path, payload,
                                                     capsys):
@@ -293,7 +298,12 @@ def test_a_usable_keybind_is_still_respected(tmp_path):
 
 # ------------------- MAJOR: untrusted sidecar values degrade, never raise
 
-@pytest.mark.parametrize("bad", ["1.0", "abc", [1], {"a": 1}, None, True])
+@pytest.mark.parametrize("bad", ["1.0", "abc", [1], {"a": 1}, None, True,
+                                 # json.loads accepts Infinity/1e999 and
+                                 # arbitrary-precision ints; int() on them
+                                 # raised OverflowError past both except
+                                 # arms (r-loop 8)
+                                 float("inf"), float("-inf"), 10**400])
 def test_raw_numeric_fields_degrade_to_zero(bad):
     """A bare int() raised out of check_session_v2 into the driver, which
     writes QUARANTINED 'validation crashed' — TERMINAL, media held 48 h —
