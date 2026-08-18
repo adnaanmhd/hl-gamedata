@@ -670,9 +670,12 @@ def _deliver_phase(cfg, ledger, sids, alerts,
             out = deliver.deliver_session(cfg, ledger, sid,
                                           dest_prefix=dest_prefix)
         except (OSError, sqlite3.OperationalError,
-                subprocess.TimeoutExpired) as e:
+                subprocess.TimeoutExpired,
+                subprocess.CalledProcessError) as e:
             # host-level trouble (ENOSPC from the multi-GB stage copy, a
-            # locked/full ledger, an rrd render past its 1800s timeout) is
+            # locked/full ledger, an rrd render past its 1800s timeout,
+            # an rrd child exiting non-zero on ENOSPC/OOM/broken-pin —
+            # r-loop 9 #10, delivery lane only) is
             # TRANSIENT and must not be terminal — deliver_session is
             # state-guarded and resumes. Mirrors the continuous driver's
             # _deliver_one so the rollback path behaves identically

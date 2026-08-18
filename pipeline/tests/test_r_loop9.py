@@ -161,6 +161,94 @@ def test_empty_frames_csv_routes_to_unmapped_not_quarantine(tmp_path):
     assert unmapped and unmapped[0]["fixable"] is True
 
 
+# ------- D3a (#9): first worker death is host-suspect, second terminal
+
+def _ins(ledger, sid, state="INGESTED"):
+    ledger.insert_session(
+        session_id=sid, game="kamla", operator_email="op@x.com",
+        player_email="p@x.com", drive_path=f"kamla/op@x.com/p@x.com/{sid}",
+        drive_ctime="2026-08-14T10:00:00.000Z", md5_video="a" * 32,
+        bytes_=10, state=state)
+
+
+def test_first_worker_death_is_host_suspect_not_quarantine(cfg, ledger,
+                                                           monkeypatch):
+    """An externally SIGKILLed spawn worker (kernel OOM killer,
+    systemd-oomd, cgroup MemoryMax, admin kill -9) presents ONLY as
+    BrokenProcessPool with stop unset — branding it a session crash
+    bypassed the r-loop-6 host carve-out and one OOM burst terminally
+    quarantined every in-flight validation."""
+    from pipeline import continuous as cont
+    sid = "s-oom"
+    _ins(ledger, sid)
+    (cfg.work / sid).mkdir(parents=True)
+    drv = cont.ContinuousDriver(cfg, send_telegram=False)
+    alerts: list[str] = []
+    monkeypatch.setattr(cont.AlertBook, "alert",
+                        lambda self, t: alerts.append(t))
+
+    class _BrokenPool:
+        def __init__(self, *a, **k): pass
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+        def map(self, *a, **k):
+            raise cont.concurrent.futures.process.BrokenProcessPool("oom")
+    monkeypatch.setattr(cont.concurrent.futures, "ProcessPoolExecutor",
+                        _BrokenPool)
+    monkeypatch.setattr(cont, "_POOL_DISABLED", False)
+
+    # first death: host-suspect — VALIDATING + cooldown, NOT terminal
+    assert drv._validate_one(ledger, sid, ledger.get(sid)) is None
+    assert ledger.get(sid)["state"] == "VALIDATING"
+    assert not drv.cool.ready(sid), "cooldown must be pending"
+    assert any("host-suspect" in a for a in alerts)
+    # second death for the SAME sid: reproducible — terminal as before
+    assert drv._validate_one(ledger, sid, ledger.get(sid)) == "QUARANTINED"
+    assert ledger.get(sid)["state"] == "QUARANTINED"
+
+
+# ------- D3b (#10): rrd-child CalledProcessError is host-class in U lane
+
+def test_rrd_child_calledprocesserror_defers_delivery_continuous(
+        cfg, ledger, monkeypatch):
+    """A non-zero rrd_creation.py exit (ENOSPC writing the multi-GB rrd,
+    OOM kill, broken rerun-sdk pin) terminally QUARANTINED a
+    fully-validated READY session — during the exact disk-low incident
+    the lane's own carve-out documents. A HUNG rrd child was already
+    host-classed; a DEAD one must be too."""
+    import subprocess as sp
+
+    from pipeline import continuous as cont
+    sid = "s-rrd"
+    _ins(ledger, sid, state="READY")
+    drv = cont.ContinuousDriver(cfg, send_telegram=False)
+    monkeypatch.setattr(cont.AlertBook, "alert", lambda self, t: None)
+
+    def boom(*a, **k):
+        raise sp.CalledProcessError(1, ["python", "rrd_creation.py"])
+    monkeypatch.setattr(cont.deliver, "deliver_session", boom)
+    drv._deliver_one(ledger, sid)
+    assert ledger.get(sid)["state"] == "READY", \
+        "a dead rrd child is host-class: the session must stay resumable"
+    assert not drv.cool.ready(sid), "cooldown must be pending"
+
+
+def test_rrd_child_calledprocesserror_defers_delivery_batch(
+        cfg, ledger, monkeypatch):
+    import subprocess as sp
+
+    from pipeline import run as runmod
+    sid = "s-rrd-b"
+    _ins(ledger, sid, state="READY")
+
+    def boom(*a, **k):
+        raise sp.CalledProcessError(1, ["python", "rrd_creation.py"])
+    monkeypatch.setattr(runmod.deliver, "deliver_session", boom)
+    stats = runmod._deliver_phase(cfg, ledger, [sid], [])
+    assert ledger.get(sid)["state"] == "READY"
+    assert stats["upload_failures"] == 1
+
+
 def test_engine_oserror_is_host_classed_through_validate(tmp_path,
                                                          monkeypatch):
     """The OSError type was laundered into the a.error STRING, so

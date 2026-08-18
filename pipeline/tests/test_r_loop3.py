@@ -79,7 +79,10 @@ def test_broken_pool_while_running_still_quarantines(cfg, ledger,
                         _BrokenPool)
     monkeypatch.setattr(cont, "_POOL_DISABLED", False)
     monkeypatch.setattr(C, "CONT_DRAIN_GRACE_S", 0)
-    # stop NOT set: this is a real crash
+    # stop NOT set: this is a real crash. Since r-loop 9 (#9) the FIRST
+    # death is host-suspect (OOM/SIGKILL presents only here); bytes that
+    # reproducibly kill the decoder still terminate on the SECOND death.
+    assert drv._validate_one(ledger, sid, ledger.get(sid)) is None
     assert drv._validate_one(ledger, sid, ledger.get(sid)) == "QUARANTINED"
 
 

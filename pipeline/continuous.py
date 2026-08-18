@@ -765,9 +765,35 @@ class ContinuousDriver:
                     # exactly like kill -9, which is the path the design
                     # was hardened for.
                     return None
+                # With stop UNSET, an externally SIGKILLed worker (kernel
+                # OOM killer, systemd-oomd, a cgroup MemoryMax, an admin
+                # kill -9) can ONLY present here — MemoryError never
+                # propagates through a SIGKILL — so branding the first
+                # death a session crash bypassed the r-loop-6 host
+                # carve-out: one OOM burst terminally quarantined every
+                # in-flight validation and the 48h sweep then deleted the
+                # media (r-loop 9 #9). First death for a sid: host-suspect
+                # (cooldown + retry). Second death for the SAME sid: bytes
+                # that reproducibly kill the decoder — terminal, as
+                # before. The marker event is VALIDATING->VALIDATING so
+                # the stint-based stuck list keeps aging the row (the
+                # anchor only moves on events OUTSIDE the retry set).
+                marker = "validation worker died (host-suspect)"
+                prior = led.db.execute(
+                    "SELECT COUNT(*) c FROM events WHERE session_id=? "
+                    "AND to_state='VALIDATING' AND detail=?",
+                    (sid, marker)).fetchone()["c"]
+                if prior == 0:
+                    led.set_state(sid, "VALIDATING", marker)
+                    self.cool.set(sid, C.CONT_RUNNER_CRASH_RETRY_MIN * 60)
+                    self.alerts.alert(
+                        f"validation worker died on {sid} (host-suspect: "
+                        f"OOM/SIGKILL, will retry once): the machine, "
+                        f"not necessarily the session")
+                    return None
                 res = {"sid": sid,
-                       "error": "validation worker died (native crash "
-                                "decoding this session)"}
+                       "error": "validation worker died twice (native "
+                                "crash decoding this session)"}
         # TRUE climbs only: the worker echoes max(injected, climbed)
         # (run.py:129), so comparing against the CURRENT driver rung let a
         # stale in-flight job resurrect the rung right after a quiet-period
@@ -989,7 +1015,16 @@ class ContinuousDriver:
             out = deliver.deliver_session(self.cfg, led, sid,
                                           dest_prefix=self.dest_prefix)
         except (OSError, sqlite3.OperationalError,
-                subprocess.TimeoutExpired) as e:
+                subprocess.TimeoutExpired,
+                subprocess.CalledProcessError) as e:
+            # CalledProcessError (delivery lane ONLY — the fix-lane
+            # "session" classification is RULED, accepted item 11): the
+            # ~20% rrd-sampled sessions run rrd_creation.py in a child;
+            # its non-zero exit on ENOSPC/OOM/broken-pin is host-class for
+            # a fully-VALIDATED session — a HUNG rrd child was already
+            # host-classed one line up, and the terminal path hit during
+            # exactly the disk-low incident this carve-out documents
+            # (r-loop 9 #10).
             # HOST-level trouble is transient — do NOT quarantine. The
             # download lane was given exactly this treatment (review-r4
             # #3/#17) while delivery kept a bare `except Exception` that
