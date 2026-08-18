@@ -288,6 +288,12 @@ def probe_streams(video: Path) -> dict:
                                 "avg_frame_rate", "nb_frames", "sample_rate",
                                 "channels")})
     out["has_audio"] = any(s["codec_type"] == "audio" for s in out["streams"])
+    try:
+        # the container's REAL timeline — the sweep clamp's truth source
+        # (r-loop 12 #9)
+        out["duration_s"] = float(d.get("format", {}).get("duration") or 0)
+    except (TypeError, ValueError):
+        out["duration_s"] = 0.0
     return out
 
 
@@ -582,6 +588,12 @@ def classify_frames(gem: Gemini, grabber: FrameGrabber, game_title: str,
 def vlm_sweep(gem: Gemini, grabber: FrameGrabber, game_title: str,
               duration_s: float, interval: float, refine_step: float) -> dict:
     """Baseline sweep + boundary refinement. Returns samples + windows."""
+    # defense-in-depth (r-loop 12 #9): duration_s reaches here from a
+    # player-supplied claim (json.loads accepts Infinity/1e999) — the
+    # grid loop below otherwise walks it verbatim and pins the
+    # validation worker forever. The caller clamps to the probed
+    # timeline; this cap is the backstop for every caller.
+    duration_s = min(float(duration_s or 0), 86400.0)
     base = [0.3]
     t = 2.0
     while t < duration_s - 0.6:
@@ -1429,7 +1441,15 @@ def analyze(sdir: Path, raw_by_sid: dict, gem: Gemini | None,
     if gem is not None and grabber is not None:
         req0 = gem.requests
         try:
-            a.vlm = vlm_sweep(gem, grabber, a.game_title, a.duration_s,
+            # the sweep grid is clamped to the video's REAL timeline
+            # (r-loop 12 #9): a.duration_s is the player-supplied CLAIM
+            # (D2 already ruled it untrusted for the length gates), and
+            # an inf/huge claim otherwise pinned the worker forever in
+            # the grid loop — no driver bounds the worker.
+            probed_dur = float(a.video_probe.get("duration_s") or 0)
+            sweep_dur = min(a.duration_s, probed_dur) if probed_dur \
+                else a.duration_s
+            a.vlm = vlm_sweep(gem, grabber, a.game_title, sweep_dur,
                               interval, refine_step)
             a.vlm["requests"] = gem.requests - req0    # per-session count
             if not a.vlm["samples"]:

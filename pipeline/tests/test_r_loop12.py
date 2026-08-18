@@ -235,6 +235,66 @@ def test_edge_flags_on_a_long_clip_keep_their_fixable_cuts():
     assert all(r["fixable"] for r in reasons)
 
 
+# ------- r12 #9: the VLM sweep grid is clamped to the real timeline
+
+def test_vlm_sweep_grid_is_bounded_for_absurd_durations(monkeypatch):
+    """The grid loop walked the player-supplied duration claim verbatim
+    — json.loads accepts Infinity/1e999, and neither driver bounds the
+    validation worker: one such session pinned a runner slot forever."""
+    import signal
+    import types
+
+    from pipeline.validate import load_engine
+    az = load_engine()
+    seen: dict = {}
+
+    def fake_classify(gem, grabber, title, ts):
+        seen.setdefault("n", len(ts))
+        return []
+    monkeypatch.setattr(az, "classify_frames", fake_classify)
+
+    def alarm(*a):
+        raise TimeoutError("unbounded sweep grid")
+    old = signal.signal(signal.SIGALRM, alarm)
+    signal.alarm(20)
+    try:
+        az.vlm_sweep(types.SimpleNamespace(model="stub", requests=0),
+                     None, "Kamla", float("inf"), 4.0, 1.0)
+    finally:
+        signal.alarm(0)
+        signal.signal(signal.SIGALRM, old)
+    assert seen["n"] <= 86400 / 4.0 + 3, seen
+
+
+@needs_ffmpeg
+def test_analyze_clamps_the_sweep_to_the_probed_timeline(tmp_path,
+                                                         monkeypatch):
+    """The analyze site passes min(claimed, probed) — the D2 doctrine
+    (claimed duration is untrusted) applied to the sweep grid."""
+    import types
+
+    from pipeline.tests.test_fix_cut_gate import _make_session
+    from pipeline.validate import load_engine
+    az = load_engine()
+    d = _make_session(tmp_path, seconds=80, name="clamp")
+    s = json.loads((d / "session.json").read_text())
+    s["duration_seconds"] = 1e999
+    (d / "session.json").write_text(json.dumps(s))
+    seen: dict = {}
+
+    def fake_sweep(gem, grabber, title, duration_s, interval, refine_step):
+        seen["dur"] = duration_s
+        return {"samples": [{"t": 1.0, "label": "gameplay",
+                             "notif": False, "guess": "", "note": ""}],
+                "windows": [], "notif_ts": [], "chat_ts": [],
+                "combat_ts": [], "game_votes": {}, "model": "stub",
+                "requests": 0, "baseline_interval_s": interval,
+                "refine_step_s": refine_step}
+    monkeypatch.setattr(az, "vlm_sweep", fake_sweep)
+    az.analyze(d, {}, types.SimpleNamespace(requests=0), 4.0, 1.0)
+    assert seen["dur"] < 90.0, seen
+
+
 # ------- r12 #4: the DISCOVERED-media reclaim grace re-arms per reclaim
 
 def test_reclaim_grace_rearms_after_a_sweep(cfg, ledger):
