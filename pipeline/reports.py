@@ -309,17 +309,55 @@ def r_countable(root) -> bool:
 def _stamp(ledger: Ledger, sid: str, column: str, now: str,
            md5s: dict | None) -> bool:
     """One payment stamp, compare-and-set on the bytes the sheet counted
-    (r-loop 11 #7): when the snapshot carries this sid's md5, the stamp
-    lands only if the row still holds those bytes — a supersede/heal in
-    the stamp window (it spans Telegram sends) otherwise stamped the
-    RESET slot and stranded the corrected re-upload's hours off every
-    future sheet. No snapshot entry (or a NULL one — SQL NULL never
-    equals) keeps today's unconditional stamp."""
-    m = (md5s or {}).get(sid)
-    if m is None:
+    (r-loop 11 #7): when the snapshot carries this sid's REAL md5, the
+    stamp lands only if the row still holds those bytes — a supersede/
+    heal in the stamp window (it spans Telegram sends) otherwise stamped
+    the RESET slot and stranded the corrected re-upload's hours off
+    every future sheet.
+
+    '' is NOT a comparable identity (r-loop 12 #1/#2): it is the
+    UNKNOWABLE-md5 sentinel of zip payloads (r-loop 10 #4 — the heal
+    writes it while deliberately preserving the stamps, and the
+    download-time backfill replaces it with a real hash WITHOUT any byte
+    change). Treating '' as byte identity made the CAS falsely skip on
+    both sides of the sentinel and the SAME uploaded hours landed on two
+    sent sheets via the late-arrival re-entry — a silent double-pay, the
+    unrecoverable direction. So: a falsy snapshot stamps (unless the
+    download-time deferral has since adjudicated NEW bytes — its
+    supersede-style clear leaves a real md5 beside a NULL duration), and
+    a CAS miss against a row now holding '' stamps too (the deferral
+    adjudicates those bytes at download time and clears if they really
+    changed). Only a real-vs-real mismatch means "a clearing tool ran
+    here" and skips."""
+    if md5s is None or sid not in md5s:
+        # caller without a snapshot (tools, pre-r9 resume records, or a
+        # sid the map never recorded): the pre-r11 unconditional stamp
+        ledger.update(sid, **{column: now})
+        return True
+    m = md5s[sid]
+    if not m:
+        # the sheet COUNTED this sid with the '' sentinel. Stamp — unless
+        # the download-time deferral has since adjudicated NEW bytes
+        # (its clear ran: md5 backfilled real, duration gone) — then the
+        # sheet counted the old bytes.
+        row = ledger.get(sid)
+        if row is not None and row["md5_video"] and \
+                row["duration_raw_s"] is None:
+            print(f"[sheet-stamp] {sid}: bytes were unknowable at count "
+                  f"time and the download since proved them NEW — "
+                  f"{column} SKIPPED; the new hours stay countable",
+                  file=sys.stderr)
+            return False
         ledger.update(sid, **{column: now})
         return True
     if ledger.update_where_md5(sid, m, **{column: now}):
+        return True
+    row = ledger.get(sid)
+    if row is not None and not row["md5_video"]:
+        # a zip-class heal rewrote the md5 to the UNKNOWABLE sentinel
+        # while deliberately preserving the stamps — not byte-change
+        # evidence; the download-time prev_md5 deferral adjudicates
+        ledger.update(sid, **{column: now})
         return True
     print(f"[sheet-stamp] {sid}: bytes changed since the sheet counted "
           f"them (supersede/heal mid-send) — {column} SKIPPED; the new "

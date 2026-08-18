@@ -1090,9 +1090,16 @@ def _resume_daily_send(cfg: C.Config, ledger: Ledger, now_ist: datetime,
         state churn on an in-flight counted root never changes the md5,
         so it still stamps (an updated_at test would false-positive there
         and double-count — deviation recorded in plan §9 D5b). Records
-        without "md5" (pre-r9) stamp unconditionally."""
+        without "md5" (pre-r9) stamp unconditionally. Only a REAL-vs-REAL
+        mismatch counts (r-loop 12 #2): '' is the zip class's
+        UNKNOWABLE-md5 sentinel, written by the stamp-preserving heal and
+        replaced by the backfill without any byte change — reading it as
+        'changed' skipped the stamp and the same hours re-entered a
+        second sent sheet; the download-time prev_md5 deferral owns the
+        byte adjudication for that class."""
         rec_md5 = (rec.get("md5") or {}).get(sid)
-        return rec_md5 is not None and rows[sid]["md5_video"] != rec_md5
+        cur = rows[sid]["md5_video"]
+        return bool(rec_md5) and bool(cur) and cur != rec_md5
 
     counted_keep = []
     for sid in counted:
