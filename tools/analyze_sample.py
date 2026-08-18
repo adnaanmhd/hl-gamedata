@@ -220,8 +220,12 @@ def inventory(rows, col, fps: float, duration_ms: int) -> dict:
     ts_unparseable = 0
     for r in rows:
         try:
+            # OverflowError: '1e999'/'inf' floats fine and int() then
+            # raises — the class raw_int/_px were given in r-loops 8/9;
+            # this cast escaped and turned a typed FAIL into terminal
+            # QUARANTINED (r-loop 12 #10)
             ts.append(int(float(r[col["timestamp_ms"]])))
-        except (TypeError, ValueError, IndexError):
+        except (TypeError, ValueError, IndexError, OverflowError):
             ts_unparseable += 1
     for r in rows:
         ks = [t for t in (r[col["input_keys"]] or "").split("|") if t]

@@ -847,8 +847,17 @@ def check_session_v2(session_dir: Path, raw_bundle: Path | None = None) -> V2Res
     pts = V.frame_pts(session_dir / "video.mp4")
     r.checked.add("frame_sync")          # reached here == the check ran
     if pts and len(pts) == len(rows):
-        worst = max(abs(ts[i] - pts[i] / 1000.0) for i in range(len(rows)))
-        if worst > 100.0:
+        try:
+            worst = max(abs(ts[i] - pts[i] / 1000.0)
+                        for i in range(len(rows)))
+        except OverflowError:
+            # int() parses arbitrary-precision timestamp cells and
+            # bigint-minus-float converts to float — a '9'*400 cell
+            # raised OUT of the checker, destroying the typed verdict it
+            # had already recorded (degrade, never crash — r-loop 12 #10)
+            worst = None
+            r.fail("frame-sync: timestamp_ms values out of range")
+        if worst is not None and worst > 100.0:
             r.fail(f"frame-sync drift: worst row timestamp {worst:.0f}ms off real PTS")
     else:
         r.warn("cannot verify frame sync (PTS unreadable)")

@@ -295,6 +295,33 @@ def test_analyze_clamps_the_sweep_to_the_probed_timeline(tmp_path,
     assert seen["dur"] < 90.0, seen
 
 
+# ------- r12 #10: inventory's timestamp cast catches OverflowError
+
+@needs_ffmpeg
+def test_inf_timestamp_cell_does_not_crash_analyze(tmp_path):
+    """'1e999' floats to inf and int(inf) raised straight out of
+    inventory() — even when check_session_v2 had just produced the typed
+    FAIL whose designed route is a one-attempt automated repair, the
+    session went terminally QUARANTINED as 'validation crashed'."""
+    import csv as _csv
+
+    from pipeline.tests.test_fix_cut_gate import _make_session
+    from pipeline.validate import load_engine
+    az = load_engine()
+    d = _make_session(tmp_path, seconds=80, name="infts")
+    with (d / "frames.csv").open(newline="") as f:
+        rows = list(_csv.reader(f))
+    header, body = rows[0], rows[1:]
+    ti = header.index("timestamp_ms")
+    body[10][ti] = "1e999"
+    with (d / "frames.csv").open("w", newline="") as f:
+        w = _csv.writer(f)
+        w.writerow(header)
+        w.writerows(body)
+    a = az.analyze(d, {}, None, 4.0, 1.0)      # must not raise
+    assert not a.error, a.error
+
+
 # ------- r12 #4: the DISCOVERED-media reclaim grace re-arms per reclaim
 
 def test_reclaim_grace_rearms_after_a_sweep(cfg, ledger):
