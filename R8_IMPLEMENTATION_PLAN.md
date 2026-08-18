@@ -42,8 +42,8 @@ the first unchecked item.
 - [x] D7 refix tool per-piece payment memory (RULED C, Adnaan 2026-08-18) + pending-record interlock + lsf honesty (#1/#18, #7, #19) — fail-first 8/8; two named tests + the mixed-tree test rewritten per the ruling (surface to Adnaan); Mac 621 green
 - [x] D8 C8 leftovers (#13 parse-and-regex re-emit, #23 conv_other test) — fail-first 1/1 + 1/1 mutation-proof; Mac 623 green
 - [x] Post-D8: SUITE_FLOOR 619 pinned (run_suite.sh + FLIP_RUNBOOK §6b, commit 55cc759); gates green BOTH hosts at the D8 set — Mac 623 (96s), VM side checkout 623 (294s), both floor 619; tree-verify (diff/status/MUTATION) clean
-- [ ] Review iteration 10 (fix-in-iteration; quiet-judged; accepted-list additions 21–28 from §9)
-- [ ] Review iteration 11 (only if 10 not quiet) — if still not quiet: STOP, hand Adnaan the list
+- [x] Review iteration 10 RAN (2026-08-19, `tools/review/flip-review-iter10.js`, 41 agents, 0 errors) — 17 raised → 16 confirmed (0 blockers), 1 killed (R10_FINDINGS.md); ALL 16 FIXED IN-ITERATION (commit 6dd2e64: fail-first 13/13 behaviour + 5/5 mutation-pins); gates green BOTH hosts (Mac 641/117s, VM 641) at floor 619 → **QUIET per R5_TRIAGE §7**. Iteration 11 proceeds anyway by Adnaan's ruling (below)
+- [ ] Review iteration 11 — **RULED by Adnaan 2026-08-19: runs REGARDLESS of 10's quiet judgment, as a FULL DEEP review of the whole codebase PLUS the hunt for regressions from the iteration-10 fixes (6dd2e64 = prime suspect)** (supersedes §5's "stop at first quiet" for this one iteration). If 11 is not quiet: STOP, hand Adnaan the list
 - [ ] Independent REAL e2e verification (verdict relayed VERBATIM)
 - [ ] FLIP §5 canary (kill matrix, autoscale, digest; `_pipeline_test/` purged)
 - [ ] FLIP §6 (stop units → resize → deploy False-interlock → refix reset → arm → first hour)
