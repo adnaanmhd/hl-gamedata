@@ -93,6 +93,36 @@ def top_root_ctime(ledger, sid, cache):
     return cache.get(sid)
 
 
+def read_counted_record(path) -> tuple[list, list]:
+    """Load a .regen-v2-counted.json resume record -> (counted, accepted).
+
+    ONE reader for BOTH consumers. The record grew a second half when the
+    payment stamp split in two (RULED, Adnaan 2026-08-18): the two write
+    sites and the resume branch were taught the new shape and the
+    stray-stamp pre-check was not, so it took set() over a dict and got
+    the KEY NAMES back. No real root id was ever in `recorded`, every
+    cohort root the tool itself had stamped read as stray, and the payment
+    endgame hard-aborted with a false "CONT_DAILY_REPORTS interlock
+    breached?" diagnosis on every re-run — including the rc=3 telegram
+    retry the tool explicitly tells the operator to perform (r-loop 7
+    BLOCKER). A bare list is a pre-split record: its accepted side was
+    never stamped, so it reads as empty.
+    """
+    rec = json.loads(Path(path).read_text())
+    if isinstance(rec, dict):
+        return list(rec.get("counted", [])), list(rec.get("accepted", []))
+    return list(rec), []
+
+
+def write_counted_record(path, counted: list, accepted: list) -> None:
+    """Durable resume record, written atomically. Paired with
+    read_counted_record so the two can never drift apart again."""
+    tmp = Path(path).with_suffix(".tmp")
+    tmp.write_text(json.dumps({"counted": list(counted),
+                               "accepted": list(accepted)}))
+    tmp.replace(path)
+
+
 def cohort_reject_detail(ledger, lo_dt, hi_dt, cache, counted=None):
     """Rejected rows of trees whose ROOT uploaded in [lo, hi), PLUS the
     late arrivals the sheet's own columns counted. The stock section
@@ -219,7 +249,9 @@ def _locked_main(cfg) -> int:
     for day, _, _ in WINDOWS:
         p = cfg.reports_dir / day / ".regen-v2-counted.json"
         if p.exists():
-            recorded |= set(json.loads(p.read_text()))
+            # the gate tests ROOT ids against uploaded_reported_at, so the
+            # `counted` half is the right one to compare
+            recorded |= set(read_counted_record(p)[0])
     stray = []
     residual = []
     for r in ledger.db.execute(
@@ -316,12 +348,7 @@ def _locked_main(cfg) -> int:
             # the record carries BOTH marks since the RULED accepted/
             # uploaded split (Adnaan 2026-08-18); a bare list is a
             # pre-split record, whose accepted side was never stamped
-            rec = json.loads(counted_file.read_text())
-            if isinstance(rec, dict):
-                counted = rec.get("counted", [])
-                accepted = rec.get("accepted", [])
-            else:
-                counted, accepted = rec, []
+            counted, accepted = read_counted_record(counted_file)
             csv_path = day_dir / f"payment-{day}.csv"
             md_path = day_dir / f"payment-{day}.md"
             resumed = True
@@ -355,17 +382,11 @@ def _locked_main(cfg) -> int:
                 reports.mark_accepted_reported(ledger, accepted)
                 csv_path, md_path = pv_csv, pv_md
             else:
-                tmp = counted_file.with_suffix(".tmp")
-                tmp.write_text(json.dumps({"counted": counted,
-                                           "accepted": accepted}))
-                tmp.replace(counted_file)
+                write_counted_record(counted_file, counted, accepted)
 
         if send:
             if not counted_file.exists():
-                tmp = counted_file.with_suffix(".tmp")
-                tmp.write_text(json.dumps({"counted": counted,
-                                           "accepted": accepted}))
-                tmp.replace(counted_file)
+                write_counted_record(counted_file, counted, accepted)
             caption = (f"SUPERSEDES {day} sheet — methodology v2 "
                        f"(black-frozen recalibration). Old {day} sheet is "
                        f"VOID for payment; pay per this sheet.")

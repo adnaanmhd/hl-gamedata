@@ -17,6 +17,8 @@ test_reports_pace.py, which must keep passing unchanged).
 from __future__ import annotations
 
 import importlib.util
+import json
+import sys
 from datetime import datetime
 from pathlib import Path
 
@@ -276,14 +278,33 @@ def test_future_window_root_is_not_pulled_forward(tmp_path):
 
 def test_unknown_game_node_cannot_re_enter_forever(tmp_path):
     """A node in a game with no sheet column can never be counted, so it
-    must never be able to pull its root back onto every future sheet
-    either (the re-entry test filters exactly like the tree walk)."""
+    must never pull its root back onto every future sheet either.
+
+    Asserts the PREDICATE directly (r-loop 7): the old version only
+    checked that no row appeared, which the row-suppression rule
+    satisfies on its own — deleting the GAME_COL filter left the suite
+    green. A mapped, already-counted sibling makes the row non-empty if
+    the filter ever goes."""
     led = Ledger(tmp_path / "l.db")
     root = "2026-08-14T09-00-00Z_kamla_c_00000000000000f1"
     _put(led, root, state="SPLIT", raw=3600.0, player="unk@x.com")
     _put(led, f"{root}-p1", state="DELIVERED", parent=root, raw=1800.0,
          delivered=1700.0, player="unk@x.com", game="xonotic")
-    _sheet(led, W1)                       # root stamped uploaded
+    _put(led, f"{root}-p2", state="DELIVERED", parent=root, raw=1800.0,
+         delivered=1700.0, player="unk@x.com")
+    _sheet(led, W1)                       # root stamped; p2 counted
+    assert led.get(f"{root}-p2")["accepted_reported_at"]
+
+    rows = led.db.execute(
+        "SELECT session_id, game, state, parent_id, accepted_reported_at"
+        " FROM sessions").fetchall()
+    children: dict = {}
+    for r in rows:
+        if r["parent_id"]:
+            children.setdefault(r["parent_id"], []).append(r)
+    root_row = next(r for r in rows if r["session_id"] == root)
+    assert reports._tree_has_uncounted_accepted(root_row, children) is False
+
     assert _row(_sheet(led, W2), "unk@x.com") is None
     assert led.get(f"{root}-p1")["accepted_reported_at"] is None
     led.close()
@@ -311,23 +332,8 @@ def test_sheet_row_reject_labels_are_not_reprinted(tmp_path):
     led.close()
 
 
-def test_refix_reset_mirrors_the_uploaded_stamp(cfg, monkeypatch):
-    """recal_refix_reset: an UNREPORTED root is cleared so its re-run's
-    hours can be paid; an already-reported root is SEALED so the same
-    footage is not counted twice after its Drive II copy is replaced."""
+def _refix(cfg, monkeypatch):
     refix = _load("recal_refix_reset")
-    led = Ledger(cfg.ledger_path)
-    fixable = [{"code": "SYN_TS_NOT_PTS", "blocking": True,
-                "fixable": True, "params": {}, "evidence": "e"}]
-    for tag, stamped in (("g1", False), ("g2", True)):
-        sid = f"2026-08-14T09-00-0{tag[-1]}Z_kamla_c_00000000000000{tag}"
-        _put(led, sid, state="REJECTED", raw=3600.0, player=f"{tag}@x.com",
-             reasons=fixable)
-        led.update(sid, accepted_reported_at="2026-08-15T00:00:00+00:00")
-        if stamped:
-            led.update(sid, uploaded_reported_at="2026-08-15T00:00:00+00:00")
-    led.close()
-
     monkeypatch.setattr(refix, "rclone", lambda args: (0, ""))
 
     class _Args:
@@ -335,14 +341,92 @@ def test_refix_reset_mirrors_the_uploaded_stamp(cfg, monkeypatch):
         allow_reported = True
     assert refix._locked_main(cfg, _Args) == 0
 
+
+FIXABLE = [{"code": "SYN_TS_NOT_PTS", "blocking": True,
+            "fixable": True, "params": {}, "evidence": "e"}]
+
+
+def test_refix_seal_only_fires_where_hours_were_actually_counted(
+        cfg, monkeypatch):
+    """The seal exists for ONE job: this subtree is torn down and
+    re-delivered, so hours already on a SENT sheet must not be counted
+    twice. Keying it on the UPLOADED stamp was wrong (r-loop 7) — this
+    tool selects fix-failed REJECTED trees, which contributed accepted_hrs
+    0.00 to the sheet that stamped them, so the seal protected nothing and
+    permanently blocked the re-run's genuinely new hours. That is the loss
+    the split was written to close, on the very path that recovers the
+    08-16 recalibration's false-positive rejects."""
     led = Ledger(cfg.ledger_path)
     try:
-        got = {r["player_email"]: r["accepted_reported_at"] for r in
-               led.db.execute("SELECT player_email, accepted_reported_at "
+        # A: fix-failed root, uploaded-counted, NEVER paid an accepted hour
+        a = "2026-08-14T09-00-00Z_kamla_c_0000000000000ga1"
+        _put(led, a, state="REJECTED", raw=3600.0, player="unpaid@x.com",
+             reasons=FIXABLE)
+        led.update(a, uploaded_reported_at="2026-08-15T00:00:00+00:00",
+                   accepted_reported_at="2026-08-15T00:00:00+00:00")
+        # B: root whose DELIVERED child WAS counted — real double-pay risk
+        b = "2026-08-14T09-00-00Z_kamla_c_0000000000000gb1"
+        _put(led, b, state="SPLIT", raw=3600.0, player="paid@x.com")
+        _put(led, f"{b}-p1", state="DELIVERED", parent=b, raw=1800.0,
+             delivered=1700.0, player="paid@x.com")
+        led.update(f"{b}-p1",
+                   accepted_reported_at="2026-08-15T00:00:00+00:00")
+        _put(led, f"{b}-p2", state="REJECTED", parent=b, raw=1800.0,
+             player="paid@x.com", reasons=FIXABLE)
+        led.update(b, uploaded_reported_at="2026-08-15T00:00:00+00:00")
+        # C: root with a DELIVERED child that was NEVER counted
+        c = "2026-08-14T09-00-00Z_kamla_c_0000000000000gc1"
+        _put(led, c, state="SPLIT", raw=3600.0, player="uncounted@x.com")
+        _put(led, f"{c}-p1", state="DELIVERED", parent=c, raw=1800.0,
+             delivered=1700.0, player="uncounted@x.com")
+        _put(led, f"{c}-p2", state="REJECTED", parent=c, raw=1800.0,
+             player="uncounted@x.com", reasons=FIXABLE)
+        led.update(c, uploaded_reported_at="2026-08-15T00:00:00+00:00")
+    finally:
+        led.close()
+
+    _refix(cfg, monkeypatch)
+
+    led = Ledger(cfg.ledger_path)
+    try:
+        got = {r["session_id"]: r["accepted_reported_at"] for r in
+               led.db.execute("SELECT session_id, accepted_reported_at "
                               "FROM sessions")}
-        assert got["g1@x.com"] is None, \
-            "unreported root must re-open for payment"
-        assert got["g2@x.com"], "already-reported root must stay sealed"
+        assert got[a] is None, \
+            "a tree that was never paid an accepted hour must re-open"
+        assert got[b], \
+            "a tree with counted DELIVERED hours must stay sealed"
+        assert got[c] is None, \
+            "an uncounted DELIVERED child is not a reason to seal"
+    finally:
+        led.close()
+
+
+def test_refix_reopened_tree_is_paid_exactly_once(cfg, monkeypatch):
+    """End of the chain: the re-run's delivered hours must actually reach
+    a sheet, once. This is the property the wrong seal destroyed."""
+    led = Ledger(cfg.ledger_path)
+    root = "2026-08-14T09-00-00Z_kamla_c_0000000000000gd1"
+    try:
+        _put(led, root, state="REJECTED", raw=3600.0, player="recov@x.com",
+             reasons=FIXABLE)
+        led.update(root, uploaded_reported_at="2026-08-15T00:00:00+00:00",
+                   accepted_reported_at="2026-08-15T00:00:00+00:00")
+    finally:
+        led.close()
+
+    _refix(cfg, monkeypatch)
+
+    led = Ledger(cfg.ledger_path)
+    try:
+        # the re-run delivers
+        led.update(root, duration_delivered_s=3400.0,
+                   delivered_at="2026-08-15T10:00:00+00:00")
+        led.set_state(root, "DELIVERED")
+        s2 = _row(_sheet(led, W2), "recov@x.com")
+        assert s2 is not None, "recovered footage never reached a sheet"
+        assert s2["kamla_accepted_hrs"] == 0.94
+        assert _row(_sheet(led, W3), "recov@x.com") is None   # once
     finally:
         led.close()
 
@@ -379,3 +463,118 @@ def test_accepted_mark_is_written_by_the_daily_send_before_the_anchor(
     assert seen == [False], "accepted stamp must precede the anchor write"
     assert ledger.get(sid)["accepted_reported_at"]
     assert ledger.get(sid)["uploaded_reported_at"]
+
+
+# ------------------------------- r-loop 7: the gaps mutation testing found
+
+def test_regen_resume_record_round_trips_through_the_real_writer(cfg):
+    """BLOCKER (r-loop 7). The split gave the durable resume record a
+    second half. Both write sites and the resume branch learned the new
+    shape; the stray-stamp PRE-CHECK did not, and `set()` over a dict
+    yields the KEY NAMES — so no real root id was ever in `recorded`,
+    every cohort root the tool itself stamped read as stray, and the
+    payment endgame hard-aborted with a false "interlock breached"
+    diagnosis on every re-run, including the rc=3 telegram retry the tool
+    tells the operator to perform. Tested against the REAL writer, never a
+    hand-built shape."""
+    regen = _load("recal_regen_sheets")
+    day_dir = cfg.reports_dir / "2026-08-15"
+    day_dir.mkdir(parents=True, exist_ok=True)
+    rec = day_dir / ".regen-v2-counted.json"
+
+    regen.write_counted_record(rec, ["root-a", "root-b"], ["root-a-p1"])
+    counted, accepted = regen.read_counted_record(rec)
+    assert counted == ["root-a", "root-b"], counted
+    assert accepted == ["root-a-p1"], accepted
+    # the pre-check compares ROOT ids against uploaded_reported_at
+    assert set(counted) == {"root-a", "root-b"}
+    assert "counted" not in set(counted) and "accepted" not in set(counted)
+
+    # a pre-split bare-list record still loads
+    rec.write_text(json.dumps(["root-c"]))
+    assert regen.read_counted_record(rec) == (["root-c"], [])
+
+
+def test_regen_rerun_after_a_send_does_not_false_abort(cfg, monkeypatch):
+    """The end-to-end property: once a day has been sent and its roots
+    stamped, re-running the tool must NOT read those roots as stray."""
+    regen = _load("recal_regen_sheets")
+    led = Ledger(cfg.ledger_path)
+    sids = []
+    try:
+        for i in range(3):
+            sid = f"2026-08-14T1{i}-00-00Z_kamla_c_0000000000000r{i}a"
+            sids.append(sid)
+            _put(led, sid, state="DELIVERED",
+                 ctime=f"2026-08-14T1{i}:00:00.000Z", raw=3600.0,
+                 delivered=3400.0, player="regen@x.com")
+            # exactly what a completed --send leaves behind
+            led.update(sid, uploaded_reported_at="2026-08-15T00:00:00+00:00",
+                       accepted_reported_at="2026-08-15T00:00:00+00:00")
+    finally:
+        led.close()
+    day_dir = cfg.reports_dir / "2026-08-15"
+    day_dir.mkdir(parents=True, exist_ok=True)
+    regen.write_counted_record(day_dir / ".regen-v2-counted.json",
+                               sids, sids)
+    (day_dir / ".regen-v2-done").write_text("done")
+
+    monkeypatch.setattr(sys, "argv", ["recal_regen_sheets.py"])   # preview
+    rc = regen._locked_main(cfg)
+    assert rc == 0, "re-run false-aborted on roots the tool itself stamped"
+
+
+def test_rebuild_reset_clears_the_accepted_mark(cfg, monkeypatch):
+    """Untested until r-loop 7: deleting the reset left the suite green,
+    and a stale root-level mark is read as a whole-tree SEAL."""
+    reset = _load("recal_rebuild_reset")
+    led = Ledger(cfg.ledger_path)
+    sid = "2026-08-14T09-00-00Z_kamla_c_0000000000000rr1"
+    try:
+        _put(led, sid, state="DELIVERED", raw=3600.0, delivered=3400.0,
+             player="rb@x.com")
+        led.update(sid, uploaded_reported_at="2026-08-15T00:00:00+00:00",
+                   accepted_reported_at="2026-08-15T00:00:00+00:00")
+    finally:
+        led.close()
+    parachute = cfg.home / "parachute.db"
+    parachute.write_bytes(b"x" * 2048)      # the tool requires >= 1 KiB
+    # main() builds its own Config via C.load(); point that at the test
+    # home so this can never reach a real ~/hl-pipeline
+    monkeypatch.setenv("HL_PIPELINE_HOME", str(cfg.home))
+    monkeypatch.setattr(sys, "argv",
+                        ["recal_rebuild_reset.py", "--yes",
+                         "--backup", str(parachute)])
+    assert reset.main() == 0
+    led = Ledger(cfg.ledger_path)
+    try:
+        row = led.get(sid)
+        assert row["accepted_reported_at"] is None
+        assert row["uploaded_reported_at"] is None
+    finally:
+        led.close()
+
+
+def test_quarantine_heal_clears_the_accepted_mark(cfg, ledger, monkeypatch):
+    """The path-heal is a FRESH-upload event and resets the slot exactly
+    like supersede. Untested until r-loop 7; without it the healed
+    re-upload's delivered hours are sealed out of every sheet."""
+    from pipeline import ingest
+    from pipeline.tests.conftest import make_session_entries
+    sid = "2026-08-14T10-00-00Z_kamla_c_0123456789abcdef"
+    ledger.insert_session(
+        session_id=sid, game="kamla", operator_email="op@x.com",
+        player_email="p1@x.com", drive_path="kamla/BADPATH",
+        drive_ctime="2026-08-14T10:00:00.000Z", md5_video="old",
+        bytes_=1, state="DISCOVERED")
+    ledger.set_state(sid, "QUARANTINED")
+    ledger.update(sid, uploaded_reported_at="2026-08-15T00:00:00+00:00",
+                  accepted_reported_at="2026-08-15T00:00:00+00:00")
+    entries = make_session_entries(sid=sid)
+    monkeypatch.setattr(ingest, "list_drive", lambda _c: entries)
+    ingest.scan(cfg, ledger, entries)
+    row = ledger.get(sid)
+    assert row["state"] == "DISCOVERED", row["state"]
+    assert row["accepted_reported_at"] is None
+    assert row["uploaded_reported_at"] is None
+

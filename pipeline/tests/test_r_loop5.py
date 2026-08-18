@@ -146,12 +146,24 @@ def test_stuck_list_names_a_DISCOVERED_row_that_holds_media(cfg, ledger):
 
     _seed_disc(ledger, "s-loud")
     (cfg.work / "s-loud").mkdir(parents=True)
+    # BYTES, not just a dir (r-loop 7): ingest.download mkdirs work/<sid>
+    # BEFORE the first rclone attempt, so an empty dir is what a download
+    # that transferred NOTHING leaves behind. The cap already scored it as
+    # 0 media; labelling it DISCOVERED(media) in the digest sent an
+    # operator hunting for disk that was never used. The condition this
+    # surface exists for is a row HOLDING bytes.
+    (cfg.work / "s-loud" / "video.mp4").write_bytes(b"x" * 16)
     _age_discovered_event(ledger, "s-loud", C.CONT_STUCK_H + 5)
+
+    _seed_disc(ledger, "s-empty")               # dir, but zero bytes
+    (cfg.work / "s-empty").mkdir(parents=True)
+    _age_discovered_event(ledger, "s-empty", C.CONT_STUCK_H + 5)
 
     lines, _n = drv._stuck_lines(ledger)
     text = " ".join(lines)
     assert "s-loud" in text
     assert "s-quiet" not in text
+    assert "s-empty" not in text
 
 
 # ------------------------------ the gate must survive every cut-bearing plan

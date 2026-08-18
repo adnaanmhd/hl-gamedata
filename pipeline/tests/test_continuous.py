@@ -1186,8 +1186,26 @@ def test_run_continuous_cli_smoke(tmp_path):
             # the test green for a completely broken worker (r-loop 2).
             # A garbage payload must reach a REAL verdict: fixable ->
             # budget burned -> REJECTED (or HOLD_VLM if a sweep was owed).
-            assert row["state"] in ("REJECTED", "HOLD_VLM"), \
+            #
+            # FIX_QUEUED is admitted ONLY with the host-level diagnosis on
+            # the row (r-loop 7). This env sets PATH=/usr/bin:/bin, so
+            # ffmpeg genuinely is not installed and the fix step raises
+            # FileNotFoundError — a HOST fault, not the session's. The
+            # driver now refunds the attempt and parks the row instead of
+            # spending both attempts on a missing binary and rejecting the
+            # player's footage under the bare fix-failed marker. A row
+            # that stalls in FIX_QUEUED WITHOUT that diagnosis is still a
+            # failure of this test.
+            assert row["state"] in ("REJECTED", "HOLD_VLM", "FIX_QUEUED"), \
                 (sid, row["state"], proc.stdout[-3000:], proc.stderr[-2000:])
+            if row["state"] == "FIX_QUEUED":
+                host = led.db.execute(
+                    "SELECT COUNT(*) n FROM events WHERE session_id=? AND "
+                    "detail LIKE '%host-level fix failure%'",
+                    (sid,)).fetchone()["n"]
+                assert host > 0, \
+                    ("parked in FIX_QUEUED with no host diagnosis",
+                     sid, proc.stdout[-3000:])
             n = led.db.execute(
                 "SELECT COUNT(*) n FROM events WHERE session_id=?",
                 (sid,)).fetchone()["n"]

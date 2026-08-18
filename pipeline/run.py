@@ -523,7 +523,7 @@ def _fix_phase(cfg, ledger, sids, alerts, *, workers: int,
                              f"attempt {row['fix_attempts'] + 1}")
             reasons = json.loads(row["reasons_json"] or "[]")
             work = cfg.work / sid
-            has_raw = (work / "raw" / "inputs.jsonl").exists()
+            has_raw = fix.has_raw_sidecars(work)
             # Resolve the reroute target BEFORE planning (r-loop 5).
             # row["game"] is the DRIVE-FOLDER game -- the very value
             # STR_GAME_MISMATCH says is wrong -- and plan_fixes branches on
@@ -572,6 +572,19 @@ def _fix_phase(cfg, ledger, sids, alerts, *, workers: int,
                 # Any cut artifacts from THIS plan are rescinded with it
                 # (review-r4 #5/#19)
                 _discard_split_artifacts(cfg, ledger, sid)
+                if out.get("kind") == "host":
+                    # host-level, not the session: refund the attempt and
+                    # leave the row queued. Same carve-out the continuous
+                    # driver applies; the rollback path must not re-expose
+                    # the r-loop-7 blocker (a disk-full episode burning
+                    # both attempts and rejecting under fix-failed).
+                    ledger.update(sid, fix_attempts=row["fix_attempts"])
+                    ledger.set_state(sid, "FIX_QUEUED",
+                                     f"host-level fix failure — retrying: "
+                                     f"{out['error']}"[:300])
+                    _alert(cfg, f"fix hit a host-level error on {sid} "
+                                f"(will retry): {out['error']}", alerts)
+                    continue
                 ledger.set_state(sid, "REVALIDATING",
                                  f"fix failed: {out['error']}"[:300])
                 continue
@@ -668,7 +681,7 @@ def _deliver_phase(cfg, ledger, sids, alerts,
             r = ledger.get(sid)
             # the gate failures BECOME the reasons, so the fix pass has a
             # real plan to work from (review finding #2)
-            has_raw = (cfg.work / sid / "raw" / "inputs.jsonl").exists()
+            has_raw = fix.has_raw_sidecars(cfg.work / sid)
             reasons = map_gate_failures(out.gate_fails or [],
                                         has_raw=has_raw)
             if reasons:

@@ -230,6 +230,7 @@ def _locked_main(cfg, args) -> int:
     # 2) filesystem + DB, per root
     reset = 0
     deleted = 0
+    sealed_roots: list = []
     for root, kids, _moves in plan:
         row = ledger.get(root)
         for sid in [root] + kids:
@@ -263,24 +264,31 @@ def _locked_main(cfg, args) -> int:
         # superseded-refix-*/ so the first copy is gone from Drive II.
         # (ledger.supersede clears it correctly, because there the md5 is
         # new and the hours genuinely are new.)
-        # accepted_reported_at MIRRORS the uploaded stamp (RULED split,
-        # Adnaan 2026-08-18). Unreported root (the flip case —
-        # recal_rebuild_reset nulled the whole cohort): clear it, so the
-        # re-run's genuinely new delivered hours reach a sheet; the root's
-        # old value is a leftover from having been REJECTED, and left in
-        # place it would seal the re-run out of every future sheet.
-        # Already-reported root (--allow-reported): SEAL the tree, which
-        # reproduces the preserved-uploaded-stamp doctrine on the accepted
-        # side — this root's subtree is torn down and re-delivered, and
-        # without the seal the same footage would be counted a second time
-        # on a later sheet. Nothing is paid twice either way; the sheet of
-        # record and Drive II disagree until reconciled.
+        # accepted_reported_at: SEAL the tree only when accepted hours
+        # were actually COUNTED for it (RULED split, Adnaan 2026-08-18;
+        # corrected r-loop 7). The seal exists for one job — this subtree
+        # is torn down and re-delivered, so hours already ON A SENT SHEET
+        # must not be counted a second time. Keying it on the UPLOADED
+        # stamp was wrong: this tool selects fix-failed REJECTED trees,
+        # which contributed accepted_hrs 0.00 to the sheet that stamped
+        # them, so the seal protected nothing and permanently blocked the
+        # re-run's genuinely new delivered hours from every future sheet —
+        # exactly the loss the split was written to close, on the one path
+        # that recovers the 08-16 recalibration's false-positive rejects.
+        # A REJECTED node carrying an accepted mark had its LABELS counted,
+        # not its hours, so it does not seal either.
+        paid_nodes = [s for s in [root] + kids
+                      if (n := ledger.get(s)) is not None
+                      and n["state"] == "DELIVERED"
+                      and n["accepted_reported_at"]]
+        if paid_nodes:
+            sealed_roots.append({"root": root, "paid_nodes": paid_nodes})
         ledger.db.execute(
             "UPDATE sessions SET state='DISCOVERED', bin=NULL,"
             " reasons_json='[]', fix_attempts=0, duration_delivered_s=NULL,"
             " rrd_sampled=0, delivered_at=NULL, accepted_reported_at=?,"
             " updated_at=? WHERE session_id=?",
-            (now if row["uploaded_reported_at"] else None, now, root))
+            (now if paid_nodes else None, now, root))
         ledger.db.execute(
             "INSERT INTO events(session_id, ts, from_state, to_state,"
             " detail) VALUES(?,?,?,?,?)",
@@ -295,6 +303,11 @@ def _locked_main(cfg, args) -> int:
         deleted += len(kids)
     ledger.db.commit()
     print(json.dumps({"roots_reset": reset, "subtree_rows_deleted": deleted,
+                      # sealed = accepted hours already on a SENT sheet for
+                      # this tree; its re-delivered hours are deliberately
+                      # NOT counted again, so sheet and Drive II disagree
+                      # until a human reconciles them
+                      "sealed_roots": sealed_roots,
                       "drive_dirs_moved": moved,
                       "superseded_refix_prefix":
                           f"superseded-refix-{stamp}/",

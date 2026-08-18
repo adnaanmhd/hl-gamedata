@@ -25,7 +25,7 @@ from . import rrd
 from . import sync
 from . import trim as trimmod
 from . import video as V
-from .binner import C2W_COLS, CAMERA_COLS, bin_session
+from .binner import C2W_COLS, CAMERA_COLS, bin_session, raw_int
 from .keybind import (bound_literals, build_resolver, collapse_ambiguous_runs,
                       invert_keybind, resolve_actions)
 from .keybinds import (AMBIGUOUS_PAIRS, CONTEXT_ALLOWED, KEYBINDS,
@@ -912,8 +912,10 @@ def _verify_against_raw(session_dir: Path, raw_bundle: Path, s: dict,
         t = int(e["t"] - head_us)
         f = max(bisect_right(pts, t) - 1, 0)
         if f < len(rows):
-            dx[f] += int(e.get("dx", 0) or 0)
-            dy[f] += int(e.get("dy", 0) or 0)
+            # same coercion the binner uses — a malformed dx/dy must
+            # DEGRADE to 0, never raise out of the checker (r-loop 7)
+            dx[f] += raw_int(e.get("dx"))
+            dy[f] += raw_int(e.get("dy"))
             n_events += 1
     mismatch_idx = [
         i for i, x in enumerate(rows)

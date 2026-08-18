@@ -68,7 +68,10 @@ def normalize_event_key(raw: str, *, bound: frozenset[str] = frozenset(),
     Drops: control bytes, unknown vk_### codes, and (unless bound in the
     session keybind) OS/system + lock + F keys.
     """
-    if raw is None:
+    if not isinstance(raw, str):
+        # a numeric or container key code from a hand-edited/foreign-tool
+        # sidecar raised AttributeError straight out of bin_session
+        # (r-loop 7); None is the same answer an unrecognised key gets
         return None
     s = raw.strip().lower()
     if not s:

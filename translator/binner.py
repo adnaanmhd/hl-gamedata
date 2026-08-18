@@ -63,6 +63,25 @@ def _resolve_bleed(keyset: set[str], bound: frozenset[str], f_idx: int,
     return out
 
 
+def raw_int(v) -> int:
+    """Coerce ONE untrusted inputs.jsonl numeric field.
+
+    DEGRADE, never crash — the same contract the line-level parse and the
+    CSV cells already honour. A bare `int(v or 0)` raised ValueError on a
+    stringified number ("1.0"), a word, or a list, and TypeError on a
+    container: out of check_session_v2 into the driver, which writes
+    QUARANTINED "validation crashed" (TERMINAL, media held 48 h, manual
+    queue) for a session that would otherwise have PASSed — and out of
+    bin_session, so every retranslate fix failed too and the session was
+    rejected under the bare fix-failed marker (r-loop 7). A malformed
+    value contributes 0 motion, which the raw-vs-CSV comparison then sees
+    as an ordinary mismatch and reports honestly."""
+    try:
+        return int(float(v or 0))
+    except (TypeError, ValueError):
+        return 0
+
+
 def bin_session(events: list[dict], video, keybind: dict, rules, bound: frozenset[str],
                 *, aggressive: bool = True,
                 frame_pts_us: list[int] | None = None) -> tuple[list[list], BinStats]:
@@ -133,7 +152,9 @@ def bin_session(events: list[dict], video, keybind: dict, rules, bound: frozense
             else:
                 keys_down.discard(k)
         elif et == "mouse_button":
-            b = K.MOUSE_BUTTONS.get((e.get("button") or "").strip().lower())
+            btn = e.get("button")
+            b = K.MOUSE_BUTTONS.get(btn.strip().lower()) \
+                if isinstance(btn, str) else None
             if not b:
                 continue
             btns_in[f].add(b)
@@ -143,8 +164,8 @@ def bin_session(events: list[dict], video, keybind: dict, rules, bound: frozense
                 btns_down.discard(b)
         else:  # mouse_raw
             has_raw = True
-            dx_sum[f] += int(e.get("dx", 0) or 0)
-            dy_sum[f] += int(e.get("dy", 0) or 0)
+            dx_sum[f] += raw_int(e.get("dx"))
+            dy_sum[f] += raw_int(e.get("dy"))
 
     flush(n)
     stats.has_mouse_motion = has_raw and any(dx_sum[i] or dy_sum[i] for i in range(n))

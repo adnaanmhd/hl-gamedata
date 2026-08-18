@@ -18,6 +18,7 @@ import importlib.util
 import json
 import os
 import shutil
+import sqlite3
 import subprocess
 import sys
 from datetime import datetime, timedelta, timezone
@@ -63,6 +64,36 @@ class FixFailed(Exception):
     pass
 
 
+def has_raw_sidecars(work: Path) -> bool:
+    """BOTH sidecars — the condition retranslate_from_sidecars actually
+    needs (it opens raw/metadata.json unconditionally).
+
+    validate.validate_session already required both; the two drivers
+    tested only inputs.jsonl, so a zip upload missing metadata.json was
+    planned a FIX_RETRANSLATE that raised FileNotFoundError on both
+    attempts and was REJECTED "fix retries exhausted" — while every code
+    in that group has a working CSV-level fallback. This is also the
+    settled gray-zone rule ("sidecars missing: raw-needing fixes fall
+    back to CSV-level") being silently violated (r-loop 7)."""
+    raw = Path(work) / "raw"
+    return (raw / "inputs.jsonl").exists() and (raw / "metadata.json").exists()
+
+
+def _read_session_json(work: Path) -> dict:
+    """session.json as a dict, or {} when it is unreadable/not an object.
+
+    Player-supplied and reachable in every broken shape the checker FAILs
+    on. Returning {} lets FIX_SESSIONJSON_REWRITE rebuild it from video +
+    CSV ground truth instead of raising inside the fix that exists to
+    repair it (r-loop 7)."""
+    try:
+        s = json.loads((work / "session.json").read_text(
+            encoding="utf-8", errors="replace"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        return {}
+    return s if isinstance(s, dict) else {}
+
+
 # --------------------------------------------------------------- fix plan
 
 def plan_fixes(reasons: list[dict], *, game: str, has_raw: bool) -> dict:
@@ -73,6 +104,7 @@ def plan_fixes(reasons: list[dict], *, game: str, has_raw: bool) -> dict:
     steps: list[tuple[str, dict]] = []
     unfixable: list[str] = []
     retranslate = False
+    sj_rewrite = False
     cut_windows: list[tuple[float, float]] = []
     gate_windows: list[tuple[float, float]] = []
     head_cut: float | None = None
@@ -144,13 +176,27 @@ def plan_fixes(reasons: list[dict], *, game: str, has_raw: bool) -> dict:
                 head_cut = max(head_cut or 0.0, t + 1.0)
             else:
                 tail_cut = min(tail_cut or 1e9, t - 1.0)
-        elif code in ("STR_SJ_INVALID", "STR_HEADER_BAD",
-                      "STR_CAMERA_NONNULL", "STR_SENTINELS", "STR_TS_TAIL"):
+        elif code == "STR_SJ_INVALID":
+            # NEVER route this through the retranslate, sidecars or not
+            # (r-loop 7). retranslate_from_sidecars READS session.json for
+            # the head offset (`created_at_utc` minus the raw metadata's
+            # `started_at_utc`), so the fix depends on the very artifact
+            # the FAIL says is broken: it raised identically on both
+            # attempts and the session was REJECTED "fix retries
+            # exhausted" under the bare fix-failed marker, while the
+            # no-sidecar plan cleared the same FAIL in ONE attempt. Having
+            # the required raw sidecars made a session strictly worse off.
+            # FIX_SESSIONJSON_REWRITE rebuilds session.json from video +
+            # CSV ground truth and is emitted BEFORE any retranslate, so
+            # a session that needs both gets its precondition repaired
+            # first instead of crashing on it.
+            sj_rewrite = True
+        elif code in ("STR_HEADER_BAD", "STR_CAMERA_NONNULL",
+                      "STR_SENTINELS", "STR_TS_TAIL"):
             if has_raw:
                 retranslate = True
             else:
                 csv_fixes.append({
-                    "STR_SJ_INVALID": ("FIX_SESSIONJSON_REWRITE", {}),
                     "STR_HEADER_BAD": ("FIX_HEADER_REWRITE", {}),
                     "STR_CAMERA_NONNULL": ("FIX_CAMERA_NULL", {}),
                     "STR_SENTINELS": ("FIX_SENTINELS", {}),
@@ -168,6 +214,10 @@ def plan_fixes(reasons: list[dict], *, game: str, has_raw: bool) -> dict:
     if reroute:
         steps.append(("FIX_REROUTE_GAME", {"actual": reroute_actual}))
         retranslate = has_raw or retranslate
+    if sj_rewrite:
+        # BEFORE the retranslate, and NOT part of csv_fixes, so the
+        # supersede below cannot drop the step the retranslate depends on
+        steps.append(("FIX_SESSIONJSON_REWRITE", {}))
     if retranslate and has_raw:
         steps.append(("FIX_RETRANSLATE", {}))
         csv_fixes = []                    # superseded by the re-translate
@@ -314,6 +364,7 @@ def apply_fixes(work_dir: Path, plan: dict, *, game: str,
     applied: list[dict] = []
     children = None
     error = None
+    kind = None
     for fix_id, params in plan["steps"]:
         try:
             note = _dispatch(fix_id, params, work_dir, game,
@@ -332,11 +383,28 @@ def apply_fixes(work_dir: Path, plan: dict, *, game: str,
                             "ok": True, "note": note})
         except Exception as e:
             error = f"{fix_id}: {type(e).__name__}: {e}"
+            # HOST-level vs SESSION-level, the same split run._validate_worker
+            # makes (run.py:179). The fix lane was the last one without it:
+            # every failure burned an attempt, so one disk-full or
+            # wedged-ffmpeg episode spent BOTH attempts back to back and
+            # terminally rejected the session — under the bare fix-failed
+            # marker, because the stored reasons are all still fixable, so
+            # an infrastructure failure was reported to the player as a
+            # fault in their footage (r-loop 7 BLOCKER).
+            #
+            # CalledProcessError is deliberately NOT host: ffmpeg exiting
+            # non-zero is usually the SESSION's bytes being undecodable,
+            # and treating that as a host condition would retry a
+            # genuinely broken clip forever instead of rejecting it.
+            kind = "host" if isinstance(
+                e, (OSError, MemoryError, sqlite3.OperationalError,
+                    subprocess.TimeoutExpired)) else "session"
             applied.append({"fix": fix_id, "params": _jsonable(params),
                             "ok": False, "note": str(e)[:300]})
             break
     _append_fixlog(dossier_dir, applied)
-    return {"applied": applied, "children": children, "error": error}
+    return {"applied": applied, "children": children, "error": error,
+            "kind": kind}
 
 
 def _jsonable(p):
@@ -472,10 +540,48 @@ def _propagate_gate_record(parent_dossier: Path, dossier_root: Path,
         sid = seg.get("id")
         if not sid:
             continue
+        # ONLY the segment that actually contains the gated window
+        # (r-loop 7). cutter._cut_loop gives each child its own row slice
+        # (`rows[i0:i0 + m]`), so the blanked rows land in exactly ONE
+        # segment — the docstring's "cutter copies the blanked rows into
+        # every child verbatim" is false. Handing the record to a sibling
+        # whose rows were never touched let validate._gate_destroyed
+        # downgrade that sibling's GENUINE CNT_ACTIONS_FEW /
+        # INP_KEYS_MISSING to an advisory, so a segment with 2 distinct
+        # actions and zero key frames shipped — violating two locked
+        # delivery bars — under two operator advisories that were false
+        # statements about it. Accepted behaviour #6 permits shipping
+        # under the bar only when restoring what the gate destroyed would
+        # clear it; here it destroyed nothing in that segment, so the
+        # "only when" guard is exactly what was broken.
+        mine = [e for e in gate_entries
+                if _gate_entry_touches(e, seg.get("t0"), seg.get("t1"))]
+        if not mine:
+            continue
         try:
-            _append_fixlog(dossier_root / sid, gate_entries)
+            _append_fixlog(dossier_root / sid, mine)
         except OSError:
             pass
+
+
+def _gate_entry_touches(entry: dict, t0, t1) -> bool:
+    """Does a gate entry's blanked span overlap [t0, t1) on the parent
+    clock? Unknown or unreadable bounds propagate (today's behaviour) —
+    a record must never be dropped silently, only withheld from a segment
+    proved not to contain it."""
+    if t0 is None or t1 is None:
+        return True
+    windows = (entry.get("params") or {}).get("windows") or []
+    if not windows:
+        return True
+    for w in windows:
+        try:
+            a, b = float(w[0]), float(w[1])
+        except (TypeError, ValueError, IndexError, KeyError):
+            return True
+        if a < float(t1) and b > float(t0):
+            return True
+    return False
 
 
 def _propagate_shift_record(parent: Path, children: list[Path]) -> None:
@@ -581,8 +687,8 @@ def retranslate_from_sidecars(work: Path, *,
     # see translator/v2.py: player-typed free text, non-UTF-8 reachable
     meta = json.loads((raw / "metadata.json").read_text(
         encoding="utf-8", errors="replace"))
-    s = json.loads((work / "session.json").read_text())
-    game_info = meta.get("game", {})
+    s = _read_session_json(work)
+    game_info = meta.get("game", {}) if isinstance(meta, dict) else {}
     if game_override:
         slug = game_override
         game_name = GAME_TITLES.get(slug, slug)
@@ -593,15 +699,39 @@ def retranslate_from_sidecars(work: Path, *,
                                   game_info.get("exe_name")) \
             or "unknown_game"
 
-    def _utc(ts: str) -> datetime:
-        d = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+    def _utc(ts) -> datetime | None:
+        """None rather than a raise: every value here comes from a
+        player-supplied file, and a bare KeyError/TypeError/ValueError
+        escaped apply_fixes as an untyped crash (r-loop 7)."""
+        if not isinstance(ts, str):
+            return None
+        try:
+            d = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+        except ValueError:
+            return None
         return d if d.tzinfo else d.replace(tzinfo=timezone.utc)
 
-    started = _utc(meta["recording"]["started_at_utc"])
-    created = _utc(s["created_at_utc"])
+    started = _utc((meta.get("recording") or {}).get("started_at_utc")
+                   if isinstance(meta, dict) else None)
+    created = _utc(s.get("created_at_utc") if isinstance(s, dict) else None)
+    if started is None or created is None:
+        raise FixFailed(
+            "cannot derive the head offset: raw metadata started_at_utc "
+            f"({'ok' if started else 'unusable'}) / session.json "
+            f"created_at_utc ({'ok' if created else 'unusable'}) — "
+            "session.json must be repaired before a re-translate")
     head_s = max((created - started).total_seconds(), 0.0)
 
     info = V.probe(work / "video.mp4")
+    # A head offset longer than the clip itself means the stamps are not
+    # describing this video: rebase_events would then drop EVERY event and
+    # ship a frames.csv with empty input columns. Never guess — fail so
+    # the plan (or a human) repairs the stamps first.
+    if head_s > info.duration_s:
+        raise FixFailed(
+            f"implausible head offset {head_s:.1f}s for a "
+            f"{info.duration_s:.1f}s clip — session.json created_at_utc "
+            f"and raw started_at_utc disagree; refusing to re-bin")
     pts = V.frame_pts(work / "video.mp4")
     raw_events = load_events(raw / "inputs.jsonl")
     if game_override:
@@ -926,7 +1056,10 @@ def fix_sessionjson_recompute(work: Path, game: str) -> str:
     consistency pass of every fix chain)."""
     from translator.v2 import GAME_TITLES, LOCALIZATIONS
     info = V.probe(work / "video.mp4")
-    s = json.loads((work / "session.json").read_text())
+    # unreadable / non-object session.json starts from {} and is rebuilt
+    # from ground truth — this IS the fix for a broken session.json, so it
+    # must not crash on one (r-loop 7)
+    s = _read_session_json(work)
     created_raw = s.get("created_at_utc")
     try:
         created = datetime.fromisoformat(created_raw.replace("Z", "+00:00"))

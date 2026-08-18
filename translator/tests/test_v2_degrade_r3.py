@@ -231,3 +231,24 @@ def test_analyze_wrapper_does_not_crash_on_unparseable_timestamp(tmp_path,
     a = analyze(d, {}, None, 4.0, 0.5)            # must not raise
     assert a.qa_status == "FAIL"
     assert a.inventory.get("ts_unparseable") == 1
+
+
+def test_frame_sync_marker_is_set_by_the_real_checker(tmp_path, tiny_mp4):
+    """r-loop 7: the PRODUCTION half of the frame-sync positive marker had
+    no test — deleting `r.checked.add("frame_sync")` left the suite green,
+    and every clean session then reported "not checked (QA stopped before
+    the frame-sync check)": the same class of false statement r-loop 6
+    removed, pointing the other way. Per SAMPLE_ANALYSIS_PLAYBOOK a
+    frame-sync verdict that is not OK is a hard gate, so an operator would
+    re-run or escalate every clean batch."""
+    d = _session(tmp_path / "ok", video=tiny_mp4)
+    r = check_session_v2(d)
+    assert "frame_sync" in r.checked, r.issues
+
+    # ...and an early return must NOT claim it ran
+    r2 = check_session_v2(_session(tmp_path / "ragged",
+                                   frames_bytes=b"a,b,c\n1,2\n",
+                                   video=tiny_mp4))
+    assert r2.status == "FAIL"
+    assert "frame_sync" not in r2.checked, r2.issues
+

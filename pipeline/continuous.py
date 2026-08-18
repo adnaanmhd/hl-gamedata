@@ -383,29 +383,45 @@ class ContinuousDriver:
         # population (one row per Drive folder ingest.scan has ever seen),
         # so statting per row is O(Drive) while work/ is bounded by the cap
         # itself. sid and sid-analysis collapse to one session.
-        disc = {r["session_id"] for r in led.by_state("DISCOVERED")}
-        if disc and self.cfg.work.exists():
-            held = set()
-            for p in self.cfg.work.iterdir():
-                if not p.is_dir():
-                    continue
-                sid = p.name[:-len("-analysis")] \
-                    if p.name.endswith("-analysis") else p.name
-                if sid not in disc:
-                    continue
-                # An EMPTY dir is not media (r-loop 6 blocker).
-                # ingest.download creates work/<sid> BEFORE the first
-                # rclone attempt, so a download that transferred zero
-                # bytes still left a dir -- and scoring it as media let a
-                # single transient outage fill the whole cap with 0 bytes
-                # on disk.
-                try:
-                    if any(p.iterdir()):
-                        held.add(sid)
-                except OSError:
-                    pass
-            n += len(held)
+        n += len(self._held_discovered(led))
         return n
+
+    def _held_discovered(self, led: Ledger) -> set[str]:
+        """DISCOVERED sids whose work dir actually HOLDS BYTES.
+
+        ONE definition of "this row holds media", shared by the cap count
+        and the cap carve-out. An EMPTY dir is not media (r-loop 6
+        blocker): ingest.download creates work/<sid> BEFORE the first
+        rclone attempt, so a download that transferred zero bytes still
+        left a dir, and scoring it as media let one transient outage fill
+        the whole cap with 0 bytes on disk. The carve-out kept its own
+        weaker `.exists()` test, so it admitted exactly the rows this
+        function scores as 0 — each pick then downloaded a whole new
+        session BEYOND the cap, and the cap stopped bounding bytes at all
+        (r-loop 7).
+
+        Iterate the WORK DIR, not the rows: DISCOVERED is the unbounded
+        population (one row per Drive folder ingest.scan has ever seen),
+        so statting per row is O(Drive) while work/ is bounded by the cap
+        itself. sid and sid-analysis collapse to one session.
+        """
+        disc = {r["session_id"] for r in led.by_state("DISCOVERED")}
+        held: set[str] = set()
+        if not disc or not self.cfg.work.exists():
+            return held
+        for p in self.cfg.work.iterdir():
+            if not p.is_dir():
+                continue
+            sid = p.name[:-len("-analysis")] \
+                if p.name.endswith("-analysis") else p.name
+            if sid not in disc:
+                continue
+            try:
+                if any(p.iterdir()):
+                    held.add(sid)
+            except OSError:
+                pass
+        return held
 
     def _pick_download(self, led: Ledger) -> str | None:
         if deliver.disk_free_gb(self.cfg.home) < C.DISK_LOW_WATER_GB:
@@ -434,10 +450,22 @@ class ContinuousDriver:
                 # therefore stopped ALL intake until the 12h reclaim, with
                 # the disk empty and F7 never firing (r-loop 6 blocker).
                 # Re-picking one consumes no new slot.
-                for sid in ingest.next_batch(led, size=None,
-                                             exclude=exclude):
-                    if not ((self.cfg.work / sid).exists()
-                            or (self.cfg.work / f"{sid}-analysis").exists()):
+                #
+                # Do NOT route this through ingest.next_batch (r-loop 7):
+                # that is a FIFO *intake* selector whose `size=None`
+                # silently means BATCH_SIZE (10, config.py:112), so the
+                # carve-out only ever inspected the first ten rows of the
+                # F4-ordered queue. The moment the lagging game flipped
+                # and ten rows of the other game sorted ahead, the rows
+                # actually holding the cap became unreachable and intake
+                # stopped completely until the 12 h reclaim — the exact
+                # blocker this carve-out exists to close. by_state is
+                # already ordered (drive_ctime, session_id), and the
+                # held set is bounded by the cap.
+                held_disc = self._held_discovered(led)
+                for r in led.by_state("DISCOVERED"):
+                    sid = r["session_id"]
+                    if sid in exclude or sid not in held_disc:
                         continue
                     if self.own.claim(sid):
                         try:
@@ -808,7 +836,7 @@ class ContinuousDriver:
         led.set_state(sid, "FIXING", f"attempt {row['fix_attempts'] + 1}")
         reasons = json.loads(row["reasons_json"] or "[]")
         work = self.cfg.work / sid
-        has_raw = (work / "raw" / "inputs.jsonl").exists()
+        has_raw = fix.has_raw_sidecars(work)
         # Resolve the reroute target BEFORE planning (r-loop 5).
         # row["game"] is the DRIVE-FOLDER game -- the very value
         # STR_GAME_MISMATCH says is wrong -- and plan_fixes branches on
@@ -849,6 +877,26 @@ class ContinuousDriver:
                               split_root=self.cfg.work)
         if out["error"]:
             runmod._discard_split_artifacts(self.cfg, led, sid)
+            if out.get("kind") == "host":
+                # The machine, not the session. Roll the attempt charge
+                # back, park the row where it was and cool it down —
+                # exactly what the D, V and U lanes already do. Without
+                # this, one disk-full or wedged-ffmpeg episode burned BOTH
+                # attempts back to back (fix -> revalidate -> fix ->
+                # REJECTED within minutes) and finalize_rejected wiped the
+                # media, so recovery meant re-downloading from Drive I.
+                # The stored reasons are all still fixable, so the reject
+                # surfaced as the bare fix-failed marker: an
+                # infrastructure failure reported to the player as a fault
+                # in their footage (r-loop 7 BLOCKER).
+                led.update(sid, fix_attempts=row["fix_attempts"])
+                led.set_state(sid, "FIX_QUEUED",
+                              f"host-level fix failure — retrying: "
+                              f"{out['error']}"[:300])
+                self.cool.set(sid, C.CONT_RUNNER_CRASH_RETRY_MIN * 60)
+                self.alerts.alert(f"fix hit a host-level error on {sid} "
+                                  f"(will retry): {out['error']}")
+                return False
             led.set_state(sid, "REVALIDATING",
                           f"fix failed: {out['error']}"[:300])
             return True
@@ -941,7 +989,7 @@ class ContinuousDriver:
             return
         if out.status == "failed_gate":
             r = led.get(sid)
-            has_raw = (self.cfg.work / sid / "raw" / "inputs.jsonl").exists()
+            has_raw = fix.has_raw_sidecars(self.cfg.work / sid)
             reasons = map_gate_failures(out.gate_fails or [],
                                         has_raw=has_raw)
             if reasons:
@@ -1188,12 +1236,15 @@ class ContinuousDriver:
             "        WHERE e2.session_id=s.session_id "
             "          AND e2.to_state='DOWNLOADING')) first_disc "
             "FROM sessions s WHERE s.state='DISCOVERED'").fetchall()
+        held_now = self._held_discovered(led)
         for r in disc_media:
             if not (r["first_disc"] and r["first_disc"] < cut):
                 continue
             sid = r["session_id"]
-            if (self.cfg.work / sid).exists() or \
-                    (self.cfg.work / f"{sid}-analysis").exists():
+            # same "holds bytes" rule as the cap — an empty dir labelled
+            # DISCOVERED(media) sent an operator hunting for disk that was
+            # never used (r-loop 7)
+            if sid in held_now:
                 stuck.append((sid, "DISCOVERED(media)", r["first_disc"]))
         # re-sort the MERGED list: HOLD rows are appended after the
         # already-age-sorted query rows, so without this the digest's

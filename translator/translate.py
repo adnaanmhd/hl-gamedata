@@ -12,6 +12,7 @@ from __future__ import annotations
 import csv
 import json
 import shutil
+import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -80,7 +81,27 @@ def resolve_keybind(*, keybind_path: Path | None, game_name: str | None,
             return dict(KEYBINDS.get(slug, {})) if slug else {}
         # vendor file is semantic->literal; if it looks inverted (literal->[semantic]),
         # flip it back so we have a single canonical direction.
-        return _as_semantic_to_literal(raw)
+        kb = _as_semantic_to_literal(raw)
+        # PARSED BUT UNUSABLE is the same failure as unparseable (r-loop 7).
+        # _binding_groups returns [] for any value that is not a str/list/
+        # dict, so VK code numbers, nulls, a wrapper object or {} all yield
+        # an EMPTY resolver — and _v2_rows keeps a key only `if k in bound`,
+        # so an empty bound strips 100% of key presses. The delivered rows
+        # then carry an empty keyboard column, analyze_sample reports
+        # key_frames == 0 and < 3 distinct actions, and validate raises
+        # INP_KEYS_MISSING + CNT_ACTIONS_FEW — both blocking and UNFIXABLE,
+        # so the session is REJECTED with zero fix attempts and the player
+        # is coached to "play more actively" for keys our own parser
+        # deleted. qa-v2 only WARNs, so nothing else notices.
+        slug = game_key_from_name(game_name or "", exe_name)
+        builtin = dict(KEYBINDS.get(slug, {})) if slug else {}
+        if not bound_literals(kb) and builtin:
+            print(f"[keybind] {Path(keybind_path).name} parsed but bound no "
+                  f"keys — falling back to the built-in {slug} keybind "
+                  f"(supplied file would have emptied input_keys)",
+                  file=sys.stderr)
+            return builtin
+        return kb
     slug = game_key_from_name(game_name or "", exe_name)
     return dict(KEYBINDS.get(slug, {})) if slug else {}
 
