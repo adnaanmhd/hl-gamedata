@@ -298,11 +298,17 @@ def plan_fixes(reasons: list[dict], *, game: str, has_raw: bool) -> dict:
                           {"windows": sorted(gate_windows)}))
         steps.append(("FIX_CUT_SEGMENTS", {"cut": [(tail_cut, 1e9)]}))
         return {"steps": steps, "unfixable": sorted(set(unfixable))}
-    if gate_windows:
-        # gate.py asserts a v2 header — structural surgery first
-        # (review-r4 #23). The gate STEP itself is appended after the csv
-        # writers below; this only orders the structural repairs ahead of it.
-        _pre_cut_csv_fixes()
+    # structural surgery FIRST in the cut-less path too (r-loop 12 #6):
+    # the rule was enforced only on cut/gate/retrim-bearing plans, so a
+    # plain-CSV plan emitted hygiene/context ahead of FIX_ROWS_SURGERY —
+    # and fix_actions_context hard-fails on any rows/video mismatch
+    # (its track has one label per VIDEO frame), so [CONTEXT, ROWS]
+    # burned both attempts on a FixFailed whose cure was one step later
+    # in the same plan: a wrongful terminal reject. (For gate plans this
+    # call was already here — gate.py asserts a v2 header, review-r4
+    # #23; the gate STEP itself is still appended after the csv writers
+    # below.) Idempotent via pre_emitted.
+    _pre_cut_csv_fixes()
     # hygiene before context (canonical CONTEXT/HYGIENE slot); seen is
     # seeded with the pre-gate/-retrim emissions so the csv loop below
     # cannot plan them a second time (review-r4 #23)

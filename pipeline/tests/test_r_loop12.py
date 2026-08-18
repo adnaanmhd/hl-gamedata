@@ -153,6 +153,42 @@ def test_actions_context_without_sidecar_uses_the_builtin(tmp_path,
                for r in carrying)
 
 
+# ------- r12 #6: structural surgery precedes hygiene/context in
+# ------- cut-less plans too
+
+def _plan_ids(reasons, game="outer_wilds"):
+    from pipeline import fix as fixmod
+    plan = fixmod.plan_fixes(reasons, game=game, has_raw=False)
+    return [fid for fid, _p in plan["steps"]]
+
+
+def _fixable(code, **params):
+    return {"code": code, "blocking": True, "fixable": True,
+            "params": params, "evidence": "e"}
+
+
+def test_rows_surgery_precedes_context_in_cutless_plans():
+    """fix_actions_context hard-fails on any rows/video mismatch (one
+    track label per VIDEO frame), so [CONTEXT, ROWS] burned both
+    attempts on a FixFailed whose cure was one step later in the same
+    plan — a wrongful terminal reject of the INP_FANOUT pairing."""
+    ids = _plan_ids([_fixable("INP_FANOUT"),
+                     _fixable("STR_ROWS_MISMATCH")])
+    assert "FIX_ROWS_SURGERY" in ids and "FIX_ACTIONS_CONTEXT" in ids, ids
+    assert ids.index("FIX_ROWS_SURGERY") < \
+        ids.index("FIX_ACTIONS_CONTEXT"), ids
+
+
+def test_rows_surgery_precedes_hygiene_in_cutless_plans():
+    ids = _plan_ids([_fixable("INP_OSKEYS"),
+                     _fixable("STR_ROWS_MISMATCH")])
+    assert ids.index("FIX_ROWS_SURGERY") < \
+        ids.index("FIX_KEY_HYGIENE"), ids
+    assert ids.index("FIX_KEY_HYGIENE") < \
+        ids.index("FIX_ACTIONS_CONTEXT"), \
+        "hygiene-before-context stays intact"
+
+
 # ------- r12 #4: the DISCOVERED-media reclaim grace re-arms per reclaim
 
 def test_reclaim_grace_rearms_after_a_sweep(cfg, ledger):
