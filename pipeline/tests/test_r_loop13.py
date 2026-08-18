@@ -10,7 +10,11 @@ import hashlib
 import subprocess
 from datetime import datetime, timedelta, timezone
 
+import csv
+import json
+
 from pipeline import run as runmod
+from pipeline.tests.test_r_loop8 import needs_ffmpeg
 
 # The durable adjudication marker's ON-DISK detail prefix, pinned as a
 # LITERAL on purpose: markers already written into production ledgers
@@ -203,3 +207,90 @@ def test_identical_rezip_supersede_stamp_stands(cfg, ledger, monkeypatch):
         cfg, ledger, send + timedelta(days=1)) is True
     assert b"p@x.com" not in docs[-1], \
         "the same hours must never re-enter a later sheet"
+
+
+# ------- r13 #4 (G2): FIX_RETRANSLATE honors the session's own keybind
+
+def _custom_bound_bundle(tmp_path, name):
+    """A real bundle whose raw/keybind.json binds q -> interact and
+    w -> move_up: presses of q survive only if the session keybind
+    governs (the kamla built-in binds interact to e, leaving q
+    unbound); w resolves either way (control within the test)."""
+    from datetime import timedelta
+
+    from pipeline.tests.test_fix_cut_gate import _make_session
+    from pipeline.tests.test_r_loop8 import _created_at, _sidecars
+    work = _make_session(tmp_path, seconds=100, name=name)
+    created = _created_at(work)
+    started = created - timedelta(seconds=0.0)
+    evs = []
+    for k, t0 in (("q", 10.0), ("w", 30.0), ("q", 50.0)):
+        evs.append({"t": int(t0 * 1e6), "type": "key", "key": k,
+                    "action": "down"})
+        evs.append({"t": int((t0 + 2.0) * 1e6), "type": "key", "key": k,
+                    "action": "up"})
+    _sidecars(work, started, evs)
+    (work / "raw" / "keybind.json").write_text(
+        json.dumps({"interact": "q", "move_up": "w"}))
+    return work
+
+
+def _key_rows(work):
+    with (work / "frames.csv").open(newline="") as f:
+        rows = list(csv.DictReader(f))
+    keys = {k for r in rows
+            for k in (r["input_keys"] or "").split("|") if k}
+    q_actions = {a for r in rows
+                 if "Q" in (r["input_keys"] or "").split("|")
+                 for a in (r["input_actions"] or "").split("|") if a}
+    return keys, q_actions
+
+
+def _fixable(code, **params):
+    return {"code": code, "blocking": True, "fixable": True,
+            "params": params, "evidence": "e"}
+
+
+@needs_ffmpeg
+def test_retranslate_dispatch_honors_the_sessions_own_keybind(tmp_path):
+    """r13 #4: _dispatch passed game_override=game whenever game is in
+    C.GAMES — and the ledger game ALWAYS is (ingest scoping), so the
+    built-in keybind overrode the session's own raw/keybind.json on
+    EVERY production retranslate; the session-keybind branch was dead
+    code there. Driven through the PRODUCTION path: plan_fixes over a
+    has_raw-routed FAIL -> apply_fixes -> _dispatch."""
+    from pipeline import fix as fixmod
+    work = _custom_bound_bundle(tmp_path, "kbdispatch")
+    plan = fixmod.plan_fixes([_fixable("SYN_TS_NOT_PTS")],
+                             game="kamla", has_raw=True)
+    assert [f for f, _ in plan["steps"]][0] == "FIX_RETRANSLATE"
+    out = fixmod.apply_fixes(work, plan, game="kamla",
+                             dossier_dir=tmp_path / "d1")
+    assert not out["error"], out
+    keys, q_actions = _key_rows(work)
+    assert "Q" in keys and "W" in keys, keys
+    assert "interact" in q_actions, \
+        "the custom bind's press must keep its action through the " \
+        "production dispatch path"
+
+
+@needs_ffmpeg
+def test_retranslate_reroute_plan_keeps_the_builtin_override(tmp_path):
+    """Control (pins review-2 #5): on a REROUTE plan the raw metadata is
+    exactly what the mismatch falsified — the corrected game's built-in
+    governs and the sidecar keybind is ignored (q stays unbound)."""
+    from pipeline import fix as fixmod
+    work = _custom_bound_bundle(tmp_path, "kbreroute")
+    plan = fixmod.plan_fixes(
+        [_fixable("STR_GAME_MISMATCH", actual="kamla"),
+         _fixable("SYN_TS_NOT_PTS")],
+        game="kamla", has_raw=True)
+    ids = [f for f, _ in plan["steps"]]
+    assert ids[:2] == ["FIX_REROUTE_GAME", "FIX_RETRANSLATE"], ids
+    out = fixmod.apply_fixes(work, plan, game="kamla",
+                             dossier_dir=tmp_path / "d2")
+    assert not out["error"], out
+    keys, q_actions = _key_rows(work)
+    assert "Q" not in keys, \
+        "reroute: the built-in must govern — q stays unbound"
+    assert "W" in keys

@@ -219,7 +219,9 @@ def plan_fixes(reasons: list[dict], *, game: str, has_raw: bool) -> dict:
         # supersede below cannot drop the step the retranslate depends on
         steps.append(("FIX_SESSIONJSON_REWRITE", {}))
     if retranslate and has_raw:
-        steps.append(("FIX_RETRANSLATE", {}))
+        # the plan carries the reroute fact (r13 #4/G2): _dispatch
+        # applies the built-in-keybind override ONLY when this is True
+        steps.append(("FIX_RETRANSLATE", {"rerouted": reroute}))
         csv_fixes = []                    # superseded by the re-translate
     pre_emitted: set[tuple[str, str]] = set()
 
@@ -480,8 +482,18 @@ def _dispatch(fix_id: str, params: dict, work: Path, game: str,
         return f"rerouted to {params.get('actual')} (ledger updates game; " \
                f"re-translate under the correct keybind follows)"
     if fix_id == "FIX_RETRANSLATE":
+        # override ONLY on reroute plans (review-2 #5: the raw metadata
+        # is exactly what the mismatch falsified — the built-in for the
+        # corrected game governs). `game` is the ledger slug, which
+        # ingest scoping keeps ALWAYS in C.GAMES, so the old bare
+        # `game in C.GAMES` test was vacuously true and the built-in
+        # silently overrode the session's own raw/keybind.json on EVERY
+        # production retranslate — the F4 doctrine's third instance
+        # (r13 #4/G2). The plan carries the reroute fact; both drivers
+        # resolve `game` to the corrected slug before apply_fixes.
         return retranslate_from_sidecars(
-            work, game_override=game if game in C.GAMES else None)
+            work, game_override=game
+            if params.get("rerouted") and game in C.GAMES else None)
     if fix_id == "FIX_CUT_SEGMENTS":
         # the PROBED duration, not session.json's (which may be the very
         # thing that's wrong) — a stale short duration would silently
