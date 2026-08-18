@@ -729,15 +729,6 @@ def retranslate_from_sidecars(work: Path, *,
     head_s = max((created - started).total_seconds(), 0.0)
 
     info = V.probe(work / "video.mp4")
-    # A head offset longer than the clip itself means the stamps are not
-    # describing this video: rebase_events would then drop EVERY event and
-    # ship a frames.csv with empty input columns. Never guess — fail so
-    # the plan (or a human) repairs the stamps first.
-    if head_s > info.duration_s:
-        raise FixFailed(
-            f"implausible head offset {head_s:.1f}s for a "
-            f"{info.duration_s:.1f}s clip — session.json created_at_utc "
-            f"and raw started_at_utc disagree; refusing to re-bin")
     pts = V.frame_pts(work / "video.mp4")
     raw_events = load_events(raw / "inputs.jsonl")
     if game_override:
@@ -751,6 +742,22 @@ def retranslate_from_sidecars(work: Path, *,
     bound = bound_literals(keybind)
 
     events = trimmod.rebase_events(raw_events, head_s, info.duration_s)
+    # OUTPUT-based bogus-stamp defence (r-loop 8 BLOCKER — replaces the
+    # r-loop-7 `head_s > duration_s` guard). Split children LEGITIMATELY
+    # have head_s far beyond their own length: cutter.py stamps every
+    # child created_at = parent_created + src_pts[i0] and copies raw/
+    # precisely so children can retranslate, so head_s is the offset into
+    # the RAW recording, not into this clip — the duration test wrongly
+    # terminal-rejected every second-or-later segment on both attempts.
+    # What the old guard actually defended against was shipping a
+    # frames.csv with empty input columns off stamps that do not describe
+    # this video; test THAT directly.
+    if raw_events and not events:
+        raise FixFailed(
+            f"head offset {head_s:.1f}s leaves zero events from a "
+            f"non-empty sidecar — session.json created_at_utc and raw "
+            f"metadata started_at_utc do not describe this video; "
+            f"refusing to re-bin")
     rows, stats = bin_session(events, info, keybind, rules, bound,
                               frame_pts_us=pts)
 
