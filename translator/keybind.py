@@ -73,7 +73,12 @@ def _binding_groups(value) -> list[tuple[list[tuple[str, ...]], str | None]]:
             # ALONE — the key-only group still binds (r-loop 8)
             if m:
                 groups.append(_alts(m))
-        if key:
+        if "key" in value:
+            # PRESENCE gates this path, not truthiness: a present-but-falsy
+            # key ("" / 0 / null) used to slip past `if key:` and emit the
+            # bare-modifier group the rule below forbids (r-loop 9). The
+            # modifier-only fallthrough survives ONLY for a genuinely
+            # ABSENT key field.
             t = normalize_literal(key)
             if not t:
                 # a key that normalizes empty makes the WHOLE binding

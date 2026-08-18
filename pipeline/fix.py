@@ -760,14 +760,20 @@ def retranslate_from_sidecars(work: Path, *,
         encoding="utf-8", errors="replace"))
     s = _read_session_json(work)
     game_info = meta.get("game", {}) if isinstance(meta, dict) else {}
+    if not isinstance(game_info, dict):
+        game_info = {}
+    exe_name = game_info.get("exe_name")
+    if not isinstance(exe_name, str):
+        # same provenance and crash as translate_bundle_v2's guard: a
+        # numeric exe_name reached game_key_from_name's re.sub (r-loop 9)
+        exe_name = None
     if game_override:
         slug = game_override
         game_name = GAME_TITLES.get(slug, slug)
     else:
         game_name = game_info.get("name") or meta.get("game_name") \
             or s.get("game_title")
-        slug = game_key_from_name(game_name or "",
-                                  game_info.get("exe_name")) \
+        slug = game_key_from_name(game_name or "", exe_name) \
             or "unknown_game"
 
     def _utc(ts) -> datetime | None:
@@ -801,12 +807,14 @@ def retranslate_from_sidecars(work: Path, *,
     else:
         keybind = resolve_keybind(keybind_path=raw / "keybind.json",
                                   game_name=game_name,
-                                  exe_name=game_info.get("exe_name"))
+                                  exe_name=exe_name)
     keybind.update(KEYBIND_PATCHES.get(slug, {}))
     rules = build_resolver(keybind)
     bound = bound_literals(keybind)
 
-    events = trimmod.rebase_events(raw_events, head_s, info.duration_s)
+    carried: list = []
+    events = trimmod.rebase_events(raw_events, head_s, info.duration_s,
+                                   carried_out=carried)
     # OUTPUT-based bogus-stamp defence (r-loop 8 BLOCKER — replaces the
     # r-loop-7 `head_s > duration_s` guard). Split children LEGITIMATELY
     # have head_s far beyond their own length: cutter.py stamps every
@@ -816,10 +824,15 @@ def retranslate_from_sidecars(work: Path, *,
     # terminal-rejected every second-or-later segment on both attempts.
     # What the old guard actually defended against was shipping a
     # frames.csv with empty input columns off stamps that do not describe
-    # this video; test THAT directly.
-    if raw_events and not events:
+    # this video; test THAT directly. Carried-only counts as zero: with a
+    # bogus head every unmatched 'down' in the sidecar (keys held when
+    # capture stopped) is re-pressed at t=0, so a plain non-empty test
+    # would fabricate a full-clip hold of those keys — a legitimate split
+    # child always retains in-band events (r-loop 9).
+    if raw_events and len(events) == len(carried):
         raise FixFailed(
-            f"head offset {head_s:.1f}s leaves zero events from a "
+            f"head offset {head_s:.1f}s leaves zero events beyond "
+            f"{len(carried)} held-key carries from a "
             f"non-empty sidecar — session.json created_at_utc and raw "
             f"metadata started_at_utc do not describe this video; "
             f"refusing to re-bin")

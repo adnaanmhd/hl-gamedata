@@ -230,8 +230,15 @@ def build_session_json(*, slug: str, session_id: str, meta: dict,
     except ValueError:
         raise BundleError(
             f"metadata recording.started_at_utc unusable: {started_raw!r}")
-    created = started + timedelta(seconds=head_cut_s)
-    ended = created + timedelta(seconds=info.duration_s)
+    try:
+        created = started + timedelta(seconds=head_cut_s)
+        ended = created + timedelta(seconds=info.duration_s)
+    except OverflowError:
+        # parseable but extreme (9999-12-31…) — crashed untyped AFTER the
+        # full trim+bin+sync wall-clock (r-loop 9)
+        raise BundleError(
+            f"metadata recording.started_at_utc unusable (out of range): "
+            f"{started_raw!r}")
     system = meta.get("system") if isinstance(meta, dict) else None
     if not isinstance(system, dict):
         system = {}
@@ -241,7 +248,10 @@ def build_session_json(*, slug: str, session_id: str, meta: dict,
         video size, exactly what an absent value already did."""
         try:
             return int(float(v)) if v else fallback
-        except (TypeError, ValueError):
+        except (TypeError, ValueError, OverflowError):
+            # OverflowError: json.loads accepts Infinity/1e999 and int()
+            # on either raised past the two arms above — the exact class
+            # raw_int closed in r-loop 8 (r-loop 9)
             return fallback
     return {
         "vendor_name": VENDOR,
@@ -290,7 +300,15 @@ def translate_bundle_v2(bundle_dir: Path, out_root: Path, *,
         game_info = {}
     game_name = game_info.get("name") or meta.get("game_name")
     exe_name = game_info.get("exe_name")
-    session_id = meta.get("session_id") or bundle_dir.name
+    if not isinstance(exe_name, str):
+        # a numeric exe_name reached game_key_from_name's re.sub and
+        # crashed untyped (r-loop 9)
+        exe_name = None
+    session_id = meta.get("session_id")
+    if not isinstance(session_id, str) or not session_id:
+        # a numeric session_id crashed the Path join untyped (r-loop 9);
+        # the folder name is the established fallback identity
+        session_id = bundle_dir.name
     slug = game_key_from_name(game_name or "", exe_name) or "unknown_game"
 
     date = datetime.now(timezone.utc).strftime("%m-%d-%Y")   # v2: 4-digit year

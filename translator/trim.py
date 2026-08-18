@@ -105,11 +105,18 @@ def trim(src: Path, out_path: Path, *, info: V.VideoInfo | None = None,
     return TrimResult(out_path, head_cut, end_cut, out_info.duration_s, warnings)
 
 
-def rebase_events(events: list[dict], head_cut_s: float, new_duration_s: float) -> list[dict]:
+def rebase_events(events: list[dict], head_cut_s: float, new_duration_s: float,
+                  *, carried_out: list | None = None) -> list[dict]:
     """Shift event timestamps to the trimmed timeline; drop events outside it.
 
     Events are in microseconds from the original recording start (= original
     video frame 0). After trimming, new frame 0 = head_cut_s.
+
+    `carried_out`, when given, also receives the synthetic t=0 re-presses so
+    a caller can tell carried holds from in-band events: with bogus stamps
+    (head beyond the whole recording) the carries are the ONLY survivors,
+    and the retranslate guard must refuse rather than fabricate a full-clip
+    hold (r-loop 9). Return value unchanged.
     """
     head_us = head_cut_s * 1_000_000.0
     end_us = (head_cut_s + new_duration_s) * 1_000_000.0
@@ -164,4 +171,6 @@ def rebase_events(events: list[dict], head_cut_s: float, new_duration_s: float) 
         ne["t"] = 0
         ne["action"] = "down"
         carried.append(ne)
+    if carried_out is not None:
+        carried_out.extend(carried)
     return carried + out

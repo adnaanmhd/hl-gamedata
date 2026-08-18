@@ -70,16 +70,30 @@ def test_vk_number_modifier_degrades_to_a_key_only_bind():
     assert acts == ["crouch"]
 
 
-def test_vk_number_key_makes_the_whole_binding_unusable():
+@pytest.mark.parametrize("bad_key", [87, "", 0, None, "   "],
+                         ids=["vk_number", "empty_str", "zero", "null",
+                              "whitespace"])
+def test_vk_number_key_makes_the_whole_binding_unusable(bad_key):
     """A key that normalizes empty must emit NOTHING — a bare modifier
     group would fire the semantic on the modifier alone, and an empty ""
     token in bound_literals would defeat the r-loop-7 parsed-but-unusable
-    fallback."""
-    assert bound_literals({"a": {"modifier": "ctrl", "key": 87}}) \
-        == frozenset()
-    assert build_resolver({"a": {"modifier": "ctrl", "key": 87}}) == []
+    fallback. The falsy cases ("", 0, null) slipped past the truthiness
+    gate and fired the semantic on every bare modifier hold (r-loop 9);
+    presence of the key field decides, not its truthiness."""
+    kb = {"a": {"modifier": "ctrl", "key": bad_key}}
+    assert bound_literals(kb) == frozenset()
+    assert build_resolver(kb) == []
     # whitespace-only str literal: same rule, straight branch
     assert bound_literals({"b": "   "}) == frozenset()
+
+
+def test_absent_key_field_keeps_the_modifier_only_binding():
+    """Control (r-loop 9): the modifier-only fallthrough survives ONLY for
+    a genuinely ABSENT key field — {"modifier": "ctrl"} still binds."""
+    kb = {"walk": {"modifier": "ctrl"}}
+    assert "ctrl" in bound_literals(kb)
+    acts, _ = resolve_actions({"ctrl_l"}, (False, False), build_resolver(kb))
+    assert acts == ["walk"]
 
 
 def test_invert_keybind_survives_a_vk_number_modifier():
