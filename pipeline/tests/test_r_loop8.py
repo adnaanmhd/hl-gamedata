@@ -503,6 +503,23 @@ def test_legacy_gate_entries_still_propagate_whole(tmp_path):
     assert not (tmp_path / "dossiers" / "Q-p2" / "fixlog.json").exists()
 
 
+# ------------ C9: the interlock stays pinned under the fixture regime
+
+def test_daily_interlock_pinned_under_the_fixture_regime(cfg, ledger,
+                                                         monkeypatch,
+                                                         capsys):
+    """conftest's autouse fixture forces CONT_DAILY_REPORTS=True so the
+    gate is knob-independent — which means the suppression itself needs
+    an explicit False-monkeypatch test, or deleting the interlock would
+    leave the suite green."""
+    monkeypatch.setattr(C, "CONT_DAILY_REPORTS", False)
+    at_2pm = datetime(2026, 8, 18, 14, 30, tzinfo=C.IST)
+    assert runmod.send_daily_report_if_due(cfg, ledger, at_2pm) is False
+    assert "suppressed — CONT_DAILY_REPORTS=False" in \
+        capsys.readouterr().err
+    assert not (cfg.reports_dir / "2026-08-18" / ".sent").exists()
+
+
 # ---------------- C8: the STR_SJ_INVALID rewrite validates what it keeps
 
 def _sj_round_trip(tmp_path, field, bad):

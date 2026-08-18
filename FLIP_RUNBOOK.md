@@ -80,10 +80,16 @@ b. **Resize E2 → C2D.** Pre-flight was VERIFIED against the project's own API
    **Run the suite through the gate, never as a bare `pytest; echo $?`:**
 
    ```
-   SUITE_FLOOR=440 bash tools/run_suite.sh \
+   SUITE_FLOOR=578 bash tools/run_suite.sh \
        --with numpy==2.4.6 --with opencv-python-headless==5.0.0.93 \
        --with rerun-sdk==0.36.0
    ```
+
+   The gate is valid with `CONT_DAILY_REPORTS` at EITHER value — the suite
+   is knob-independent via a conftest autouse fixture (r-loop 8: 6c ships
+   False committed, and 11 send-path tests went red on this exact pinned
+   invocation run against that tree). The suppression itself is pinned by
+   an explicit False-monkeypatch test.
 
    "Green" cannot mean "exit status 0". `run_continuous` ends its finally
    with `os._exit(0)` when it owns the process, and ~12 tests call it
@@ -114,26 +120,39 @@ b. **Resize E2 → C2D.** Pre-flight was VERIFIED against the project's own API
 c. **Pre-deploy config edit on the Mac (committed): `CONT_DAILY_REPORTS =
    False`.** This is the payment-endgame interlock — with every rebuild-era
    root unstamped, one 14:00 IST daily send would misattribute the whole
-   cohort and deadlock the regen (r-loop 1 blocker). Then deploy HEAD to
+   cohort and deadlock the regen (r-loop 1 blocker). It is a GAP-CLOSER,
+   never policy: the flag returns to True IMMEDIATELY after step 7.2's
+   regen `--send` completes (step 7.3). Then deploy HEAD to
    `~/hl-gamedata` (rsync), re-touch rrd stubs, `bash tools/vm_setup.sh`
    (installs hl-continuous units; does NOT arm anything).
 
-   **The deploy set is three things, and all three must be in it** (R4: none
+   **The deploy set is FOUR things, and all four must be in it** (R4: none
    of them applies until this moment, by design — the running rebuild keeps
-   judging under the old checkers so the refix population stays coherent):
+   judging under the old checkers so the refix population stays coherent;
+   matches FLIP_HANDOVER §2):
    1. the continuous driver,
    2. the `a4f93de` fix-failed tolerance patches,
    3. **the split-cascade rulings R1–R3** (`KEEP_GATE_MAX_S` 5.0,
-      `KEEP_GATE_MAX_FRAC` deleted, `SCANNER_STATIC_MIN_S` named).
+      `KEEP_GATE_MAX_FRAC` deleted, `SCANNER_STATIC_MIN_S` named),
+   4. **ALL r-loop fix sets** (review loops 1–8 — everything committed on
+      the flip branch since the design freeze).
 
    Verify on the VM after rsync, before arming — cheaper than discovering it
-   from throughput a day later:
+   from throughput a day later. If any check fails, the rsync did not ship
+   what was tested — stop and fix before arming:
    ```
-   grep -n "KEEP_GATE_MAX_S\|SCANNER_STATIC_MIN_S\|KEEP_GATE_MAX_FRAC" \
-       ~/hl-gamedata/pipeline/config.py
+   cd ~/hl-gamedata
+   grep -n "KEEP_GATE_MAX_S\|SCANNER_STATIC_MIN_S\|KEEP_GATE_MAX_FRAC" pipeline/config.py
+   #   -> KEEP_GATE_MAX_S = 5.0, SCANNER_STATIC_MIN_S = 0.8, NO KEEP_GATE_MAX_FRAC
+   grep -c "accepted_reported_at" pipeline/reports.py pipeline/ledger.py   # non-zero both
+   grep -n "read_counted_record\|write_counted_record" tools/recal_regen_sheets.py  # both
+   grep -n "first_pts_abs" translator/trim.py                              # trim-clock fix
+   # r-loop 8 markers:
+   grep -n "daily-counted.json" pipeline/run.py                            # C5 durable record
+   grep -n "tree_sealed_at" pipeline/ledger.py pipeline/reports.py tools/recal_refix_reset.py
+   grep -n "per_window" pipeline/gate.py pipeline/fix.py                   # C7
+   grep -n "CONT_DIGEST_RETRY_S" pipeline/config.py pipeline/continuous.py # C4
    ```
-   Expect `KEEP_GATE_MAX_S = 5.0`, `SCANNER_STATIC_MIN_S = 0.8`, and **no**
-   `KEEP_GATE_MAX_FRAC` assignment.
 d. `tools/recal_refix_reset.py` dry-run → review the JSON plan → `--yes`.
    The tool now ACQUIRES the run lock (stale-reclaim included). Any rclone
    moveto failure aborts pre-DB (rc=3) — reconcile manually before retry.
@@ -151,7 +170,9 @@ The digest's stuck/backlog lines tell when. Then, in order:
 2. `tools/recal_regen_sheets.py` (preview) → sanity-read both sheets →
    `--send`. Final invariant: anchor == `2026-08-16T05:32:50+00:00`.
 3. Flip `CONT_DAILY_REPORTS = True` (commit on Mac) → rsync deploy →
-   `sudo systemctl start hl-continuous`. Normal dailies resume from the
+   `sudo systemctl start hl-continuous`. Do this IMMEDIATELY after the
+   regen `--send` completes — the False was a gap-closer for the regen,
+   never policy (Adnaan 08-18). Normal dailies resume from the
    regen-written anchor (contiguous windows preserved by construction).
 4. Update `NOTE_FOR_D3.md`; purge old sheet copies from the GCS mirror
    after replacements verify.

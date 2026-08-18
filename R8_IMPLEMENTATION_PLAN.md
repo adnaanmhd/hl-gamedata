@@ -29,7 +29,7 @@ the first unchecked item.
 - [x] C6 seal semantics (tree_sealed_at) + late-arrival deferral removal — fail-first 9/9; two payment tests deliberately rewritten (recorded in commit msg for Adnaan); Mac 571 green
 - [x] C7 per-window gate record — real-writer rewrite of the r7 test closes the hand-built-shape trap; fail-first 2/2 (+1 legacy control); Mac 573 green
 - [x] C8 STR_SJ_INVALID rewrite validates — 7/7 classes fail-first through the real fix chain; naive-ts control green; Mac 581 green
-- [ ] C9 suite knob-independence + SUITE_FLOOR + doc corrections
+- [x] C9 suite knob-independence + SUITE_FLOOR 578 + doc corrections — repro CONFIRMED on the pinned runbook invocation (14 failed/567 passed at pre-C9 HEAD; 11→14 = the three new C5 send-path tests); green at BOTH knob values (582/582)
 - [ ] Full gate green on Mac AND VM at final r8-fix HEAD; tree-verify discipline done
 - [ ] Review iteration 9 (fix-in-iteration; quiet-judged)
 - [ ] Review iteration 10 (only if 9 not quiet)

@@ -52,6 +52,16 @@ def _no_real_drive(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _daily_reports_knob_independent(monkeypatch):
+    """The gate must be green regardless of the DEPLOYED CONT_DAILY_REPORTS:
+    FLIP_RUNBOOK 6c ships False committed and the arming gate runs on that
+    exact tree — 11 send-path tests went red on the runbook's own pinned
+    invocation (r-loop 8). Tests asserting the suppression set False
+    themselves and win (their monkeypatch applies after this fixture)."""
+    monkeypatch.setattr(C, "CONT_DAILY_REPORTS", True)
+
+
+@pytest.fixture(autouse=True)
 def _module_state(monkeypatch):
     """The pre-driver suite IS the lockstep regression (§18.8): it runs
     with PIPELINE_OVERLAP=False; driver tests opt in explicitly. Also
