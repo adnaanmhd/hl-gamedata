@@ -971,7 +971,18 @@ def validate_session(work_dir: Path, dossier_dir: Path, *,
                      gemini_key=gemini_key,
                      gemini_model=gemini_model or "gemini-3.7-flash",
                      vlm_expected=bool(gemini_key) and not skip_vlm)
-    aux["has_raw"] = bool(raw_by_sid)
+    # r19 #11 (M5, RULED fix-now): this flag drives the STORED fixable
+    # field on QA_FAIL_UNMAPPED — and so the ruled reject-label surface
+    # (unfixable reasons only, judged per reason's own stored field). It
+    # must judge sidecar USABILITY with the same rule as the plan gate
+    # (fix.has_raw_sidecars: parse to a dict + a parseable
+    # started_at_utc, r18 #4 + r19 #2), or a corrupt sidecar stores
+    # fixable=true, the fix phase plans nothing and rejects 'unfixable',
+    # and the reject line prints the false bare fix-failed marker.
+    # raw_by_sid above deliberately stays existence-based: the engine
+    # verify and the shift seeding degrade internally.
+    from pipeline.fix import has_raw_sidecars
+    aux["has_raw"] = has_raw_sidecars(work_dir)
     aux["vlm_required"] = True
     aux["gate_destroyed"] = _gate_destroyed(dossier_dir)
     # the INP_OSKEYS trigger judges the session's own binding (r16 #3);

@@ -369,3 +369,82 @@ def test_real_md5_supersede_still_clears(cfg, ledger, monkeypatch):
         and row["accepted_reported_at"] is None \
         and row["duration_raw_s"] is None, \
         "a real new md5 is known changed bytes — the full clear stands"
+
+
+# ------- r19 #11 (M5, RULED fix-now 2026-08-20): aux['has_raw'] judges
+# ------- usability with the plan gate's own rule
+
+
+@needs_ffmpeg
+def test_unusable_sidecars_store_truthful_unfixable(tmp_path):
+    """r19 #11 (M5): validate stored aux['has_raw'] on file EXISTENCE
+    while the plan gate (fix.has_raw_sidecars) judges usability — a
+    session with corrupt sidecars plus an unmapped qa FAIL stored
+    QA_FAIL_UNMAPPED fixable=true (bin 2), the fix phase planned
+    nothing and rejected 'unfixable', and the ruled reject surface
+    (unfixable reasons only, judged on the STORED fixable field)
+    printed the false bare fix-failed marker. aux['has_raw'] now
+    routes through the plan gate: the stored field — and the labels —
+    are truthful."""
+    import json as _json
+
+    from pipeline import reports
+    from pipeline.reports import FIX_FAILED_MARKER
+    from pipeline.tests.test_fix_cut_gate import _make_session
+    from pipeline.validate import validate_session
+    d = _make_session(tmp_path, seconds=80, name="m5unusable")
+    _nonzero_frame_ids(d)
+    raw = d / "raw"
+    raw.mkdir()
+    (raw / "inputs.jsonl").write_text('{"t": 0}\n')
+    (raw / "metadata.json").write_text('{"recording": {"started_at')
+    res = validate_session(d, tmp_path / "dossier", skip_vlm=True)
+    unmapped = [r for r in res.reasons if r["code"] == "QA_FAIL_UNMAPPED"]
+    assert unmapped, "the frame_id renumber produces the unmapped FAIL"
+    assert all(not r["fixable"] for r in unmapped), \
+        "unusable sidecars: the STORED fixable field is truthful"
+    # bin stays None here (skip_vlm holds the verdict for VLM); the
+    # stored field is what the bin decision and the label surface read
+    labels = reports.session_reject_labels(res.reasons)
+    assert labels != [FIX_FAILED_MARKER], \
+        "the reject line prints the truthful reason, not the false marker"
+
+
+@needs_ffmpeg
+def test_usable_sidecars_keep_fixable_unmapped(tmp_path):
+    """M5 proceed-side control (§2 rule 4): USABLE sidecars keep
+    QA_FAIL_UNMAPPED fixable=true — the retranslate-when-sidecars
+    route is unchanged."""
+    import json as _json
+
+    from pipeline.tests.test_fix_cut_gate import _make_session
+    from pipeline.validate import validate_session
+    d = _make_session(tmp_path, seconds=80, name="m5usable")
+    _nonzero_frame_ids(d)
+    raw = d / "raw"
+    raw.mkdir()
+    (raw / "inputs.jsonl").write_text('{"t": 0}\n')
+    (raw / "metadata.json").write_text(_json.dumps(
+        {"recording": {"started_at_utc": "2026-08-14T10:00:00Z"}}))
+    res = validate_session(d, tmp_path / "dossier", skip_vlm=True)
+    unmapped = [r for r in res.reasons if r["code"] == "QA_FAIL_UNMAPPED"]
+    assert unmapped and all(r["fixable"] for r in unmapped)
+
+
+def _nonzero_frame_ids(d):
+    """Renumber frame_id from 1: exactly ONE checker FAIL ('frame_id
+    not zero-based sequential'), deliberately unmapped since r-loop 6
+    — the clean QA_FAIL_UNMAPPED producer (no mapped fixable reason
+    rides along, so the r-loop-5 advisory downgrade stays out of the
+    frame)."""
+    import csv as _csv
+    with (d / "frames.csv").open(newline="") as f:
+        rows = list(_csv.reader(f))
+    header, body = rows[0], rows[1:]
+    fid = header.index("frame_id")
+    for i, r in enumerate(body):
+        r[fid] = str(i + 1)
+    with (d / "frames.csv").open("w", newline="") as f:
+        w = _csv.writer(f)
+        w.writerow(header)
+        w.writerows(body)
