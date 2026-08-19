@@ -71,11 +71,21 @@ def safe_session_id(session_id, bundle_dir: Path) -> str:
     an untyped ValueError — burning both fix attempts into a terminal
     'fix retries exhausted' reject, for a session the designed
     folder-name fallback translates fine. One shared decision point
-    covers all five join sites."""
+    covers all five join sites.
+
+    Over-length ids fall back too (r15 #8, H7's remaining sibling): a
+    >NAME_MAX id crashes every join's mkdir with OSError errno 63,
+    which the fix lane classifies HOST — the row parks FIX_QUEUED and
+    retries forever with an hourly alert blaming the host, and the
+    same crash kills both G7 operator tools mid-batch. The bound is
+    200 bytes, not 255: the pipeline derives longer names from the sid
+    (<sid>.split-manifest.json +20, <sid>-analysis +9, -pN segment and
+    grandchild suffixes) that must all stay under NAME_MAX."""
     if isinstance(session_id, str) and session_id not in ("", ".") \
             and "/" not in session_id and "\\" not in session_id \
             and os.sep not in session_id and ".." not in session_id \
-            and not any(ord(c) < 32 for c in session_id):
+            and not any(ord(c) < 32 for c in session_id) \
+            and len(session_id.encode("utf-8", "ignore")) <= 200:
         return session_id
     return Path(bundle_dir).name
 

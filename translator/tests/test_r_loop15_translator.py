@@ -142,6 +142,44 @@ def test_combo_half_pressed_alone_is_stripped_at_the_writer(tmp_path):
     assert not any("null input_actions" in i for i in r.issues), r.issues
 
 
+# ------- r15 #8 (I5): safe_session_id bounds the id's byte length
+
+
+@needs_ffmpeg
+def test_overlength_session_id_falls_back_to_folder_name_e2e(tmp_path):
+    """r15 #8 (I5, H7's remaining sibling): a >NAME_MAX session_id
+    passed safe_session_id and crashed every join's mkdir with OSError
+    errno 63 — which apply_fixes' classifier calls HOST, so the row
+    parked FIX_QUEUED and retried forever (never terminal, never the
+    designed fallback) with an hourly alert blaming the host; the same
+    crash killed both G7 operator tools mid-batch. Garbage ids are
+    DESIGNED to degrade to the bundle-folder-name fallback; over-length
+    ones now do."""
+    from translator.tests.test_r_loop9_translator import _bundle as _b
+    d = _b(tmp_path, {"session_id": "x" * 300,
+                      "game": {"name": "Kamla"},
+                      "recording": dict(_GOOD_REC)})
+    out_root = tmp_path / "out"
+    rep = v2.translate_bundle_v2(d, out_root, make_rrd=False,
+                                 head_s=0.0, tail_s=0.0, lag_correct=False)
+    out_dir = Path(rep["out_dir"]).resolve()
+    assert out_dir.is_relative_to(out_root.resolve()), out_dir
+    assert rep["session"] == "bundle", \
+        "over-length ids fall back to the folder name, like NUL ones"
+
+
+def test_safe_session_id_length_bound_boundary(tmp_path):
+    """I5 unit pin at the shared decision point (all five join sites):
+    the boundary both ways (200 bytes kept, 201 falls back), BYTE
+    semantics (150 two-byte chars = 300 bytes falls back although
+    len() is 150), and the clean-id control."""
+    from translator.translate import safe_session_id
+    assert safe_session_id("x" * 200, tmp_path / "b") == "x" * 200
+    assert safe_session_id("x" * 201, tmp_path / "b") == "b"
+    assert safe_session_id("é" * 150, tmp_path / "b") == "b"
+    assert safe_session_id("ok-id_1.2", tmp_path / "b") == "ok-id_1.2"
+
+
 @needs_ffmpeg
 def test_lowercase_letter_and_snake_tokens_still_fail_the_grammar(tmp_path):
     """I1 control (§2 rule 3, the other side of the exemption): tokens
