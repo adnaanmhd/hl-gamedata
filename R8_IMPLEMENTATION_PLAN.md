@@ -73,8 +73,26 @@ scratchpads `r11-results.json` … `r15-results.json` (r15's is in the
   2026-08-19; the unstubbed I8 twin passed on Linux, the I4 naive-tz
   pin passed on the non-IST host); tree-verify clean (no MUTATION
   markers, only plan-ledger edit + pre-existing junk)
-- [ ] Review iteration 16 (§4; headroom check with Adnaan BEFORE the
-  launch; if not quiet: fix in-iteration per §4, then iteration 17)
+- [x] Review iteration 16 RAN (headroom OK'd by Adnaan; run
+  `wf_ebb4ece9-f00`, 21 agents, 0 errors, ~2.70M subagent tokens):
+  **NOT QUIET pre-fix — 7 raised → 7 confirmed (3 major / 4 minor, 0
+  blockers), 0 killed** (`R16_FINDINGS.md`, snapshot
+  `tools/review/flip-review-iter16.js`, machine results
+  `r16-results.json` in the session scratchpad). Clusters: #1≡#4 (I5
+  lone-surrogate hole), #6/#7 (pins for I2/I4 sweep halves), #2/#3/#5
+  pre-existing. Fix-in-iteration J-set (pre-fix ref `4dc37b4`):
+  - [ ] J1 = #1≡#4 safe_session_id rejects unencodable ids (minor)
+  - [ ] J2 = #3 INP_OSKEYS trigger made bound-aware (major; aligns
+    with the locked strip-unless-bound rule + r11 #11's named fix)
+  - [ ] J3 = #6 tests-only: fix_sync remap credited-strip pin
+  - [ ] J4 = #7 tests-only: retrim naive-guard pin
+  - [ ] J5 = #2 daily resume scan fails CLOSED (major,
+    payment-surface — Adnaan BEFORE implementing)
+  - [ ] J6 = #5 comma-key bind delivery vocabulary (major — needs
+    Adnaan's ruling like I1; finder recommends the Comma display
+    rename over a checker exemption)
+  - [ ] Post-J: floor re-pin (passed − 4), both host gates,
+    tree-verify → iteration 17
 - [ ] Review iteration 17 (ONLY if 16 was not quiet; same rules)
 - [ ] Review iteration 18 (ONLY if 17 was not quiet; same rules; if 18
   is ALSO not quiet: fix its confirmed set, then STOP — report the
