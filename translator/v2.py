@@ -147,8 +147,24 @@ def apply_context_to_rows(rows: list[list], ctx_track: list[str], slug: str,
     dead_strips: dict[str, int] = {}
     changed = 0
     def _active(v) -> bool:
-        """Mouse delta counts as motion: not blank and not (float) zero."""
-        return v not in ("", None) and float(v) != 0.0
+        """Mouse delta counts as motion: not blank and not (float) zero.
+
+        Guarded exactly like fix.py's _moving (review-2 #7 sibling —
+        r17 #3): both fix-lane callers (fix_actions_context and the
+        operator tool) hand this raw delivered CSV cells, and a
+        malformed cell — the STR_SENTINELS population: locale decimals
+        ('1,5'), 'abc', stringified None — raised ValueError out of
+        FIX_ACTIONS_CONTEXT, which plan_fixes structurally orders
+        BEFORE the FIX_SENTINELS step that repairs those very cells.
+        apply_fixes classifies ValueError as session-kind, so both
+        attempts burned on a crash whose cure sat later in the same
+        plan (the r12 #6 shape) — wrongful terminal reject, two paid
+        VLM sweeps. A junk cell is not motion (matches _num_cell /
+        fix_sentinels semantics); degrade, never crash."""
+        try:
+            return v not in ("", None) and float(v) != 0.0
+        except (TypeError, ValueError):
+            return False
 
     for i, row in enumerate(rows):
         keys, _actions, btns, dx, dy = row[-5:]

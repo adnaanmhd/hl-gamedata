@@ -218,3 +218,35 @@ def test_v1_conversion_builtin_only_control_unchanged(tmp_path):
     assert inter and all("E" in r["input_keys"].split("|") for r in inter)
     ups = [r for r in rows if "move_up" in r["input_actions"]]
     assert ups and all("W" in r["input_keys"].split("|") for r in ups)
+
+
+# ------- r17 #3 (K3): the FIX_ACTIONS_CONTEXT route survives junk
+# ------- motion cells
+
+
+def test_actions_context_route_survives_junk_motion_cell(tmp_path,
+                                                         monkeypatch):
+    """r17 #3 (K3), the production route: fix_actions_context hands
+    apply_context_to_rows raw delivered cells, and a '1,5' dx cell
+    (STR_SENTINELS population) crashed the step with ValueError —
+    session-kind, no refund, both attempts burned while FIX_SENTINELS
+    sat later in the same plan (r12 #6 shape). The guarded _active now
+    degrades: the step completes and the poisoned row keeps its
+    key-resolved action. The numeric-cell controls are the two
+    existing r12 tests over this same route, green untouched."""
+    from pipeline import fix as fixmod
+    from pipeline.tests.test_r_loop12 import _context_work
+    work = _context_work(tmp_path, monkeypatch, "G",
+                         {"general_flashlight": "g"})
+    header, rows = fixmod._read_csv(work)
+    col = {c: i for i, c in enumerate(header)}
+    rows[12][col["input_mouse_dx"]] = "1,5"
+    fixmod._write_csv(work, header, rows)
+    note = fixmod.fix_actions_context(work, "outer_wilds")
+    assert "context" in note
+    header, rows = fixmod._read_csv(work)
+    carrying = [r for r in rows if "G" in r[col["input_keys"]].split("|")]
+    assert len(carrying) == 6
+    assert all("general_flashlight" in r[col["input_actions"]]
+               for r in carrying), \
+        "the junk-cell row must keep its key-resolved action"
