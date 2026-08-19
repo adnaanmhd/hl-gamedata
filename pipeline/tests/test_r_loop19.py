@@ -88,3 +88,141 @@ def test_retranslate_nondict_recording_is_typed(tmp_path):
     with pytest.raises(fixmod.FixFailed) as e:
         fixmod.retranslate_from_sidecars(work)
     assert "head offset" in str(e.value)
+
+
+# ------- r19 #1 (BLOCKER) / #4≡#6 / #10 (M1): fix_v1_to_v2 never
+# ------- fabricates the head-offset contract
+
+
+def _v1_with_sidecars(tmp_path, created_at, name, started_at,
+                      trim, at_root=True):
+    """A v1 work dir whose raw sidecars make the head-offset contract
+    live — at the work ROOT (the first-run shape) or in raw/ (the
+    re-entrant shape), per fix_v1_to_v2's two-location rule."""
+    from pipeline.tests.test_r_loop15 import _v1_work
+    work = _v1_work(tmp_path, created_at, name)
+    s = json.loads((work / "session.json").read_text())
+    if trim is not ...:
+        s["canonical"]["trim"] = trim
+    (work / "session.json").write_text(json.dumps(s))
+    if at_root == "mixed":
+        # the crash-between-moves split: the re-entrant run reunites
+        # the pair in raw/, so the contract is live and the probe must
+        # see it (kills the pair-per-location restatement)
+        (work / "raw").mkdir(exist_ok=True)
+        ibase, mbase = work / "raw", work
+    else:
+        base = work if at_root else work / "raw"
+        base.mkdir(exist_ok=True)
+        ibase = mbase = base
+    (ibase / "inputs.jsonl").write_text('{"t": 0}\n')
+    (mbase / "metadata.json").write_text(json.dumps(
+        {"recording": {"started_at_utc": started_at}}))
+    return work
+
+
+@needs_ffmpeg
+def test_v1_sidecar_route_refuses_unusable_trim(tmp_path):
+    """r19 #1 (BLOCKER, M1 refuse side): with usable sidecars attached,
+    a junk canonical.trim used to convert at head 0.0 with the stamp
+    kept — created == started then made the raw verify falsely condemn
+    the still-correct CSV and the planned retranslate re-bin every
+    event one head-cut early: silent delivered desync. The conversion
+    now REFUSES typed, BEFORE any write (attempt 2 sees the identical
+    dir), for both junk-trim shapes."""
+    import csv as _csv
+
+    import pytest
+
+    from pipeline import fix as fixmod
+    for i, (trim, loc) in enumerate((("bogus", True),
+                                     ({"head_cut_s": "abc"}, True),
+                                     ("bogus", "mixed"))):
+        work = _v1_with_sidecars(tmp_path, "2026-08-10T15:34:03Z",
+                                 f"m1refuse{i}", "2026-08-10T15:33:55Z",
+                                 trim, at_root=loc)
+        with pytest.raises(fixmod.FixFailed) as e:
+            fixmod.fix_v1_to_v2(work, "kamla")
+        assert "canonical.trim" in str(e.value)
+        with (work / "frames.csv").open(newline="") as f:
+            header = next(_csv.reader(f))
+        assert len(header) == 7, \
+            "the refusal precedes every write — frames.csv is still v1"
+
+
+@needs_ffmpeg
+def test_v1_sidecar_route_recovers_unusable_stamp(tmp_path):
+    """r19 #1 (M1 recovery arm): an unusable created_at_utc beside a
+    USABLE trim and usable sidecars used to be omitted — recompute then
+    synthesized a now-UTC stamp that poisoned the raw verify and made
+    the retranslate refuse on both attempts (wrongful terminal reject
+    of the exact class L1 set out to rescue). The stamp is now
+    RECOVERED from ground truth: started_at_utc + head_cut."""
+    from pipeline import fix as fixmod
+    work = _v1_with_sidecars(tmp_path, "not-a-date", "m1recover",
+                             "2026-08-10T15:33:55Z",
+                             {"head_cut_s": 8.0}, at_root=False)
+    note = fixmod.fix_v1_to_v2(work, "kamla")
+    assert "converted v1 -> v2" in note and "recovered" in note
+    s = json.loads((work / "session.json").read_text())
+    assert s["created_at_utc"] == "2026-08-10T15:34:03.000000Z", \
+        "the delivered stamp is raw ground truth, not a synthesized now"
+
+
+@needs_ffmpeg
+def test_v1_sidecar_route_usable_stamp_control(tmp_path):
+    """M1 proceed-side control (§2 rules 3/4): a parseable stamp beside
+    a usable trim converts exactly as before — stamp + head_cut — with
+    the sidecars attached and no refusal."""
+    from pipeline import fix as fixmod
+    work = _v1_with_sidecars(tmp_path, "2026-08-10T15:34:03Z",
+                             "m1happy", "2026-08-10T15:33:58Z",
+                             {"head_cut_s": 5.0}, at_root=True)
+    note = fixmod.fix_v1_to_v2(work, "kamla")
+    assert "converted v1 -> v2" in note and "recovered" not in note
+    s = json.loads((work / "session.json").read_text())
+    assert s["created_at_utc"] == "2026-08-10T15:34:08.000000Z"
+
+
+@needs_ffmpeg
+def test_v1_overflow_head_cut_degrades_without_sidecars(tmp_path):
+    """r19 #4≡#6 (M1): OverflowError escaped L1's (TypeError,
+    ValueError) net — a JSON bigint, Infinity, '1e999' or a
+    large-but-finite 1e18 head_cut_s crashed the float parse, the
+    timedelta build or the datetime addition on both attempts. With no
+    sidecars every overflow shape now degrades: the conversion
+    completes and the parseable stamp is KEPT (head 0.0, r19 #10)."""
+    from pipeline import fix as fixmod
+    from pipeline.tests.test_r_loop15 import _v1_work
+    for i, junk in enumerate((10**400, float("inf"), "1e999", 1e18)):
+        work = _v1_work(tmp_path, "2026-08-10T15:34:03Z", f"m1ovf{i}")
+        s = json.loads((work / "session.json").read_text())
+        s["canonical"]["trim"] = {"head_cut_s": junk}
+        (work / "session.json").write_text(json.dumps(s))
+        note = fixmod.fix_v1_to_v2(work, "kamla")
+        assert "converted v1 -> v2" in note, repr(junk)
+        out = json.loads((work / "session.json").read_text())
+        assert out["created_at_utc"] == "2026-08-10T15:34:03.000000Z", \
+            repr(junk)
+
+
+@needs_ffmpeg
+def test_v1_junk_head_cut_value_keeps_valid_stamp(tmp_path):
+    """r19 #10 (M1, no-sidecar arm): L1 parsed the stamp and the trim
+    in ONE try block, so a junk head_cut_s VALUE ('5,0' — the same
+    locale class as the L1 dx/dy fix) discarded the VALID parseable
+    stamp and the delivered created_at_utc silently became processing
+    wall-clock time. The head cut parse is now separate: the junk
+    value degrades to 0.0 and the good stamp ships."""
+    from pipeline import fix as fixmod
+    from pipeline.tests.test_r_loop15 import _v1_work
+    for i, junk in enumerate(("5,0", "abc")):
+        work = _v1_work(tmp_path, "2026-08-10T15:34:03Z", f"m1jt{i}")
+        s = json.loads((work / "session.json").read_text())
+        s["canonical"]["trim"] = {"head_cut_s": junk}
+        (work / "session.json").write_text(json.dumps(s))
+        note = fixmod.fix_v1_to_v2(work, "kamla")
+        assert "converted v1 -> v2" in note
+        out = json.loads((work / "session.json").read_text())
+        assert out["created_at_utc"] == "2026-08-10T15:34:03.000000Z", \
+            "a junk trim value must not cost the valid stamp"

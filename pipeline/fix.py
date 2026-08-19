@@ -1534,6 +1534,37 @@ def fix_sessionjson_recompute(work: Path, game: str) -> str:
     return "session.json recomputed from video+CSV ground truth"
 
 
+def _v1_sidecar_started(work: Path) -> datetime | None:
+    """The v1 work dir's usable raw started_at_utc, else None — the
+    has_raw_sidecars usability rule, at both locations fix_v1_to_v2 can
+    see them in: the work ROOT on a first run (this fix moves the
+    sidecars into raw/ only at its end) and raw/ on a re-entrant run
+    (the K2 two-location rule). Non-None means the head-offset contract
+    (created − started == binning head) will be LIVE for this session's
+    raw verify and any later retranslate. Each file is located
+    INDEPENDENTLY: a crash between this fix's own per-file moves leaves
+    the pair split across root and raw/, and the re-entrant run's move
+    reunites them — a pair-per-location test would read that split as
+    no-sidecars and fabricate the stamp the reunited contract then
+    judges."""
+    def _find(name: str) -> Path | None:
+        for base in (work, work / "raw"):
+            if (base / name).exists():
+                return base / name
+        return None
+
+    mp, ip = _find("metadata.json"), _find("inputs.jsonl")
+    if mp is None or ip is None:
+        return None
+    try:
+        meta = json.loads(mp.read_text(encoding="utf-8", errors="replace"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    rec = meta.get("recording") if isinstance(meta, dict) else None
+    return _utc(rec.get("started_at_utc") if isinstance(rec, dict)
+                else None)
+
+
 def fix_v1_to_v2(work: Path, game: str) -> str:
     """ARR_V1_FORMAT: mechanical v1→v2 (playbook §6 — actions are already
     resolved; raws not needed).
@@ -1546,7 +1577,18 @@ def fix_v1_to_v2(work: Path, game: str) -> str:
     ever precede this step — an uncaught ValueError burned both
     attempts into a wrongful terminal reject of a repairable session.
     A corrupt session.json is reachable here too: sniff types the
-    payload v1 on key_binding.json alone, without parsing it."""
+    payload v1 on key_binding.json alone, without parsing it.
+
+    Degrading must never FABRICATE the head-offset contract (r19 #1,
+    the iteration-19 BLOCKER): wherever usable raw sidecars exist,
+    created_at_utc − started_at_utc IS the binning head offset —
+    _verify_against_raw re-bins by it and retranslate_from_sidecars
+    derives head_s from it — so a made-up value there ships a silently
+    desynced retranslate or manufactures a wrongful terminal reject.
+    On that route an unusable stamp is RECOVERED from ground truth
+    (started_at + head_cut) and an unusable head cut is a typed
+    refusal; only the no-sidecar route keeps the pure degrade arms,
+    where nothing downstream consumes the difference."""
     s = _read_session_json(work)
     if "canonical" not in s and "game_title" in s:
         # already a flat v2 session that merely carries a stray
@@ -1567,6 +1609,75 @@ def fix_v1_to_v2(work: Path, game: str) -> str:
     if not all(c in col for c in need):
         raise FixFailed("v1 frames.csv missing input columns")
     slug = game or game_key_from_name(canonical.get("game", "")) or ""
+
+    # ---- r19 #1 (BLOCKER) / #4≡#6 / #10 (M1): resolve the delivered
+    # stamp BEFORE anything is written, so a refusal leaves the work dir
+    # byte-identical for attempt 2. The stamp and the head cut parse
+    # SEPARATELY; what a degraded value may become depends on whether
+    # the raw-sidecar head-offset contract is live (see docstring). An
+    # ABSENT trim/head_cut_s field is the documented v1-optional shape
+    # (a payload that never recorded a cut, head 0.0 is TRUE); a
+    # PRESENT-but-junk one is destroyed evidence and must not silently
+    # read as 0.0. OverflowError rides every guard here — JSON-legal
+    # bigints, Infinity and '1e999' raise it past (TypeError,
+    # ValueError) in the float parse, the timedelta build AND the
+    # datetime addition (r19 #4≡#6).
+    import math
+    ca = canonical.get("created_at_utc")
+    trim_meta = canonical.get("trim")
+    stamp = None
+    if ca:
+        try:
+            stamp = datetime.fromisoformat(str(ca).replace("Z", "+00:00"))
+            if stamp.tzinfo is None:
+                # a naive v1 stamp is UTC by contract — repair it in
+                # place so .astimezone below can't shift it by the
+                # host's offset (r15 #7: the sole omission of the
+                # sibling guard; the qa checker that would flag naive
+                # stamps never runs before ARR_V1_FORMAT routes here)
+                stamp = stamp.replace(tzinfo=timezone.utc)
+        except (TypeError, ValueError, OverflowError):
+            stamp = None
+    head_cut, head_usable = 0.0, True
+    if trim_meta is not None and not isinstance(trim_meta, dict):
+        head_usable = False
+    elif isinstance(trim_meta, dict):
+        try:
+            head_cut = float(trim_meta.get("head_cut_s") or 0.0)
+            head_usable = math.isfinite(head_cut)
+        except (TypeError, ValueError, OverflowError):
+            head_usable = False
+    created_out, recovered = None, False
+    if stamp is not None and head_usable:
+        try:
+            created_out = stamp + timedelta(seconds=head_cut)
+        except OverflowError:
+            head_usable = False
+    if created_out is None:
+        started = _v1_sidecar_started(work)
+        if started is not None:
+            # the contract is LIVE: recover from ground truth or refuse
+            # typed — never fabricate (r19 #1)
+            if head_usable:
+                try:
+                    created_out = started + timedelta(seconds=head_cut)
+                    recovered = True
+                except OverflowError:
+                    head_usable = False
+            if not head_usable:
+                raise FixFailed(
+                    "canonical.trim head_cut_s unusable while usable raw "
+                    "sidecars are attached — a fabricated head offset "
+                    "would silently desync or wrongly reject the "
+                    "raw-sidecar verify/retranslate (r19 #1); repair "
+                    "session.json's canonical.trim before converting")
+        elif stamp is not None:
+            # junk head cut with no live contract: keep the good stamp
+            # (head 0.0) rather than discarding it for a bad neighbor
+            # (r19 #10); an unusable stamp stays omitted for
+            # fix_sessionjson_recompute to synthesize
+            created_out = stamp
+
     # the session's own keybind.json is AUTHORITATIVE (the F4 doctrine's
     # fourth instance — r17 #2): judging `bound` against the built-ins
     # alone deleted every custom-bound key press from the converted rows
@@ -1596,7 +1707,6 @@ def fix_v1_to_v2(work: Path, game: str) -> str:
     from translator.v2 import CAMERA_EXTRA_COLS
     cam_null = [""] * (len(C2W_COLS) + len(CAMERA_COLS)
                        + len(CAMERA_EXTRA_COLS))
-    import math
 
     def _parse_motion(v) -> float:
         # unparseable/non-finite degrades to 0.0, exactly like
@@ -1650,30 +1760,13 @@ def fix_v1_to_v2(work: Path, game: str) -> str:
     _write_csv(work, V2_FRAME_COLS, out)
 
     new_s = {"session_id": canonical.get("session_id", work.name)}
-    ca = canonical.get("created_at_utc")
-    trim_meta = canonical.get("trim")
-    if not isinstance(trim_meta, dict):
-        trim_meta = {}
-    if ca:
-        try:
-            created = datetime.fromisoformat(str(ca).replace("Z", "+00:00"))
-            if created.tzinfo is None:
-                # a naive v1 stamp is UTC by contract — repair it in
-                # place so .astimezone below can't shift it by the
-                # host's offset (r15 #7: the sole omission of the
-                # sibling guard; the qa checker that would flag naive
-                # stamps never runs before ARR_V1_FORMAT routes here)
-                created = created.replace(tzinfo=timezone.utc)
-            created += timedelta(
-                seconds=float(trim_meta.get("head_cut_s") or 0.0))
-            new_s["created_at_utc"] = created.astimezone(
-                timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%f") + "Z"
-        except (TypeError, ValueError):
-            # an unusable stamp/trim is OMITTED, not crashed on (r18
-            # #1≡#2≡#3≡#5 sibling read): fix_sessionjson_recompute
-            # below synthesizes a canonical created_at_utc from ground
-            # truth — its designed r-loop 7/8 job for exactly this
-            pass
+    # created_out was resolved (or refused) BEFORE any write above —
+    # r19 #1/#4≡#6/#10 (M1); None = omitted, fix_sessionjson_recompute
+    # below synthesizes a canonical stamp from ground truth (its
+    # designed r-loop 7/8 job)
+    if created_out is not None:
+        new_s["created_at_utc"] = created_out.astimezone(
+            timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%f") + "Z"
     (work / "session.json").write_text(json.dumps(new_s, indent=2))
     fix_sessionjson_recompute(work, slug)
     (work / "key_binding.json").unlink(missing_ok=True)
@@ -1688,4 +1781,9 @@ def fix_v1_to_v2(work: Path, game: str) -> str:
     if not (work / "rrd_creation.py").exists():
         rrdmod.write_script(work)
     (work / "session.rrd").touch()
-    return f"converted v1 -> v2 ({len(out)} rows)"
+    note = f"converted v1 -> v2 ({len(out)} rows)"
+    if recovered:
+        # attributable in the fixlog: the delivered stamp came from raw
+        # ground truth, not from the (unusable) canonical block (r19 #1)
+        note += "; created_at_utc recovered from raw started_at_utc + head_cut"
+    return note
