@@ -743,9 +743,32 @@ def map_reasons(rep: dict, aux: dict,
                     "no mouse-button events; no combat evidence in video — "
                     "possibly genuine non-use (benign zero-buttons)")
         if inv.get("os_keys"):
-            reasons.append(_reason(
-                "INP_OSKEYS", True, True, {"keys": inv["os_keys"]},
-                f"OS/system keys in input_keys: {inv['os_keys']}"))
+            # the trigger judges the session's OWN binding (r16 #3): the
+            # engine's os_keys is pattern-only, but the planned
+            # FIX_KEY_HYGIENE deliberately KEEPS bound OS/F-keys (the
+            # locked strip-unless-bound rule), so a keybind-blind
+            # trigger made the fix a provable no-op — the reason
+            # re-fired every revalidation, two burned attempts, and a
+            # spec-conformant delivery took a wrongful terminal reject.
+            # Bound hits surface as an advisory so the dossier still
+            # shows them; unbound pollution keeps today's blocking
+            # reason, which hygiene really does clear.
+            from translator.v2 import key_canonical
+            bound = aux.get("bound_literals") or frozenset()
+            os_keys = inv["os_keys"]
+            if not isinstance(os_keys, dict):
+                os_keys = {t: 1 for t in os_keys}
+            unbound = {t: n for t, n in os_keys.items()
+                       if key_canonical(t) not in bound}
+            kept = {t: n for t, n in os_keys.items() if t not in unbound}
+            if unbound:
+                reasons.append(_reason(
+                    "INP_OSKEYS", True, True, {"keys": unbound},
+                    f"OS/system keys in input_keys: {unbound}"))
+            if kept:
+                advisories.append(
+                    f"OS-pattern keys BOUND in this session's keybind — "
+                    f"kept per the strip-unless-bound rule: {kept}")
         if inv.get("bleed_frames"):
             reasons.append(_reason(
                 "INP_BLEED", True, True,
@@ -951,6 +974,18 @@ def validate_session(work_dir: Path, dossier_dir: Path, *,
     aux["has_raw"] = bool(raw_by_sid)
     aux["vlm_required"] = True
     aux["gate_destroyed"] = _gate_destroyed(dossier_dir)
+    # the INP_OSKEYS trigger judges the session's own binding (r16 #3);
+    # on failure, degrade to the pre-fix all-unbound behavior with a
+    # note, never crash validation
+    try:
+        aux["bound_literals"] = _session_bound_literals(work_dir,
+                                                        expected_game)
+    except Exception as e:
+        aux["bound_literals"] = frozenset()
+        aux.setdefault("notes", []).append(
+            f"session keybind unresolvable for the OS-key trigger "
+            f"({type(e).__name__}: {e}) — all OS-pattern keys treated as "
+            f"unbound this pass")
     # the probed duration is the truth source for the hard length gates;
     # the engine's duration_s is session.json's CLAIM (r-loop 9 #12)
     aux["probed_duration_s"] = probed_info.duration_s
@@ -963,6 +998,27 @@ def validate_session(work_dir: Path, dossier_dir: Path, *,
     _write_verdict(dossier_dir, work_dir.name, res)
     _archive_analysis(work_dir, dossier_dir)
     return res
+
+
+def _session_bound_literals(work_dir: Path, game: str | None) -> frozenset:
+    """The session's bound literals, resolved exactly as fix_key_hygiene
+    does (r16 #3): the session's own raw/keybind.json when present
+    (resolve_keybind's built-in fallback covers unusable files), else the
+    built-in for the ledger game, plus KEYBIND_PATCHES. Feeds the
+    INP_OSKEYS trigger so it judges the same binding the planned fix
+    will."""
+    from translator.keybind import bound_literals
+    from translator.keybinds import KEYBINDS
+    from translator.translate import resolve_keybind
+    from translator.v2 import KEYBIND_PATCHES
+    kbp = Path(work_dir) / "raw" / "keybind.json"
+    if kbp.exists():
+        kb = resolve_keybind(keybind_path=kbp, game_name=game,
+                             exe_name=None)
+    else:
+        kb = dict(KEYBINDS.get(game or "", {}))
+    kb.update(KEYBIND_PATCHES.get(game or "", {}))
+    return bound_literals(kb)
 
 
 def _seed_shift_record(work_dir: Path) -> None:
