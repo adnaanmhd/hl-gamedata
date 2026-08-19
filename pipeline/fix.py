@@ -493,7 +493,8 @@ def _dispatch(fix_id: str, params: dict, work: Path, game: str,
         # resolve `game` to the corrected slug before apply_fixes.
         return retranslate_from_sidecars(
             work, game_override=game
-            if params.get("rerouted") and game in C.GAMES else None)
+            if params.get("rerouted") and game in C.GAMES else None,
+            ledger_game=game if game in C.GAMES else None)
     if fix_id == "FIX_CUT_SEGMENTS":
         # the PROBED duration, not session.json's (which may be the very
         # thing that's wrong) — a stale short duration would silently
@@ -864,7 +865,8 @@ def fix_translate_raw(work: Path) -> str:
 
 
 def retranslate_from_sidecars(work: Path, *,
-                              game_override: str | None = None) -> str:
+                              game_override: str | None = None,
+                              ledger_game: str | None = None) -> str:
     """FIX_RETRANSLATE for a v2 upload with raw sidecars (R3): re-bin the
     events onto the DELIVERED video (no re-trim — the head offset comes from
     metadata started_at vs session created_at), re-run lag correction and
@@ -872,7 +874,17 @@ def retranslate_from_sidecars(work: Path, *,
 
     `game_override` is the REROUTED game: the raw metadata is exactly what
     the mismatch falsified, so on reroute the built-in keybind for the
-    corrected game governs, never the metadata-derived one (review-2 #5)."""
+    corrected game governs, never the metadata-derived one (review-2 #5).
+
+    `ledger_game` anchors the NON-reroute branch (r-loop 14 #1≡#6): the
+    player-typed chain (metadata game name / game_name / game_title) is
+    degradable to numeric/absent/wrong-game garbage, and anchoring the
+    built-in fallback and the slug on it let resolve_keybind return {} —
+    stripping 100% of key presses into an unfixable terminal reject — or
+    re-bin under the WRONG game's built-in. The ledger slug _dispatch
+    holds governs instead, exactly as the F4 siblings (fix_key_hygiene,
+    fix_actions_context) already do; the session's own raw/keybind.json
+    still wins when usable (r13 #4 intent intact)."""
     from translator.v2 import GAME_TITLES
     raw = work / "raw"
     # see translator/v2.py: player-typed free text, non-UTF-8 reachable
@@ -893,7 +905,11 @@ def retranslate_from_sidecars(work: Path, *,
     else:
         game_name = game_info.get("name") or meta.get("game_name") \
             or s.get("game_title")
-        slug = game_key_from_name(game_name or "", exe_name) \
+        # ledger slug first (r-loop 14 #1≡#6): every downstream consumer
+        # of this slug (the KEYBIND_PATCHES update, the context-gating
+        # test, fix_sessionjson_recompute) keys on the game the LEDGER
+        # holds, never on the player-typed chain
+        slug = ledger_game or game_key_from_name(game_name or "", exe_name) \
             or "unknown_game"
 
     def _utc(ts) -> datetime | None:
@@ -925,8 +941,12 @@ def retranslate_from_sidecars(work: Path, *,
     if game_override:
         keybind = dict(KEYBINDS.get(slug, {}))
     else:
+        # the fallback anchor is the ledger slug (r-loop 14 #1≡#6): the
+        # session's own keybind.json still wins when usable, and
+        # resolve_keybind's internal parsed-but-unusable fallback lands
+        # on the RIGHT built-in once anchored here
         keybind = resolve_keybind(keybind_path=raw / "keybind.json",
-                                  game_name=game_name,
+                                  game_name=ledger_game or game_name,
                                   exe_name=exe_name)
     keybind.update(KEYBIND_PATCHES.get(slug, {}))
     rules = build_resolver(keybind)
