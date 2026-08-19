@@ -703,10 +703,17 @@ def scan(cfg: C.Config, ledger: Ledger,
     # digest's 'undownloaded' backlog stayed permanently inflated (an
     # --until-idle canary could never reach idle). The trigger is the
     # listing-derived STATE evidence, never local media. QUARANTINED
-    # with NO INT_PATH reason keeps it off the folder-issues chase
-    # list; if the same sid reappears at a clean path, the existing
-    # quarantined-path heal above re-registers it (self-healing, like
-    # the sibling arms).
+    # with NO INT_PATH reason keeps it off the folder-issues chase list.
+    # A SAME-path restore (Drive trash restore, identical re-upload) is
+    # DELIBERATELY terminal — RULED by Adnaan 2026-08-19 ("if the
+    # folder is gone, it's gone"; r15 #1≡#2≡#3≡#10 confirmed the
+    # same-path case never re-registers, and that is the design, not a
+    # gap): the correction is a re-upload under a NEW folder name,
+    # which mints a new session id and processes as a completely
+    # separate session (both dedupe sites exclude QUARANTINED rows, so
+    # this dead row never blocks or dup-rejects the renamed copy). Only
+    # the same sid at a DIFFERENT path re-registers, via the existing
+    # quarantined-path heal above.
     for r in ledger.by_state("DISCOVERED"):
         rp = r["drive_path"] or ""
         parts = Path(rp).parts if rp else ()
@@ -714,9 +721,11 @@ def scan(cfg: C.Config, ledger: Ledger,
                 or rp in listed_dirs:
             continue
         ledger.set_state(r["session_id"], "QUARANTINED",
-                         "folder gone from Drive I — dropped from intake")
+                         "folder gone from Drive I — dropped from intake; "
+                         "re-upload under a NEW folder name to re-enter")
         print(f"[vanished-discovered] {rp} — folder gone from listing; "
-              f"{r['session_id']} dropped from intake", file=sys.stderr)
+              f"{r['session_id']} dropped from intake; re-upload under a "
+              f"NEW folder name to re-enter", file=sys.stderr)
     return res
 
 

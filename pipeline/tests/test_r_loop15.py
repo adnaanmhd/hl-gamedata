@@ -193,3 +193,72 @@ def test_v1_aware_created_at_control_unchanged(tmp_path):
     fixmod.fix_v1_to_v2(work, "kamla")
     s = json.loads((work / "session.json").read_text())
     assert s["created_at_utc"] == "2026-08-10T15:34:03.000000Z"
+
+
+# ------- r15 #1≡#2≡#3≡#10 (I7): H5 gone-is-gone RULING + rename
+# ------- coaching
+
+
+def test_vanished_same_path_restore_stays_quarantined_by_ruling(
+        cfg, ledger):
+    """r15 #1≡#2≡#3≡#10 (I7, RULED Adnaan 2026-08-19: 'if the folder
+    is gone, it's gone'): a SAME-path reappearance (Drive trash
+    restore, identical re-upload — same path, same md5, same ctime) is
+    DELIBERATELY terminal: no heal, no listing counters, no event
+    churn. This pins the RULING against a future well-meaning
+    same-path heal; the different-path heal control lives in
+    test_r_loop14 (test_vanished_discovered_reappearing_folder_heals)
+    and stays green untouched. The correction path is a re-upload
+    under a NEW folder name, which mints a new session id — both
+    dedupe sites exclude QUARANTINED rows, so the dead row cannot
+    block or dup-reject the renamed copy."""
+    from pipeline import ingest
+    from pipeline.tests.conftest import make_session_entries
+    from pipeline.tests.test_r_loop14 import _H5_SID, _h5_discovered
+    _h5_discovered(cfg, ledger)
+    other = make_session_entries(
+        sid="2026-08-14T11-00-00Z_kamla_c_00000000000000b6", md5="h6-md5")
+    ingest.scan(cfg, ledger, entries=other)
+    assert ledger.get(_H5_SID)["state"] == "QUARANTINED"
+    n_events = ledger.db.execute(
+        "SELECT COUNT(*) c FROM events WHERE session_id=?",
+        (_H5_SID,)).fetchone()["c"]
+    # the folder comes back at the IDENTICAL path — twice
+    for _ in range(2):
+        res = ingest.scan(cfg, ledger,
+                          entries=make_session_entries(sid=_H5_SID,
+                                                       md5="h5-md5"))
+        assert ledger.get(_H5_SID)["state"] == "QUARANTINED", \
+            "same-path restore is terminal BY RULING"
+        assert res.discovered == [] and res.superseded == [] \
+            and res.integrity_flags == [], res
+    after = ledger.db.execute(
+        "SELECT COUNT(*) c FROM events WHERE session_id=?",
+        (_H5_SID,)).fetchone()["c"]
+    assert after == n_events, "silently: no event churn on restores"
+
+
+def test_vanished_detail_and_loud_line_carry_the_rename_coaching(
+        cfg, ledger, capsys):
+    """I7 coaching string (fail-first at ce26148: absent there): since
+    the same-path restore is terminal by ruling, the ONE ops surface —
+    the quarantine event detail and the [vanished-discovered] stderr
+    line — must tell the operator the correction that actually works:
+    re-upload under a NEW folder name."""
+    from pipeline import ingest
+    from pipeline.tests.conftest import make_session_entries
+    from pipeline.tests.test_r_loop14 import _H5_SID, _h5_discovered
+    _h5_discovered(cfg, ledger)
+    capsys.readouterr()
+    ingest.scan(cfg, ledger, entries=make_session_entries(
+        sid="2026-08-14T11-00-00Z_kamla_c_00000000000000b6", md5="h6-md5"))
+    last = ledger.db.execute(
+        "SELECT detail FROM events WHERE session_id=? ORDER BY id",
+        (_H5_SID,)).fetchall()[-1]
+    assert "folder gone from Drive I" in last["detail"]
+    assert "re-upload under a NEW folder name" in last["detail"], \
+        last["detail"]
+    assert len(last["detail"]) <= 300, "under the event detail cap"
+    err = capsys.readouterr().err
+    assert "[vanished-discovered]" in err
+    assert "re-upload under a NEW folder name" in err
