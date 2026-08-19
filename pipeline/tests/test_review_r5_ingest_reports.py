@@ -66,9 +66,13 @@ def test_quarantine_heal_resets_slot_like_supersede(cfg, ledger):
     the corrected re-upload was insta-rejected 'fix retries exhausted' and
     its hours never reached another payment sheet."""
     sid = "2026-08-14T10-00-00Z_kamla_c_00000000000000e9"
+    # player p1@x.com matches the heal listing's builder default: the
+    # scenario is an OPERATOR-folder rename (player unchanged) — the old
+    # p@x.com seed accidentally made it cross-player, which the r17 #1
+    # identity guard rightly refuses (different bytes, different player)
     ledger.insert_session(
         session_id=sid, game="kamla", operator_email="Old Name",
-        player_email="p@x.com", drive_path=f"kamla/Old Name/p@x.com/{sid}",
+        player_email="p1@x.com", drive_path=f"kamla/Old Name/p1@x.com/{sid}",
         drive_ctime="2026-08-14T10:00:00.000Z", md5_video="oldmd5",
         bytes_=5, state="READY")
     # both fix attempts burned, footage probed/delivered, sheet stamped —

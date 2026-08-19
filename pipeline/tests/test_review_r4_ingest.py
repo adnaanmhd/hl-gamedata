@@ -134,7 +134,12 @@ def test_quarantine_heal_wipes_stale_work_dirs_and_shift_record(cfg,
     entry in the shared translation report — so the fresh download can't
     merge with the old upload's leftovers."""
     sid_q = "2026-08-14T10-00-00Z_kamla_c_00000000000000e4"
-    _seed(ledger, sid_q, state="QUARANTINED", path=f"kamla/badpath/{sid_q}")
+    # player="" matches the production INT_PATH insertion (scan
+    # quarantines a malformed path with player_email="") — the r17 #1
+    # identity guard rightly refuses a CROSS-player heal, which this
+    # seed accidentally was (the wipe under test is player-agnostic)
+    _seed(ledger, sid_q, state="QUARANTINED", player="",
+          path=f"kamla/badpath/{sid_q}")
     work = cfg.work / sid_q
     (work / "raw").mkdir(parents=True)
     (work / "raw" / "inputs.jsonl").write_text("stale sidecar")

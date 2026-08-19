@@ -281,6 +281,40 @@ def scan(cfg: C.Config, ledger: Ledger,
                     # may have seeded the sid's shift record, and the
                     # healed re-upload's bytes can differ — drop it
                     # (review-r4 #7)
+                    #
+                    # Identity guard (r-loop 17 #1): rows with a REAL
+                    # prior registration (player_email non-empty —
+                    # INT_PATH chase rows are inserted with "" above and
+                    # stay unguarded, the heal's designed population)
+                    # get the review-r5 #41 cross-player refusal
+                    # restored. The H5 vanished arm feeds this branch
+                    # healthy DISCOVERED rows one scan after the
+                    # collision flag below refused them, so an unguarded
+                    # heal re-attributed player A's registered sid to
+                    # player B's tree in two scans — a payment
+                    # attribution flip (and, with a different md5, a
+                    # stamp-clearing capture of arbitrary new bytes). A
+                    # SAME-player re-upload still heals with any bytes
+                    # (the review-r3 #7 correction class — bytes can
+                    # differ, review-r4 #7, stamps then clear below as
+                    # genuinely new hours), and a byte-identical
+                    # cross-player move still heals exactly like the
+                    # move-heal; only a cross-player claim WITHOUT byte
+                    # identity is refused. The coached correction
+                    # (re-upload under a NEW folder name, minting a new
+                    # sid) stays open.
+                    if existing["player_email"] \
+                            and existing["player_email"] != ds.player_email \
+                            and not (vmd5 and existing["md5_video"]
+                                     and vmd5 == existing["md5_video"]):
+                        res.integrity_flags.append(
+                            f"{ds.session_id}: quarantined-path heal "
+                            f"REFUSED — identity mismatch: "
+                            f"{ds.drive_path} would move the sid "
+                            f"registered to {existing['player_email']} "
+                            f"into {ds.player_email}'s tree without "
+                            f"byte identity — stays QUARANTINED")
+                        continue
                     from .validate import _locked_report_remove
                     _locked_report_remove(
                         cfg.work / "translation_report.json",
