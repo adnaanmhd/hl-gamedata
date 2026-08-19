@@ -735,6 +735,17 @@ def test_fix_sync_tool_contains_a_traversal_session_id(tmp_path,
     # alignment is not what this test pins
     monkeypatch.setattr(tool, "align_offset",
                         lambda p1, p2: (0, 0, len(p2)))
+    # the tool copies delivery files with `cp -c` (APFS clone — macOS
+    # only; the tool is from the Mac-era v1 deliveries and fails on the
+    # Linux VM). The copy is not the pin either — do it portably. The
+    # G7-revert mutant still fails this test: the escaped WRITE happens
+    # at the frames.csv/mkdir step, before any copy.
+    def _portable_cp(argv, check=False, **kw):
+        shutil.copy2(argv[-2], argv[-1])
+        import subprocess as _sp
+        return _sp.CompletedProcess(argv, 0)
+    monkeypatch.setattr(tool, "subprocess",
+                        SimpleNamespace(run=_portable_cp))
     out_root = tmp_path / "deep" / "deeper" / "out"
     out_root.mkdir(parents=True)
     res = tool.fix_session(v1d, v2d, out_root, "08-19-2026")
