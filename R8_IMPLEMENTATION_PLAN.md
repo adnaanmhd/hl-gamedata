@@ -58,13 +58,18 @@ verdicts: session scratchpads `r11-results.json` … `r14-results.json`.
   `492a076`, fail-first at 5f7015b, gate 743/743
 - [x] H8 analyze_sample verdicts judge the probed duration (r14 #9) —
   landed `e01edc7`, fail-first at 5f7015b, gate 746/746
-- [ ] H9 tests-only: G5 depth-2 paid-piece pin + G4 site-4 de-vacuous
-  + fix_sync_from_v1 traversal twin (r14 #11/#12/#13) — §3
-- [ ] Post-H9: sweep results recorded per commit (§2); new SUITE_FLOOR
-  measured+pinned (passed − 4, run_suite.sh + FLIP_RUNBOOK §6b); full
-  gate green Mac AND VM; tree-verify; then judge **iteration 14
-  QUIET/not per R5_TRIAGE §7** (0 blockers + all 13 fixed + both gates
-  green ⇒ QUIET after fixing) and record it here
+- [x] H9 tests-only: G5 depth-2 paid-piece pin + G4 site-4 de-vacuous
+  + fix_sync_from_v1 traversal twin (r14 #11/#12/#13) — landed
+  `747422e`; all three pins proved against the finders' EXACT mutants
+  in a HEAD scratch copy (each FAILS on its mutant); DEVIATION: a
+  real pre-existing fix_sync_from_v1 resolve_actions-unpack crash
+  found and fixed in-commit (recorded inline in §3); gate 749/749
+- [ ] Post-H9 IN PROGRESS 2026-08-19: sweeps recorded per commit ✓;
+  SUITE_FLOOR 745 pinned (`37d7d88`) ✓; Mac gate 749/749 floor 745 ✓;
+  tree-verify ✓ (no MUTATION strings, only pre-existing junk
+  uncommitted); VM gate PENDING gcloud reauth (asked Adnaan to run
+  `! gcloud auth login`); iteration-14 quiet judgment WAITS on the VM
+  gate (R5_TRIAGE §7 needs both gates green)
 - [ ] Review iteration 15 (confirmation pass, runs REGARDLESS of 14's
   verdict — RULED by Adnaan 2026-08-19, his standing preference; ALL 7
   lanes — the driver-core conditional resolved NOT-triggered; check
