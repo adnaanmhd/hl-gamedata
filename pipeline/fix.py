@@ -64,6 +64,23 @@ class FixFailed(Exception):
     pass
 
 
+def _utc(ts) -> datetime | None:
+    """Parseable ISO stamp -> aware datetime (naive reads as UTC);
+    anything else -> None rather than a raise: every value routed here
+    comes from a player-supplied file, and a bare KeyError/TypeError/
+    ValueError escaped apply_fixes as an untyped crash (r-loop 7).
+    Shared by has_raw_sidecars (the plan gate) and
+    retranslate_from_sidecars (the consumer) so "usable" means the same
+    thing at both sites (r19 #2)."""
+    if not isinstance(ts, str):
+        return None
+    try:
+        d = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return d if d.tzinfo else d.replace(tzinfo=timezone.utc)
+
+
 def has_raw_sidecars(work: Path) -> bool:
     """BOTH sidecars, USABLE — the condition retranslate_from_sidecars
     actually needs (it opens and parses raw/metadata.json
@@ -82,7 +99,17 @@ def has_raw_sidecars(work: Path) -> bool:
     FIX_RETRANSLATE that crashed JSONDecodeError on both attempts,
     superseding the CSV-level repairs that would have delivered the
     session. inputs.jsonl needs no parse test here — load_events reads
-    it with errors='replace' line-tolerantly (r-loop 4)."""
+    it with errors='replace' line-tolerantly (r-loop 4).
+
+    SEMANTICALLY-unusable metadata is the same failure again (r19 #2):
+    the dict test alone admitted metadata whose recording.started_at_utc
+    is absent or junk, and retranslate_from_sidecars hard-requires that
+    stamp to derive the head offset — a typed FixFailed on both
+    attempts, still superseding the CSV-level repairs that would have
+    delivered the session, and nothing in the pipeline can ever repair
+    raw/metadata.json between attempts. "Usable" therefore requires the
+    one field the consumer cannot run without, judged by the consumer's
+    own parse (_utc)."""
     raw = Path(work) / "raw"
     if not ((raw / "inputs.jsonl").exists()
             and (raw / "metadata.json").exists()):
@@ -92,7 +119,10 @@ def has_raw_sidecars(work: Path) -> bool:
             encoding="utf-8", errors="replace"))
     except (OSError, json.JSONDecodeError):
         return False
-    return isinstance(meta, dict)
+    if not isinstance(meta, dict):
+        return False
+    rec = meta.get("recording")
+    return isinstance(rec, dict) and _utc(rec.get("started_at_utc")) is not None
 
 
 def _read_session_json(work: Path) -> dict:
@@ -936,20 +966,13 @@ def retranslate_from_sidecars(work: Path, *,
         slug = ledger_game or game_key_from_name(game_name or "", exe_name) \
             or "unknown_game"
 
-    def _utc(ts) -> datetime | None:
-        """None rather than a raise: every value here comes from a
-        player-supplied file, and a bare KeyError/TypeError/ValueError
-        escaped apply_fixes as an untyped crash (r-loop 7)."""
-        if not isinstance(ts, str):
-            return None
-        try:
-            d = datetime.fromisoformat(ts.replace("Z", "+00:00"))
-        except ValueError:
-            return None
-        return d if d.tzinfo else d.replace(tzinfo=timezone.utc)
-
-    started = _utc((meta.get("recording") or {}).get("started_at_utc")
-                   if isinstance(meta, dict) else None)
+    # the module-level _utc (shared with has_raw_sidecars, r19 #2); a
+    # truthy non-dict "recording" block used to crash the old
+    # `(meta.get("recording") or {}).get(...)` with an untyped
+    # AttributeError — same player-file class, same degrade
+    rec = meta.get("recording") if isinstance(meta, dict) else None
+    started = _utc(rec.get("started_at_utc") if isinstance(rec, dict)
+                   else None)
     created = _utc(s.get("created_at_utc") if isinstance(s, dict) else None)
     if started is None or created is None:
         raise FixFailed(

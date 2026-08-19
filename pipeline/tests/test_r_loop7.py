@@ -213,7 +213,12 @@ def test_has_raw_means_the_same_thing_everywhere(tmp_path):
     (work / "raw").mkdir(parents=True)
     (work / "raw" / "inputs.jsonl").write_text("")
     assert fixmod.has_raw_sidecars(work) is False
-    (work / "raw" / "metadata.json").write_text("{}")
+    # a genuinely USABLE sidecar: r18 #4 (L2) added the dict-parse
+    # requirement and r19 #2 (M2) the parseable started_at_utc — "both
+    # present" is necessary but no longer sufficient
+    (work / "raw" / "metadata.json").write_text(
+        json.dumps({"recording": {"started_at_utc":
+                                  "2026-08-14T10:00:00Z"}}))
     assert fixmod.has_raw_sidecars(work) is True
 
 

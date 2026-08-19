@@ -189,10 +189,14 @@ def test_unusable_metadata_plans_csv_level_not_retranslate(tmp_path):
 
 def test_usable_metadata_still_plans_retranslate_control(tmp_path):
     """L2 control (§2 rule 4, the proceed side): both sidecars present
-    and parseable keep today's retranslate supersede; a missing file
-    keeps reading False (the r-loop-7 pin's own ground)."""
+    and USABLE keep today's retranslate supersede; a missing file
+    keeps reading False (the r-loop-7 pin's own ground). r19 #2 (M2)
+    tightened "usable" to require a parseable started_at_utc — the
+    control models a genuinely usable sidecar accordingly."""
     from pipeline import fix as fixmod
-    work = _raw_dir(tmp_path, '{"recording": {"started_at": 1}}')
+    work = _raw_dir(
+        tmp_path,
+        '{"recording": {"started_at_utc": "2026-08-12T08:33:31Z"}}')
     assert fixmod.has_raw_sidecars(work) is True
     plan = fixmod.plan_fixes(
         [{"code": "SYN_TS_NOT_PTS", "blocking": True, "fixable": True,
