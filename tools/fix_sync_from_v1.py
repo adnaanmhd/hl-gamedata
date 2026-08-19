@@ -47,7 +47,7 @@ import argparse
 import csv
 import json
 import re
-import subprocess
+import shutil
 import sys
 from bisect import bisect_right
 from datetime import datetime, timezone
@@ -292,8 +292,12 @@ def fix_session(v1_dir: Path, v2_dir: Path, out_root: Path, date: str) -> dict:
 
     for name in ("video.mp4", "session.json"):
         if not (out_dir / name).exists():
-            subprocess.run(["cp", "-c", str(v2_dir / name), str(out_dir / name)],
-                           check=True)
+            # portable copy (RULED 2026-08-19, I8): the old
+            # subprocess cp -c (APFS clone) exists only on macOS — the
+            # tool could not run on the Linux VM, where ops move at the
+            # flip; clone efficiency is dispensable for this operator
+            # tool
+            shutil.copy2(v2_dir / name, out_dir / name)
     rrd.generate(out_dir)
 
     report_path = out_root / "translation_report.json"
