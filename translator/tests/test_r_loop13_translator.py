@@ -65,7 +65,16 @@ def test_bigint_duration_with_raw_sidecars_skips_the_raw_recheck(
     float(s['duration_seconds'])*1e6 and its except tuple lacked
     OverflowError — a bigint claim on a session WITH raw sidecars
     crashed the checker there even after _check_session_json was
-    fixed. It must degrade to the documented warn-skip."""
+    fixed. It must degrade to the documented warn-skip.
+
+    De-vacuoused by r14 #12 (H9b): check_session_v2 calls
+    _verify_against_raw ONLY when the caller passes raw_bundle (there
+    is no auto-detection) — the original bare call never reached site
+    4 at all, and reverting BOTH site-4 arms ran the full suite green.
+    Now drives the production call shape (validate.py/analyze_sample
+    pass raw_bundle) and pins the specific degrade line.
+    Mutation-proofed with the finder's exact revert in a HEAD scratch
+    copy."""
     from datetime import timedelta
 
     from pipeline.tests.test_fix_cut_gate import _make_session
@@ -76,5 +85,31 @@ def test_bigint_duration_with_raw_sidecars_skips_the_raw_recheck(
     s = json.loads((d / "session.json").read_text())
     s["duration_seconds"] = 10 ** 400
     (d / "session.json").write_text(json.dumps(s))
-    r = check_session_v2(d)          # must not raise
+    r = check_session_v2(d, raw_bundle=d / "raw")     # must not raise
     assert r.status == "FAIL", r.issues
+    assert any("raw verification skipped" in i and "OverflowError" in i
+               for i in r.issues), \
+        f"site 4 must degrade to the documented warn-skip: {r.issues}"
+
+
+@needs_ffmpeg
+def test_bigint_event_t_with_inf_duration_skips_the_event(tmp_path):
+    """r14 #12 (H9b), the per-event sibling arm: an inf-class duration
+    claim (JSON 1e999) corrupts end_us, so a bigint mouse_raw t passes
+    the window test and int(e['t'] - head_us) overflows — the guarded
+    arm skips the garbage event instead of crashing the checker.
+    Mutation-proofed alongside the tuple arm (both site-4 halves must
+    be live for these two tests to pass)."""
+    from datetime import timedelta
+
+    from pipeline.tests.test_fix_cut_gate import _make_session
+    from pipeline.tests.test_r_loop8 import _created_at, _sidecars
+    from translator.v2 import check_session_v2
+    d = _make_session(tmp_path, seconds=80, name="bigevt")
+    _sidecars(d, _created_at(d) - timedelta(seconds=0),
+              [{"t": 10 ** 400, "type": "mouse_raw", "dx": 1, "dy": 1}])
+    s = json.loads((d / "session.json").read_text())
+    s["duration_seconds"] = float("inf")     # the JSON 1e999 class
+    (d / "session.json").write_text(json.dumps(s))
+    r = check_session_v2(d, raw_bundle=d / "raw")     # must not raise
+    assert r.status in ("PASS", "FAIL", "WARN"), r.issues

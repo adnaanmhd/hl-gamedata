@@ -164,7 +164,13 @@ def remap(src_keys, src_btns, src_dx, src_dy, pts2, shift_us, rules):
         kset = set(keys_d[j])
         bset = set(btns_d[j])
         moving = bool(dx_d[j] or dy_d[j])
-        actions = resolve_actions(kset | bset, moving, rules) if rules else []
+        # resolve_actions returns (actions, dead_literals) since the
+        # context-gating change — the old bare assignment kept the tuple
+        # and the writer's "|".join crashed on every run (found by the
+        # r14 #13 twin test; this tool had zero coverage). context=None
+        # here, so dead_literals is always empty — discard is correct.
+        actions = resolve_actions(kset | bset, moving, rules)[0] \
+            if rules else []
         rows.append((sorted(kset), actions, sorted(bset), dx_d[j], dy_d[j]))
     return rows, uncovered
 

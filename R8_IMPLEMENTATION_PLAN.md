@@ -50,9 +50,14 @@ verdicts: session scratchpads `r11-results.json` … `r14-results.json`.
 - [x] H5 vanished-folder arm for DISCOVERED rows (r14 #5) — landed
   `c731e32`, fail-first at 5f7015b, gate 736/736 (two sibling tests'
   partial listings corrected in-commit)
-- [ ] H6 joint head+tail edge cuts get the map-time CNT_SHORT (r14 #7) — §3
-- [ ] H7 safe_session_id rejects control characters (r14 #8) — §3
-- [ ] H8 analyze_sample verdicts judge the probed duration (r14 #9) — §3
+- [x] H6 joint head+tail edge cuts get the map-time CNT_SHORT (r14 #7)
+  — landed `25e900e`, fail-first at 5f7015b, gate 740/740 (deviation:
+  test uses the finding's t=2.0/69.0 pair; plan's t=2.5 was a slip,
+  noted inline in §3)
+- [x] H7 safe_session_id rejects control characters (r14 #8) — landed
+  `492a076`, fail-first at 5f7015b, gate 743/743
+- [x] H8 analyze_sample verdicts judge the probed duration (r14 #9) —
+  landed `e01edc7`, fail-first at 5f7015b, gate 746/746
 - [ ] H9 tests-only: G5 depth-2 paid-piece pin + G4 site-4 de-vacuous
   + fix_sync_from_v1 traversal twin (r14 #11/#12/#13) — §3
 - [ ] Post-H9: sweep results recorded per commit (§2); new SUITE_FLOOR
@@ -383,6 +388,17 @@ tool, minimal v1+v2 pair (needs_ffmpeg), sid `../../../../ESCAPED` →
 contained under out_root, folder-name fallback, no escape dir;
 mutation-proof: reverting the G7 hunk must fail. All three proved
 against a HEAD scratch copy with the finders' EXACT mutants.
+[EXECUTOR DEVIATION 2026-08-19: H9 was tests-only, but writing the
+H9c twin uncovered a REAL pre-existing crash in
+tools/fix_sync_from_v1.py:167 — `actions = resolve_actions(...)`
+predates the context-gating signature change (the function returns
+(actions, dead_literals); v2.py unpacks it), so the tool's CSV writer
+crashed with TypeError on the first row of EVERY real run; invisible
+precisely because the tool had zero coverage (the r14 #13 class,
+worse). One-line unpack fix landed in the H9 commit; fail-first
+evidence: the twin test itself crashed with that TypeError on the
+unfixed tree before reaching the join. Surfaced for the final
+report.]
 
 ## 4. Review iteration 15 (multi-agent, ultracode; Adnaan's warrant 2026-08-19)
 

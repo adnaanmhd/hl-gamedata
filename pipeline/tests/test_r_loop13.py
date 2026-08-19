@@ -631,6 +631,121 @@ def test_rebuild_reset_allow_reported_preserves_and_records(
         led.close()
 
 
+def test_rebuild_reset_depth2_paid_piece_keys_to_the_tree_root(
+        cfg, monkeypatch):
+    """r14 #11 (H9a): the G5 paid-piece recording keys each accepted
+    node to its TREE root via the parent-chain walk — -p1-p1 nesting
+    makes the immediate parent the WRONG key, and a memory row keyed to
+    a deleted child id is invisible to every sheet forever: the re-cut
+    re-creates the same node and the same 900s is paid TWICE, silently.
+    The only prior cohort was depth 1 (immediate parent == tree root),
+    so the finder's mutant (parent_of.get(sid) or sid in place of the
+    walk) survived the full 722-test gate. Mutation-proofed with that
+    EXACT mutant in a HEAD scratch copy (session scratchpad)."""
+    from datetime import datetime
+
+    from pipeline import config as C
+    from pipeline import reports
+    from pipeline.ledger import Ledger
+    from pipeline.tests.test_payment_split_r6 import _put
+    reset, parachute, _sys = _rebuild_tool(cfg, monkeypatch)
+    led = Ledger(cfg.ledger_path)
+    root = "2026-08-14T09-00-00Z_kamla_c_0000000000000gd2"
+    p1, p11 = f"{root}-p1", f"{root}-p1-p1"
+    _put(led, root, state="SPLIT", raw=3600.0, player="g5d2@x.com")
+    _put(led, p1, state="SPLIT", parent=root, raw=1800.0,
+         player="g5d2@x.com")
+    _put(led, p11, state="DELIVERED", parent=p1, raw=950.0,
+         delivered=900.0, player="g5d2@x.com")
+    led.update(root, uploaded_reported_at="2026-08-15T00:00:00+00:00")
+    led.update(p11, accepted_reported_at="2026-08-15T00:00:00+00:00")
+    led.close()
+    monkeypatch.setattr(_sys, "argv", ["recal_rebuild_reset.py", "--yes",
+                                       "--allow-reported",
+                                       "--backup", str(parachute)])
+    assert reset.main() == 0
+    led = Ledger(cfg.ledger_path)
+    try:
+        assert led.paid_pieces_for(root) == {p11: 900.0}, \
+            "the memory must key to the TREE root (parent-chain walk)"
+        assert led.paid_pieces_for(p1) == {}, \
+            "…never to the immediate parent, which this run DELETEs"
+        # deterministic re-cut: the same ids and seconds come back —
+        # the root-keyed memory, not a stamp, must skip them
+        _put(led, p1, state="SPLIT", parent=root, raw=1800.0,
+             player="g5d2@x.com")
+        _put(led, p11, state="DELIVERED", parent=p1, raw=950.0,
+             delivered=900.0, player="g5d2@x.com")
+        led.set_state(root, "SPLIT")
+        rows = reports.build_sheet_rows(
+            led, datetime.now(C.IST),
+            bounds=("2026-08-14T00:00:00+00:00",
+                    "2026-08-16T00:00:00+00:00"))
+        assert not [r for r in rows if r["player_email"] == "g5d2@x.com"], \
+            "same-id/same-seconds re-delivery must skip via the memory"
+    finally:
+        led.close()
+
+
+@needs_ffmpeg
+def test_fix_sync_tool_contains_a_traversal_session_id(tmp_path,
+                                                       monkeypatch):
+    """r14 #13 (H9c): G7 (623ab8a) fixed the identical unsanitized join
+    in TWO operator tools but only fix_actions_from_v2 got a test — the
+    fix_sync_from_v1 half (safe_session_id at the session.json read +
+    the out_dir containment assert) had no coverage anywhere, so the
+    full revert survived the 722-test gate green (the exact r13 #10
+    class, recurring inside the fix set that closed it).
+    Mutation-proofed with the finder's exact revert in a HEAD scratch
+    copy. The lag machinery is stubbed — this pins the JOIN, not the
+    sync math (mirroring the fix_actions twin above)."""
+    import shutil
+    from pathlib import Path
+    from types import SimpleNamespace
+
+    from pipeline.tests.test_fix_cut_gate import _make_session
+    from pipeline.tests.test_payment_split_r6 import _load
+    tool = _load("fix_sync_from_v1")
+    v2d = _make_session(tmp_path, seconds=80, name="v2sess")
+    s = json.loads((v2d / "session.json").read_text())
+    s["session_id"] = "../../../../ESCAPED"
+    (v2d / "session.json").write_text(json.dumps(s))
+    v1d = tmp_path / "v1sess"
+    v1d.mkdir()
+    shutil.copy2(v2d / "video.mp4", v1d / "video.mp4")
+    shutil.copy2(v2d / "frames.csv", v1d / "frames.csv")
+
+    class _Est:
+        correlation = 0.9
+        active_fraction = 0.5
+        lag_frames = 0.0
+
+        def lag_ms(self, fps):
+            return 0.0
+    monkeypatch.setattr(tool, "sync", SimpleNamespace(
+        motion_track=lambda v: ([0.0], [0.0]),
+        input_track_from_rows=lambda dx, dy, conv: ([0.0], [0.0]),
+        estimate_lag=lambda mdx, mdy, adx, ady: _Est(),
+        verdict=lambda est, fps: ("OK", "stub"),
+        MIN_ACTIVE_FRACTION=0.0, MIN_ABS_CORRELATION=0.0,
+        TARGET_ABS_LAG_MS=1000.0))
+    monkeypatch.setattr(tool, "rrd",
+                        SimpleNamespace(generate=lambda d: None))
+    # identical synthetic PTS grids make every offset a candidate —
+    # alignment is not what this test pins
+    monkeypatch.setattr(tool, "align_offset",
+                        lambda p1, p2: (0, 0, len(p2)))
+    out_root = tmp_path / "deep" / "deeper" / "out"
+    out_root.mkdir(parents=True)
+    res = tool.fix_session(v1d, v2d, out_root, "08-19-2026")
+    out_dir = Path(res["out_dir"]).resolve()
+    assert out_dir.is_relative_to(out_root.resolve()), out_dir
+    assert out_dir.name == "v2sess", \
+        "traversal id falls back to the bundle dir name (safe_session_id)"
+    assert not list(tmp_path.rglob("ESCAPED")), \
+        "no delivery files may land outside out_root"
+
+
 def test_rebuild_reset_dry_run_reports_stamp_counts(cfg, monkeypatch,
                                                     capsys):
     """The dry-run plan must name the payment evidence in scope —
