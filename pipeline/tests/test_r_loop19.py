@@ -506,3 +506,76 @@ def test_sessionjson_shape_fails_map_to_rewrite(tmp_path):
     codes = [r["code"] for r in reasons]
     assert codes and set(codes) == {"STR_SJ_INVALID"}, codes
     assert all(r["fixable"] for r in reasons)
+
+
+
+
+# ------- r19 #7/#8/#9 (M8, tests-only): the arming-gate-invisible L
+# ------- arms get failing-side pins (the finders' exact mutants)
+
+
+@needs_ffmpeg
+def test_v1_nondict_canonical_degrades(tmp_path):
+    """r19 #7 (M8): deleting L1's non-dict-canonical guard passed the
+    FULL arming gate at 802/802 (the finder's scratch proof) while a
+    session.json carrying canonical: "bogus"/null crashed
+    AttributeError on the first .get — the one test claiming this arm
+    (nondict_trim_and_canonical) exercised only the trim half of its
+    own docstring. Both canonical shapes now have the failing side:
+    the conversion completes, session_id falls back to the folder
+    name, recompute rebuilds session.json."""
+    from pipeline import fix as fixmod
+    from pipeline.tests.test_r_loop15 import _v1_work
+    for i, canonical in enumerate(("bogus-string", None)):
+        work = _v1_work(tmp_path, "2026-08-10T15:34:03Z", f"m8canon{i}")
+        s = json.loads((work / "session.json").read_text())
+        s["canonical"] = canonical
+        (work / "session.json").write_text(json.dumps(s))
+        note = fixmod.fix_v1_to_v2(work, "kamla")
+        assert "converted v1 -> v2" in note, repr(canonical)
+        out = json.loads((work / "session.json").read_text())
+        assert out["session_id"] == work.name, \
+            "a non-dict canonical falls back to the folder name"
+        assert out.get("game_title"), "recompute rebuilt session.json"
+
+
+@needs_ffmpeg
+def test_v1_nonstr_stamp_degrades(tmp_path):
+    """r19 #8 (M8): reverting L1's str() coercion at the stamp parse
+    (a one-token change) passed the full gate while a JSON-number or
+    list created_at_utc crashed AttributeError — outside the except
+    tuple — on both attempts; the only unusable-stamp test used a
+    STRING ('not-a-date'), exercising the ValueError path that always
+    existed. The non-str shapes now have their failing side: the
+    conversion completes and the stamp synthesizes."""
+    from translator.v2 import _TS_RE
+    from pipeline import fix as fixmod
+    from pipeline.tests.test_r_loop15 import _v1_work
+    for i, junk in enumerate((12345, [2026, 8, 10])):
+        work = _v1_work(tmp_path, "x", f"m8stamp{i}")
+        s = json.loads((work / "session.json").read_text())
+        s["canonical"]["created_at_utc"] = junk
+        (work / "session.json").write_text(json.dumps(s))
+        note = fixmod.fix_v1_to_v2(work, "kamla")
+        assert "converted v1 -> v2" in note, repr(junk)
+        out = json.loads((work / "session.json").read_text())
+        assert _TS_RE.match(out["created_at_utc"]), repr(junk)
+
+
+def test_has_raw_tolerates_non_utf8_metadata(tmp_path):
+    """r19 #9 (M8): dropping errors='replace' from the gate's
+    metadata read (a one-token revert) passed the full gate while
+    player-typed non-UTF-8 metadata.json raised UnicodeDecodeError —
+    a ValueError but NOT a json.JSONDecodeError, so it escaped the
+    except tuple — out of the drivers' bare plan step ('session
+    runner crashed' + charged attempts). The encoding arm now has its
+    failing side: latin-1 bytes inside a string value parse under
+    replace and the gate answers True."""
+    from pipeline import fix as fixmod
+    work = tmp_path / "m8utf8"
+    (work / "raw").mkdir(parents=True)
+    (work / "raw" / "inputs.jsonl").write_text('{"t": 0}\n')
+    (work / "raw" / "metadata.json").write_bytes(
+        b'{"recording": {"started_at_utc": "2026-08-14T10:00:00Z"},'
+        b' "player": "Jos\xe9"}')
+    assert fixmod.has_raw_sidecars(work) is True
