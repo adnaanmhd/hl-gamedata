@@ -1,103 +1,75 @@
-# R8 Implementation Plan — fix ALL r-loop 14 → iteration 15 → e2e → THE FLIP
+# R8 Implementation Plan — fix ALL r-loop 15 (I1–I8) → iterations 16–18 (stop at first quiet, fix-in-iteration) → CHECKPOINT with Adnaan
 
-**Context-optimized 2026-08-19 (second pass, on Adnaan's order) —
-everything landed lives in git history, not here** (the G1–G9 spec
-bodies are at `9388458` and earlier; the C/D/F/r12 material at
-`b69fee1` and earlier). This file remains the complete work order: an
-executor follows it without re-reading the older evidence base. Where
-this plan seems wrong, consult the findings docs (authority chain
-below) before deviating, and say so out loud.
+**Context-optimized 2026-08-19 (third pass, on Adnaan's order) —
+everything landed lives in git history, not here** (the H1–H9 spec
+bodies are at `a6affa4` and earlier; the G material at `9388458` and
+earlier; the C/D/F/r12 material at `b69fee1` and earlier). This file
+remains the complete work order: an executor follows it without
+re-reading the older evidence base. Where this plan seems wrong,
+consult the findings docs (authority chain below) before deviating,
+and say so out loud.
 
-**Authority chain if the plan seems wrong:** `R14_FINDINGS.md` →
-`R13_FINDINGS.md` → `R12_FINDINGS.md` → `R11_FINDINGS.md` → older
-findings docs → the older kickoffs. Machine results incl. refuter
-verdicts: session scratchpads `r11-results.json` … `r14-results.json`.
+**Authority chain if the plan seems wrong:** `R15_FINDINGS.md` →
+`R14_FINDINGS.md` → `R13_FINDINGS.md` → older findings docs → the
+older kickoffs. Machine results incl. refuter verdicts: session
+scratchpads `r11-results.json` … `r15-results.json` (r15's is in the
+2026-08-19 executor session's scratchpad).
 
 ---
 
 ## 0. Status ledger — executor updates this section as work lands
 
 **DONE (full detail in git history + findings docs; do not re-derive):**
-- r-loops 8–12: C1–C9, D0 ruling C, D1–D8, iteration-10 set,
-  F1–F11, r12's 15 fixed in-iteration (QUIET after fixing at 696).
-- Iteration 13 NOT quiet: 12 confirmed → **G1–G9 ALL LANDED**
-  (`abf052b..82f5019`; floor 718 pinned `a5fc1a0`; both host gates
-  722/722; every fix fail-first-proven at `b69fee1`; sweeps in the
-  commit messages).
-- Iteration 14 ran 2026-08-19 (33 agents, 0 errors): **NOT QUIET
-  pre-fix — 13 raised → 13 confirmed (5 major / 8 minor, 0 blockers),
-  0 killed** (`R14_FINDINGS.md`, snapshot
-  `tools/review/flip-review-iter14.js`, commit `5f7015b`). Clusters:
-  #1≡#6 (G2 fallback anchor), #2≡#3 (G1 counted_at anchor),
-  #11/#12/#13 (pins for G5/G4/G7 halves). Adnaan's driver-core
-  conditional NOT triggered (2 confirmed) — **all 7 lanes stay for
-  iteration 15**. Fix specs vetted into §3 (H1–H9); per Adnaan's
-  2026-08-19 instruction they are executed by the NEXT session and
-  iteration 14's quiet is judged there AFTER fixing.
+- r-loops 8–12: C1–C9, D0 ruling C, D1–D8, iteration-10 set, F1–F11,
+  r12's 15 fixed in-iteration (QUIET after fixing at 696).
+- Iteration 13 NOT quiet: 12 confirmed → G1–G9 landed
+  (`abf052b..82f5019`).
+- Iteration 14 NOT quiet pre-fix: 13 → 13 confirmed (0 blockers) →
+  **H1–H9 ALL LANDED** (`1dd69fa..747422e`; floor 745 pinned
+  `37d7d88`; both host gates 749/749; every fix fail-first-proven at
+  `5f7015b`; H9 pins proven on the finders' exact mutants; sweeps in
+  the commit messages). Two stated deviations, both recorded and
+  queued for the final report: the fix_sync_from_v1
+  resolve_actions-unpack crash (fixed in the H9 commit) and its
+  `cp -c` macOS-only copy (fixed as I8 below, RULED). **Iteration 14
+  JUDGED QUIET AFTER FIXING per R5_TRIAGE §7** (`d16d504`).
+- Iteration 15 (CONFIRMATION pass, run `wf_0098c165-80b`, 27 agents,
+  0 errors, ~3.23M subagent tokens): **NOT QUIET — 10 raised → 10
+  confirmed (6 major / 4 minor, 0 blockers), 0 killed**
+  (`R15_FINDINGS.md`, snapshot `tools/review/flip-review-iter15.js`).
+  Clusters: #1≡#2≡#3≡#10 (H5 same-path dead end), #6/#9 (pins for
+  H2/H6 halves), #4/#5/#7/#8 pre-existing. Executor STOPPED per the
+  ruling and handed Adnaan the list; **Adnaan ruled 2026-08-19** (all
+  rulings encoded in §3 below) and ordered: fix all → up to three
+  more iterations (16–18, stop at first quiet, fix-in-iteration) →
+  STOP and checkpoint with him BEFORE the e2e.
 
 **ACTIVE — resume from the first unchecked item:**
-- [x] H1 counted_at captured BEFORE the sheet's row read (r14 #2≡#3) —
-  landed `1dd69fa`, fail-first at 5f7015b, gate 725/725
-- [x] H2 retranslate session branch anchors its fallback on the ledger
-  slug (r14 #1≡#6, MAJOR) — landed `1d54775`, fail-first at 5f7015b
-  (both harm shapes), gate 728/728
-- [x] H3 rebuild-reset discards split manifests + rowless segment dirs
-  (r14 #10, MAJOR) — landed `a13e2ac`, fail-first at 5f7015b, gate
-  729/729
-- [x] H4 stable alert dedup: rclone stderr normalized at the choke
-  point (r14 #4, MAJOR) — landed `924755b`, fail-first at 5f7015b,
-  gate 732/732
-- [x] H5 vanished-folder arm for DISCOVERED rows (r14 #5) — landed
-  `c731e32`, fail-first at 5f7015b, gate 736/736 (two sibling tests'
-  partial listings corrected in-commit)
-- [x] H6 joint head+tail edge cuts get the map-time CNT_SHORT (r14 #7)
-  — landed `25e900e`, fail-first at 5f7015b, gate 740/740 (deviation:
-  test uses the finding's t=2.0/69.0 pair; plan's t=2.5 was a slip,
-  noted inline in §3)
-- [x] H7 safe_session_id rejects control characters (r14 #8) — landed
-  `492a076`, fail-first at 5f7015b, gate 743/743
-- [x] H8 analyze_sample verdicts judge the probed duration (r14 #9) —
-  landed `e01edc7`, fail-first at 5f7015b, gate 746/746
-- [x] H9 tests-only: G5 depth-2 paid-piece pin + G4 site-4 de-vacuous
-  + fix_sync_from_v1 traversal twin (r14 #11/#12/#13) — landed
-  `747422e`; all three pins proved against the finders' EXACT mutants
-  in a HEAD scratch copy (each FAILS on its mutant); DEVIATION: a
-  real pre-existing fix_sync_from_v1 resolve_actions-unpack crash
-  found and fixed in-commit (recorded inline in §3); gate 749/749
-- [x] Post-H9 DONE 2026-08-19: sweeps recorded per commit ✓;
-  SUITE_FLOOR 745 pinned (`37d7d88`) ✓; gates green on BOTH hosts at
-  floor 745 (Mac 749/749; VM 749/749 after `82c86da` made the H9c
-  twin's delivery-copy portable — the VM run exposed the tool's own
-  `cp -c` as macOS-only, pre-existing, surfaced not fixed);
-  tree-verify ✓ (no MUTATION strings, only pre-existing junk
-  uncommitted). **ITERATION 14 JUDGED QUIET AFTER FIXING per
-  R5_TRIAGE §7** (pre-registered: zero confirmed blockers AND every
-  confirmed major/minor fixed with the suite green on both hosts —
-  13/13 confirmed findings fixed by H1–H9 `1dd69fa..747422e`,
-  0 blockers, 0 dead-verifier findings, both gates green 749/749)
-- [x] Review iteration 15 RAN 2026-08-19 (headroom confirmed by Adnaan
-  pre-launch; run `wf_0098c165-80b`, 27 agents, 0 errors, ~3.23M
-  subagent tokens): **NOT QUIET — 10 raised → 10 confirmed (6 major /
-  4 minor, 0 blockers), 0 killed** (`R15_FINDINGS.md`, snapshot
-  `tools/review/flip-review-iter15.js`, machine results
-  `r15-results.json` in the session scratchpad). Clusters: #1≡#2≡#3≡#10
-  (H5 same-path heal gap — a REGRESSION-class gap in the H set, four
-  lanes independently); #6/#9 = pins for H2/H6 halves; #4/#5/#7/#8
-  pre-existing. **STOPPED per Adnaan's binding sequencing: list handed
-  over severity-ordered; NOTHING fixed, NOTHING proceeds** — e2e and
-  the flip wait on his call.
-- [ ] BLOCKED ON ADNAAN: disposition of the 10 confirmed r15 findings
-  (fix specs to be vetted only after his ruling)
-- [ ] Independent REAL e2e verification (fresh agent, verdict relayed
-  VERBATIM)
-- [ ] FLIP §5 canary (kill matrix, autoscale, digest; `_pipeline_test/`
-  purged)
-- [ ] FLIP §6 (stop units → resize → deploy False-interlock → refix
-  reset → arm → first hour)
-- [ ] FLIP §7 payment endgame (regen preview → send →
-  CONT_DAILY_REPORTS=True)
-- [ ] FLIP §8 tree verify + deletion (LAST destructive act)
-- [ ] Reject-reason table, final independent live verifier, final report
+- [ ] I1 qa-v2 exempts caseless key tokens (r15 #4, MAJOR) — §3
+- [ ] I2 writer strips action-less combo halves (r15 #5, MAJOR) — §3
+- [ ] I3 tests-only: H2 slug-half OW discriminator pins (r15 #6,
+  MAJOR) — §3
+- [ ] I4 fix_v1_to_v2 naive-timezone guard (r15 #7, minor) — §3
+- [ ] I5 safe_session_id length bound (r15 #8, minor) — §3
+- [ ] I6 tests-only: H6 composition tail-arm + chat-head pins
+  (r15 #9, minor) — §3
+- [ ] I7 H5 ruling: gone-is-gone + rename coaching line
+  (r15 #1≡#2≡#3≡#10, RULED) — §3
+- [ ] I8 fix_sync_from_v1 portable delivery copy (RULED) — §3
+- [ ] Post-I8: sweep results recorded per commit (§2); new SUITE_FLOOR
+  measured+pinned (passed − 4, run_suite.sh + FLIP_RUNBOOK §6b); full
+  gate green Mac AND VM; tree-verify
+- [ ] Review iteration 16 (§4; headroom check with Adnaan BEFORE the
+  launch; if not quiet: fix in-iteration per §4, then iteration 17)
+- [ ] Review iteration 17 (ONLY if 16 was not quiet; same rules)
+- [ ] Review iteration 18 (ONLY if 17 was not quiet; same rules; if 18
+  is ALSO not quiet: fix its confirmed set, then STOP — report the
+  fixes as landed-but-unreviewed, honestly labelled)
+- [ ] **CHECKPOINT (RULED 2026-08-19): STOP at the first quiet
+  iteration (or after 18).** Report to Adnaan verdict-first with the
+  full payment-surface list (§7). The independent e2e and THE FLIP
+  run ONLY on his explicit go, in a later session — do NOT start
+  them.
 
 ---
 
@@ -108,10 +80,10 @@ verdicts: session scratchpads `r11-results.json` … `r14-results.json`.
 Drive II, and computes payment sheets (hours only, R11). The continuous
 driver (`pipeline/continuous.py`) replaces the batch driver
 (`pipeline/run.py`, dormant rollback). **Nothing is deployed**;
-everything ships at the flip, which THIS work stream executes at the
-end (`FLIP_RUNBOOK.md`).
+everything ships at the flip, which runs in a LATER session after
+Adnaan's checkpoint go (`FLIP_RUNBOOK.md`).
 
-**State.** Suite: **722 collected / 722 green**, floor **718**, via the
+**State.** Suite: **749 collected / 749 green**, floor **745**, via the
 arming gate on Mac AND the VM side checkout:
 
 ```bash
@@ -130,7 +102,7 @@ gcloud compute scp <scratchpad>/tree.tgz hl-pipeline-vm:/tmp/tree.tgz \
     --zone=asia-south1-a --project=hl-gamedata-pipeline
 gcloud compute ssh hl-pipeline-vm --zone=asia-south1-a \
     --project=hl-gamedata-pipeline \
-    --command='cd ~/hl-gamedata-continuous-test && tar xzf /tmp/tree.tgz' < /dev/null
+    --command='cd ~/hl-gamedata-continuous-test && rm -rf pipeline translator tools && tar xzf /tmp/tree.tgz' < /dev/null
 ```
 
 VM gate: `PATH=$HOME/.local/bin:$PATH SUITE_FLOOR=<floor> bash
@@ -146,21 +118,21 @@ Secrets in `~/.config/hl-gamedata/secrets.env` — never print/log/
 commit. `pipeline/tests/conftest.py` `_no_real_drive` guard stays.
 Suite through `tools/run_suite.sh` on BOTH hosts for anything that
 ships. Every new test proved to FAIL against unfixed code in a scratch
-copy OUTSIDE the repo (session scratchpad; pre-fix ref for H-fixes:
-**`5f7015b`** — docs-only commits after `a5fc1a0` leave the code
-identical); pin-only tests use the mutation-proof pattern
-(test_r_loop10/11/12/13.py have examples; use the finders' EXACT
-mutants from R14_FINDINGS.md). After every multi-agent step:
-`git diff` every hunk, `grep -rn "MUTATION" --include="*.py" .`,
-`git status`. The working tree carries pre-existing UNCOMMITTED junk
-(deleted sample dirs, `.gitignore`, `SAMPLE_ANALYSIS_PLAYBOOK.md`) that
-predates r8 — leave it, never commit it, never clean it. The 29 open
-batch rows in the ledger are the dormant batch driver's rollback
-state — never touch them. Drive I read-only forever.
+copy OUTSIDE the repo (session scratchpad; pre-fix ref for I-fixes:
+**`ce26148`** — the docs after `82c86da` leave the code identical);
+pin-only tests use the mutation-proof pattern with the finders' EXACT
+mutants from R15_FINDINGS.md (test_r_loop10/11/12/13/14.py have
+examples). After every multi-agent step: `git diff` every hunk,
+`grep -rn "MUTATION" --include="*.py" .`, `git status`. The working
+tree carries pre-existing UNCOMMITTED junk (deleted sample dirs,
+`.gitignore`, `SAMPLE_ANALYSIS_PLAYBOOK.md`) that predates r8 — leave
+it, never commit it, never clean it. The 29 open batch rows in the
+ledger are the dormant batch driver's rollback state — never touch
+them. Drive I read-only forever.
 
-**Key file map.** Findings of record: `R14_FINDINGS.md` (the ACTIVE
-work queue's evidence) and earlier `R8..R13_FINDINGS.md`. Review
-workflow snapshots: `tools/review/flip-review-iter8..14.js`. Flip
+**Key file map.** Findings of record: `R15_FINDINGS.md` (the ACTIVE
+work queue's evidence) and earlier `R8..R14_FINDINGS.md`. Review
+workflow snapshots: `tools/review/flip-review-iter8..15.js`. Flip
 commands: `FLIP_RUNBOOK.md`. Rulings: `FLIP_SESSION_KICKOFF_PROMPT.md`
 (R1–R4), `R5_TRIAGE_KICKOFF_PROMPT.md` §7 (pre-registered "quiet"),
 `R6_HANDOFF_KICKOFF_PROMPT.md` §4/§5 (payment split,
@@ -172,15 +144,16 @@ CONT_DAILY_REPORTS), `R8_HANDOFF_KICKOFF_PROMPT.md` (scope of record).
 
 Every review round's worst findings have been REGRESSIONS from the
 previous round's fixes, and the mechanism repeats. These rules bind
-every H-fix and everything after:
+every I-fix and everything after:
 
-1. **Sibling-site sweep, recorded.** Before implementing each H-fix:
+1. **Sibling-site sweep, recorded.** Before implementing each I-fix:
    grep for EVERY writer/reader of the state or pattern the fix touches,
    list them in the commit message with a verdict per site
    (fixed / already-correct / out-of-scope-because), and fix the ones
-   in scope IN THE SAME COMMIT. (r14 #12/#13 exist because the G4/G7
-   sweeps fixed sibling SITES but the tests covered only one — the
-   sweep discipline extends to the TESTS of every swept site.)
+   in scope IN THE SAME COMMIT. The sweep discipline extends to the
+   TESTS of every swept site — AND to the test COHORTS: r15 #6 exists
+   because every H2 test used kamla, where the swept consumers are
+   no-ops. A pin must run where the pinned behavior is live.
 2. **Durable events, never transient state.** Any discriminator that
    answers "did X happen before Y?" must key on a durable events row,
    never on current row values.
@@ -194,295 +167,281 @@ every H-fix and everything after:
    why the new row cannot perturb it. Record the list in the commit
    message.
 
-## 3. Fix specifications H1–H9 (from R14_FINDINGS.md; vetted 2026-08-19)
+## 3. Fix specifications I1–I8 (from R15_FINDINGS.md; Adnaan's rulings 2026-08-19; vetted 2026-08-19)
 
-Execution order H1 → H9 (H1 money-path first; H9 tests-only last).
-Per-commit discipline: implement → fail-first proof in a scratch copy
-of `5f7015b` OUTSIDE the repo → Mac gate → path-scoped commit; VM gate
-once after H9; locate by SYMBOL, never remembered line numbers. Where a
-spec deviates from a finder's proposal, the deviation is stated inline.
+Execution order I1 → I8 (the two wrongful-reject majors first; ruled
+items last). Per-commit discipline: implement → fail-first proof in a
+scratch copy of `ce26148` OUTSIDE the repo → Mac gate → path-scoped
+commit; VM gate once after I8; locate by SYMBOL, never remembered line
+numbers. Where a spec deviates from a finder's proposal, the deviation
+is stated inline.
 
-### H1 — counted_at captured BEFORE the sheet's row read (r14 #2≡#3, minor; completes G1)
+### I1 — qa-v2 exempts caseless key tokens (r15 #4, MAJOR; RULED direction)
 
-G1's arm-2 rationale ("a marker before the sheet's row read leaves a
-REAL md5 in the snapshot") is false for the window between
-build_sheet_rows' single SELECT and the `counted_at` capture, which
-today happens AFTER `write_payment_sheet` returns — a ZIP_ADJ_CHANGED
-adjudication landing in that gap (CSV+MD build + record write) is
-missed by `ts >= counted_at` and the stamp lands silently; no
-self-heal remains (the deferral already ran). Fix: in
-`send_daily_report_if_due`, move the `counted_at = now()` capture to
-just ABOVE the `write_payment_sheet` call, keeping it as the durable
-record's `"at"` and both stamp calls' `counted_at` (the
-identical-string property stays). Conservative-correct by G1's own
-`>=` argument: a marker at/after the pre-build instant is not provably
-pre-count, and skipping is the money-safe direction. The resume path
-needs no change (it replays the recorded `"at"`). Tests (fail-first at
-`5f7015b`): marker written between the build and the stamps with the
-pre-build anchor → stamp SKIPPED loudly, next sheet counts the new
-hours once; control: marker strictly before the build leaves a real
-md5 in the snapshot → CAS arm governs (never arm 2); pin the
-record-"at" == passed-counted_at identity.
+The checker's bad-token grammar (`translator/v2.py`, the
+`t.lower() == t and not t.isdigit()` clause inside check_session_v2's
+per-row token loop) flags every caseless symbol key (';', '-', '[',
+'/', …) that the writer's own `key_display` legitimately emits
+(single-char tokens come back as `tok.upper()`, which for symbols IS
+the caseless token) and `_v2_rows` keeps whenever the session keybind
+binds it. The FAIL maps to INP_TOKEN_CASE → FIX_KEY_HYGIENE, which
+re-tokenizes through the SAME `key_display` — a provably no-op fix
+loop: both attempts burn, terminal reject, every session from that
+player unpaid. **RULED (Adnaan 2026-08-19): the checker exempts
+caseless tokens — symbol keys are real gameplay data and stay in the
+delivery.** Fix: the case clause flags only tokens that HAVE case,
+i.e. `(t.lower() == t and t.upper() != t and not t.isdigit())`.
+Multi-char lowercase tokens ('left_shift') still flag (their upper
+differs); digits stay exempt; the whitespace/comma arms are untouched.
+Sweep rule 1: every checker token-grammar site (keys, buttons — the
+button set-membership test is a different vocabulary, verdict per
+site), the INP_TOKEN_CASE needle in `pipeline/validate.py`'s QA map
+(unchanged — the FAIL simply stops firing for caseless tokens), and
+fix_key_hygiene's key_display round-trip (now agrees with the checker
+by construction). Tests (fail-first at `ce26148`): e2e — a real
+bundle whose keybind binds ';' → translate → `check_session_v2` shows
+NO non-v2-token FAIL and the ';' presses ride the delivered rows with
+their actions; hygiene idempotence — fix_key_hygiene on that session
+strips 0 and the re-check stays clean; control (§2 rule 3) — a
+genuinely lowercase LETTER token still FAILs the grammar.
 
-### H2 — retranslate session branch anchors its fallback on the ledger slug (r14 #1≡#6, MAJOR; completes G2)
+### I2 — writer strips action-less combo halves (r15 #5, MAJOR; RULED direction)
 
-G2 made the session branch production for every non-reroute
-FIX_RETRANSLATE, and that branch alone anchors its built-in-keybind
-fallback on the PLAYER-TYPED chain (`game_info.name or meta.game_name
-or s.game_title` + exe_name) instead of the ledger slug `_dispatch`
-holds — degraded metadata (numeric/absent name, the r-loop 9/3
-provenance class) yields `resolve_keybind -> {}`, which strips 100% of
-key presses silently and terminally rejects a good session
-(INP_KEYS_MISSING + CNT_ACTIONS_FEW, both unfixable) — or re-bins
-under the WRONG game's built-in. Both siblings (fix_key_hygiene,
-fix_actions_context) already pass `game_name=<ledger slug>` (F4
-doctrine, accepted entry 37). Fix: `retranslate_from_sidecars` gains
-`ledger_game: str | None = None`; `_dispatch` ALWAYS passes it
-(`game if game in C.GAMES else None`) while `game_override` stays
-reroute-only (G2 preserved). In the non-override branch:
-`slug = ledger_game or game_key_from_name(...) or "unknown_game"` and
-`resolve_keybind(keybind_path=raw/"keybind.json",
-game_name=ledger_game or game_name, exe_name=exe_name)` — the
-session's own keybind.json still wins when usable (r13 #4 intent
-intact), and EVERY downstream consumer of the metadata-derived slug in
-this branch (KEYBIND_PATCHES, context gating, the sessionjson
-recompute) keys on the same `slug` variable (sweep rule 1: enumerate
-them in the commit message). DEVIATION from #6's proposal: no post-hoc
-empty-keybind fallback layer — resolve_keybind's internal
-parsed-but-unusable fallback already lands on the right built-in once
-anchored on the ledger slug. NOTE: #1 survived 1/2 — the dissent's
-"intake would pre-reject such bundles" holds only for RAW payloads; v2
-payloads (the production norm) carry player-produced frames.csv and
-first meet our resolution chain at the retranslate, so the harm is
-reachable (twin #6 survived 0/2). Tests (fail-first at `5f7015b`,
-production chain plan_fixes → apply_fixes): degraded metadata
-`{"name": 12345}`, no keybind.json, ledger kamla → keys survive with
-built-in actions (pre-fix: keys == []); degraded metadata WITH a
-custom keybind.json → the custom bind still wins; the existing G2
-reroute control stays green.
+`bound_literals` includes every alt token of a `{modifier, key}`
+combo group, so both halves are "bound" and `_v2_rows` keeps them —
+but `resolve_actions` fires only when ALL of a rule's groups are held,
+so any frame holding one half alone ships keys with null actions and
+check_session_v2 FAILs the keys-have-actions invariant. BOTH fix
+routes reproduce it (hygiene strips only unbound tokens; retranslate
+re-bins identically) — terminal reject, every session from that
+player unpaid. **RULED (Adnaan 2026-08-19): restore the invariant at
+the writer — a combo half pressed alone is stripped-and-counted
+exactly like an unbound key.** Fix (the finder's main proposal): a
+kept token must be CREDITED by the frame's resolved actions — extend
+resolve_actions' credited-literals accounting to the no-context path
+(or equivalently: drop tokens whose every satisfied rule requires an
+unheld co-group), strip-and-count the uncredited ones in `_v2_rows`
+(the existing strip_stats/`stripped N unbound key presses` plumbing),
+and MIRROR the same rule in fix_key_hygiene's own keep/strip loop.
+retranslate_from_sidecars inherits via `_v2_rows`. Scope guards
+(sweep rule 1 + §2 rules 3/4, enumerate in the commit message):
+motion-axis rules credit no literals (their lits set is empty — keys
+are not stripped for lacking motion); mouse buttons keep today's
+behavior unless a combo group names one (verdict per site);
+collapse_ambiguous_runs and the context-gating dead_literals path are
+untouched. Tests (fail-first at `ce26148`, both routes end-to-end):
+combo bind `{"interact": {"modifier": "ctrl", "key": "e"}}` + bare
+'e' presses → delivered rows NEVER carry keys with null actions and
+the checker passes that axis, through the hygiene route AND the
+retranslate route; control — ctrl+e held together keeps BOTH tokens
+and fires interact; control — plain single binds unaffected; hostile
+mutant (rule 4) — the most damaging bypass shape (e.g. crediting via
+ANY satisfied rule instead of the full-group test) must fail.
 
-### H3 — rebuild-reset discards split manifests + rowless segment dirs (r14 #10, MAJOR)
+### I3 — tests-only: H2 slug-half OW discriminator pins (r15 #6, MAJOR)
 
-The teardown wipes only `work/<sid>` for ROWED sids — it leaves
-`work/<sid>.split-manifest.json` and rowless `work/<sid>-p<N>` dirs,
-so after a kill in the cutter's manifest-to-child-insert window a
-post-reset re-run's crash triage ADOPTS the pre-recalibration (VOID)
-cut (`_recover_split` → complete=True over the stale gen-1 segments),
-and the dirs leak unreclaimably (`_sweep_terminal_work` needs a SPLIT/
-REJECTED/DELIVERED parent or a rowed sid). Its refix sibling's
-`discard_split_artifacts` exists for exactly this class (r-loop 3).
-Fix: in the teardown loop, for every sid in `all_sids`, discard the
-split artifacts beside the existing rmtree — reuse the shared
-implementation the drivers/refix already use if its signature fits
-(pipeline.run's `_discard_split_artifacts` or refix's 6-line
-`discard_split_artifacts` with the `-p\d+` fullmatch shape), and wipe
-`work/<sid>-analysis` as refix does. Tests (fail-first at `5f7015b`):
-reset over a manifest + rowless-dirs / zero-child-rows state → the
-manifest AND the `-pN` dirs AND `-analysis` are gone; a subsequent
-`_recover_split` on the re-run root returns complete=False (no stale
-adoption).
+All three H2 tests used kamla as the ledger game, and every consumer
+of the branch slug (KEYBIND_PATCHES, CONTEXT_GAMES gating,
+fix_sessionjson_recompute) is a no-op for kamla — so reverting ONLY
+the slug assignment in retranslate_from_sidecars' non-override branch
+(`slug = ledger_game or …`) passes the FULL arming gate while
+silently stripping every patch-bound key press ('e'/'enter' →
+general_confirm) and skipping mandatory OW context gating in
+production. Fix (tests-only, in `pipeline/tests/test_r_loop14.py`
+beside the H2 block): (a) ledger outer_wilds + degraded metadata
+`{"name": 12345}` + usable custom raw/keybind.json + an 'e' press,
+driven through plan_fixes → apply_fixes → assert the 'E' press
+survives with action `general_confirm` (the OW KEYBIND_PATCHES half);
+(b) an OW-ledger variant pinning that context gating keys on the
+ledger slug (stub ctxmod.available/classify_video, the
+test_r_loop12._context_work idiom). Mutation-proof: the finder's
+EXACT mutant (revert the slug line to
+`slug = game_key_from_name(game_name or "", exe_name) or
+"unknown_game"`) must fail these tests — it passes 749/749 today.
 
-### H4 — stable alert dedup: rclone stderr normalized at the choke point (r14 #4, MAJOR)
+### I4 — fix_v1_to_v2 naive-timezone guard (r15 #7, minor)
 
-AlertBook dedups on the literal message text, but rclone stderr lines
-start with a wall-clock timestamp, so every rclone-backed failure
-alert (download-failed, upload-failed, scan-failed) has a fresh dedup
-key per attempt — the 60-min TTL never fires and a Drive/network
-incident becomes a per-retry alert storm on the flip's ONLY ops
-surface (verified: 12 sends/hour vs the designed 1). Fix: normalize at
-the single choke point `ingest.run_rclone` — strip the leading
-`YYYY/MM/DD HH:MM:SS ` prefix from each stderr line before returning
-(rebuild the CompletedProcess with cleaned stderr); all three alert
-sites inherit, restoring the documented per-sid hourly cadence
-(accepted item 11), and the full (cleaned) rclone error text still
-rides in the message. The timeout branch's synthetic message is
-already stable — unchanged. DEVIATION from the finder's alternative
-(an explicit `key=` param on AlertBook): not adopted — the choke-point
-normalization fixes every present and future embedder without
-changing AlertBook's contract. Sweep rule 1: enumerate every
-`alert(...)` call site embedding volatile text and give a verdict per
-site. Tests (fail-first at `5f7015b`): real AlertBook + fake clock +
-production-shaped timestamped stderr → exactly 1 send per TTL
-(pre-fix: one per attempt); run_rclone normalization unit test; stable
-synthetic-timeout text unchanged.
+`fix_v1_to_v2` parses the v1 canonical `created_at_utc` with
+`fromisoformat(ca.replace("Z", "+00:00"))` then writes
+`created.astimezone(timezone.utc)` — for a NAIVE stamp (no tz suffix,
+a real HumynCapture provenance class) astimezone interprets HOST-LOCAL
+time and shifts the written stamp by the host's UTC offset (−5h30m on
+this Mac). Every sibling site already guards this
+(fix_sessionjson_recompute, cutter.py, retranslate's `_utc`,
+translator/v2 `_utc_aware`); this is the sole omission, and the qa
+checker that would flag naive stamps never runs before ARR_V1_FORMAT
+routes here. Fix: the exact two-line sibling guard after parsing —
+`if created.tzinfo is None: created = created.replace(
+tzinfo=timezone.utc)` — BEFORE the head_cut_s adjustment and the
+astimezone write. Sweep rule 1: enumerate the sibling guard sites
+with already-correct verdicts. Tests (fail-first at `ce26148`): force
+a non-UTC host tz IN-TEST (`os.environ["TZ"] = "Asia/Kolkata"` +
+`time.tzset()`, restored after — the Mac gate is IST but the VM is
+not; the test must fail pre-fix on BOTH hosts): naive input
+"2026-08-10T15:34:03" → the converted session.json carries
+15:34:03Z, byte-identical wall clock; aware-input control unchanged.
 
-### H5 — vanished-folder arm for DISCOVERED rows (r14 #5, minor)
+### I5 — safe_session_id length bound (r15 #8, minor)
 
-A DISCOVERED row whose Drive folder was deleted retries forever (no
-terminal state; the two existing prune arms cover only `incomplete`
-rows and INT_PATH quarantines; the empty work dir holds no media so no
-reclaim; the digest's undownloaded backlog is permanently inflated and
-an `--until-idle` canary can never reach idle). Fix: a third
-vanished-folder arm in `ingest.scan` under the SAME healthy-listing
-guard as the existing two (games_present + path not in listed_dirs),
-for rows in state DISCOVERED only → `set_state QUARANTINED` with
-detail "folder gone from Drive I — dropped from intake", NO INT_PATH
-reason (stays off the folder-issues chase list), one loud line per
-row. Self-healing: if the same sid later reappears at a clean path,
-the existing QUARANTINED-heal branch re-registers it. DEVIATION from
-the finder's alternative (N-consecutive-failure counter in
-`_download_one`): the scan-side arm mirrors the two sibling prunes and
-keeps the driver stateless. Rule 5 note: this writes a genuine
-DISCOVERED→QUARANTINED transition — the digest's quarantine counter
-counts it as a real new quarantine, which it is; no marker-event
-pollution. Tests (fail-first at `5f7015b`): DISCOVERED row + healthy
-listing without its path → QUARANTINED + loud line; guard controls —
-failed/empty listing and absent game tree → untouched; a
-holds-media DISCOVERED row → also pruned only via the same
-listing-derived evidence (state, not media, is the trigger); reappear
-control → heals.
-
-### H6 — joint head+tail edge cuts get the map-time CNT_SHORT (r14 #7, minor; completes r12 #7/G3)
-
-The CNT_SHORT arms judge each edge individually; a clip with one
-confirmed head flag and one confirmed tail flag that each pass alone
-still plans BOTH cuts, and when the joint keep (min tail_cut − max
-head_cut) is under MIN_CLIP_S the cutter drops every segment and the
-session terminally rejects under 'split produced no >=70s segment' —
-a burned attempt, a pointless ffmpeg cut, and a misdirecting reason
-(the r12 #7 class, composition case). Fix: where both flag families'
-planned cuts are visible in the mapper, after the individual arms:
-when at least one head-edge and one tail-edge cut are planned, compute
-the joint remainder on `dur_true`; if < MIN_CLIP_S append ONE
-CNT_SHORT (blocking, unfixable, post_cut_s=joint remainder). Entry
-26's `_map_windows` geometry untouched — the check only composes
-already-computed cut points (CNT_EDGE_NONGAMEPLAY cut_at_s included).
-Tests (§2 rule 3; fail-first at `5f7015b`): probed 75s, confirmed head
-notif t=2.5 + tail chat t=73 → exactly CNT_SHORT with
-post_cut_s == 69.0 (pre-fix: two fixable edge reasons); probed 200s
-control → both fixable edges stand; single-edge tests unchanged.
-[EXECUTOR DEVIATION 2026-08-19: the t=2.5/69.0 pair is arithmetically
-inconsistent (head cut t+1.0 = 3.5, tail cut 72.0 → 68.5); the
-finding's own probe (R14_FINDINGS #7) uses head t=2.0 → 3.0, joint
-69.0. Test written with t=2.0 → 69.0 per the authority chain.]
-
-### H7 — safe_session_id rejects control characters (r14 #8, minor)
-
-An embedded NUL passes `safe_session_id` and crashes every join's
-`resolve()`/`mkdir` with an untyped ValueError — burning both fix
-attempts into a terminal "fix retries exhausted" reject (raw path) or
-crashing the G7 operator tools mid-batch. Garbage ids are DESIGNED to
-degrade to the bundle-folder-name fallback. Fix: add
-`and not any(ord(c) < 32 for c in session_id)` to the accept
-condition — one shared decision point covers all five join sites.
-Tests (fail-first at `5f7015b`): NUL-bearing sid through the real
+H7 rejected control characters but a >255-byte session_id still
+passes and crashes every join's mkdir with OSError (errno 63), which
+apply_fixes' classifier calls HOST — the row parks FIX_QUEUED and
+retries forever (never terminal, never the designed folder-name
+fallback), with an hourly alert blaming the host; the same crash
+kills both G7 operator tools mid-batch. Fix: add a byte-length bound
+to the shared accept condition —
+`and len(session_id.encode("utf-8", "ignore")) <= 200` — 200, not
+255, because the pipeline derives longer names from the sid
+(`<sid>.split-manifest.json` +20, `<sid>-analysis` +9, `-pN`
+segment/grandchild suffixes) that must all stay under NAME_MAX.
+Over-length ids take the bundle-folder-name fallback at all five join
+sites. Tests (fail-first at `ce26148`): 'x'*300 through the REAL v2
 translate join → output inside out_root under the folder-name
-fallback, no raise; a tab-bearing sid likewise.
+fallback, no raise; unit pin at the shared decision point incl. the
+boundary (a 200-byte id is kept, 201 falls back) and the clean-id
+control.
 
-### H8 — analyze_sample verdicts judge the probed duration (r14 #9, minor; completes D2/G3 in the operator tool)
+### I6 — tests-only: H6 composition tail-arm + chat-head pins (r15 #9, minor)
 
-`build_verdict` judges clip-short and tail-edge-ness on the CLAIMED
-duration while the probed truth sits in `a.video_probe` — a
-corrupt-small claim makes the recommend-only report tell an operator
-to re-record good footage; a corrupt-large claim turns every genuine
-tail window into "mid-clip". Fix: derive
-`dur_true = float(a.video_probe.get("duration_s") or 0) or
-a.duration_s` in analyze() and use it for the clip-short gate and
-build_verdict's dur/at_head/at_tail tests, claim as fallback only.
-Pipeline verdicts are unaffected (already probed-based). Tests
-(fail-first at `5f7015b`): claim 59.9 / probe 600 → no re-record-short
-verdict; claim huge / probe 300 with a window ending at the probed
-end → tail-edge advice, not mid-clip.
+`_joint_edge_short`'s CNT_EDGE_NONGAMEPLAY tail accumulation
+(`tail_cut = min(tail_cut or 1e9, p["cut_at_s"])`) and the chat-HEAD
+sub-branch (`t <= 3.0`, no edge param) are exercised by no test —
+deleting the tail else-branch passes the FULL arming gate. Fix
+(tests-only, beside the H6 block in
+`pipeline/tests/test_r_loop14.py`): (a) head notif t=2.0 +
+CNT_EDGE_NONGAMEPLAY tail cut_at_s=71.0 → exactly one CNT_SHORT with
+post_cut_s == 68.0; (b) chat-head sibling (chat t <= 3.0, params
+carry only t) + a tail cut → composed CNT_SHORT. Mutation-proof: the
+finder's EXACT mutant (delete the CNT_EDGE_NONGAMEPLAY else-branch)
+must fail (a); a head-arm mutant must fail (b); both pass 749/749
+today.
 
-### H9 — tests-only: G5 depth-2 paid-piece pin + G4 site-4 de-vacuous + fix_sync twin (r14 #11/#12/#13)
+### I7 — H5 ruling: gone-is-gone + rename coaching line (r15 #1≡#2≡#3≡#10, RULED)
 
-(a) r14 #11: depth-2 variant of the G5 allow-reported test — cohort
-root(SPLIT) → root-p1(SPLIT) → root-p1-p1(DELIVERED 900s, accepted-
-stamped); after the tool: `paid_pieces_for(root) == {root-p1-p1:
-900.0}` and `paid_pieces_for(root-p1) == {}`; re-put the same children
-and assert the next sheet skips (no row). Mutation-proof: the finder's
-exact mutant (`parent_of.get(sid) or sid` in place of the walk) must
-fail. (b) r14 #12: my G4 raw-sidecars test never invoked
-`_verify_against_raw` (check_session_v2 needs `raw_bundle=` passed —
-there is no auto-detection). De-vacuous it: call
-`check_session_v2(d, raw_bundle=d/"raw")` and assert the specific
-degrade line ('raw verification skipped' + OverflowError) rides
-r.issues; add the per-event-arm sibling (duration 1e999-class + one
-bigint-t mouse_raw event → returns without raising). Mutation-proof:
-reverting BOTH site-4 arms must fail these tests (it passes 722/722
-today). (c) r14 #13: the fix_sync_from_v1 traversal twin — `_load` the
-tool, minimal v1+v2 pair (needs_ffmpeg), sid `../../../../ESCAPED` →
-contained under out_root, folder-name fallback, no escape dir;
-mutation-proof: reverting the G7 hunk must fail. All three proved
-against a HEAD scratch copy with the finders' EXACT mutants.
-[EXECUTOR DEVIATION 2026-08-19: H9 was tests-only, but writing the
-H9c twin uncovered a REAL pre-existing crash in
-tools/fix_sync_from_v1.py:167 — `actions = resolve_actions(...)`
-predates the context-gating signature change (the function returns
-(actions, dead_literals); v2.py unpacks it), so the tool's CSV writer
-crashed with TypeError on the first row of EVERY real run; invisible
-precisely because the tool had zero coverage (the r14 #13 class,
-worse). One-line unpack fix landed in the H9 commit; fail-first
-evidence: the twin test itself crashed with that TypeError on the
-unfixed tree before reaching the join. Surfaced for the final
-report.]
+**RULED (Adnaan 2026-08-19): "if the folder is gone, it's gone."** No
+same-path heal, no consecutive-listing counters. The four confirmed
+findings are DISPOSED as accepted behavior with one string change:
+the natural correction is a re-upload under a NEW folder name, which
+mints a new session id and processes as a completely separate session
+— verified: BOTH dedupe sites (scan-time and download-time) exclude
+QUARANTINED rows, so the dead row never blocks or dup-rejects the
+renamed copy. Fix: (a) the vanished-arm detail and loud line gain the
+coaching — detail becomes "folder gone from Drive I — dropped from
+intake; re-upload under a NEW folder name to re-enter" (stays under
+the 300-char event cap); (b) the arm's comment is corrected to state
+the same-path restore is DELIBERATELY terminal (the old "reappears at
+a clean path re-registers" phrasing reads as if any reappearance
+heals — r15 proved the same-path case does not, and that is now the
+RULED design, not a gap); (c) accepted-behaviour entry 70 (§4) so
+iterations 16–18 do not re-raise it. Tests: same-path reappearance
+stays QUARANTINED silently (pins the RULING against a future
+well-meaning heal), and the quarantine event detail carries the
+coaching string (fail-first at `ce26148`: string absent); the
+existing different-path heal test and guard controls stay green
+untouched. Rule 5: no new events (the detail string changes, the
+transition does not; re-verify the ZIP_ADJ_CHANGED/breadcrumb/
+paid-piece LIKE queries cannot match the new text).
 
-## 4. Review iteration 15 (multi-agent, ultracode; Adnaan's warrant 2026-08-19)
+### I8 — fix_sync_from_v1 portable delivery copy (RULED)
 
-- Script: copy `tools/review/flip-review-iter14.js` (committed
-  snapshot) to the session scratchpad as `flip-review-iter15.js`.
-  Retarget the regressions lane at the H-commits (list each with a
-  one-line description, as iter14 did for G); refresh the suite
-  numbers + HEAD note; APPEND accepted-behaviour entries 61+ for the H
-  rulings (keep ALL existing 1–60; amend 55 where H1 completes the
-  counted_at anchor, 56 where H2 completes the fallback anchor, 57
-  where H9b de-vacuouses the site-4 pin, 58 where H3+H9a extend the
-  rebuild-reset teardown/pins, 60 where H9c pins the fix_sync half) —
-  update the list FIRST or agents re-litigate settled ground. NO raw
-  backticks inside the ACCEPTED template literal (parse error, bit
-  twice). Invoke via the Workflow tool with `scriptPath`.
-- Keep: **ALL 7 lanes** (Adnaan's driver-core conditional resolved
-  NOT-triggered — driver-core confirmed 2 findings in iter 14), 2-vote
-  refute (a finding dies only at 2/2), whole-codebase + regressions +
-  tests-coverage. Check usage-credit headroom with Adnaan BEFORE the
-  ~40-agent launch (two iteration-11 refuters died on exhaustion;
-  iterations 12/13/14 each burned ~3–3.8M subagent tokens).
-- Iteration 15 is the CONFIRMATION pass: if NOT quiet — **STOP; hand
-  Adnaan every verified-but-unfixed finding, severity-ordered; do NOT
-  fix, do NOT proceed.** If quiet: proceed to §5.
-- After the iteration: findings-of-record doc (R15_FINDINGS.md,
-  generated from the results JSON — never hand-transcribed), workflow
-  snapshot committed to `tools/review/`, §0 updated.
+The tool copies delivery files with `subprocess.run(["cp", "-c", …])`
+— the APFS-clone flag exists only on macOS, so the tool cannot run on
+the Linux VM (where ops move at the flip). **RULED (Adnaan
+2026-08-19): fix — portable copy.** Fix: replace the cp subprocess
+with `shutil.copy2` (clone efficiency is dispensable for this
+operator tool), and REMOVE the H9c twin's `_portable_cp` subprocess
+stub so the twin exercises the tool's real copy on both hosts.
+Fail-first evidence is already on record: the unstubbed twin FAILED
+the VM gate at the tree before `82c86da` (CalledProcessError from
+`cp -c`) — cite that run; after I8 the unstubbed twin must pass the
+VM gate (the Linux prover) as part of the post-I8 gates. Sweep rule
+1: grep the repo for other `cp -c` / mac-only subprocess sites,
+verdict per site.
 
-## 5. Independent REAL e2e verification
+## 4. Review iterations 16–18 (multi-agent, ultracode; Adnaan's warrant 2026-08-19)
 
-Only after the loop exits clean. A fresh agent that wrote and reviewed
-none of this code exercises the actual system, modeled on FLIP_RUNBOOK
-§5 (canary shape, Mac-local): fresh HL_PIPELINE_HOME, TEST-mode
-Telegram, real VLM calls (bounded spend), real Drive II
-`_pipeline_test/` uploads purged via `deliver.cleanup_test_folder`,
-local sample bundles as seeds, 3-leg kill -9 matrix. Verdict relayed
-VERBATIM; a BLOCKED-with-error never becomes a pass. Prereqs verified
-on this Mac: `rclone listremotes` shows drive-collect:/drive-deliver:;
+- **Stop rule (RULED): run 16; run 17 ONLY if 16 was not quiet; run 18
+  ONLY if 17 was not quiet. STOP at the first quiet iteration** —
+  quiet per R5_TRIAGE §7's pre-registered definition (zero confirmed
+  blockers AND every confirmed major/minor fixed with the suite green
+  on both hosts).
+- **Not-quiet handling (RULED): fix in-iteration** — the executor vets
+  fix specs from the findings (deviations stated), implements with the
+  full §2/§3 discipline (fail-first, sweeps, gates), and the NEXT
+  iteration reviews those fixes. Payment-surface changes and anything
+  contradicting a standing ruling are surfaced to Adnaan BEFORE
+  implementing. If 18 is also not quiet: fix its confirmed set, then
+  STOP and report the fixes as landed-but-unreviewed, honestly
+  labelled.
+- Script per iteration: copy the PREVIOUS committed snapshot
+  (`tools/review/flip-review-iter15.js` for iteration 16) to the
+  session scratchpad as `flip-review-iter<N>.js`. Retarget the
+  regressions lane at the newest fix commits (one-line description
+  each, the iter15 pattern); refresh the suite numbers + HEAD note +
+  iteration number/framing; APPEND accepted-behaviour entries 70+ (for
+  iteration 16: the I rulings — 70 H5 gone-is-gone + rename coaching;
+  71 caseless-key exemption; 72 combo-half writer strip; 73 v1 tz
+  guard; 74 session_id length bound; 75 portable fix_sync copy — and
+  AMEND 62 where I3 pins the slug half, 65 where I7 makes same-path
+  terminal THE RULED DESIGN, 66 where I6 pins the composition arms,
+  67 where I5 joins the length bound) — update the list FIRST or
+  agents re-litigate settled ground. NO raw backticks inside the
+  ACCEPTED template literal (parse error, bit twice). Invoke via the
+  Workflow tool with `scriptPath`.
+- Keep: **ALL 7 lanes**, 2-vote refute (a finding dies only at 2/2),
+  whole-codebase + regressions + tests-coverage. **Check usage-credit
+  headroom with Adnaan BEFORE EACH launch** (~27–40 agents,
+  ~3–4M subagent tokens per iteration; two iteration-11 refuters died
+  on exhaustion).
+- A Workflow launched by a session DIES if that session restarts —
+  relaunch with `resumeFromRunId` (completed agents return cached) and
+  VERIFY via the run's journal.jsonl whether the cache applied.
+- After each iteration: findings-of-record doc (`R<N>_FINDINGS.md`,
+  generated from the results JSON — never hand-transcribed; save
+  `r<N>-results.json` to the session scratchpad), workflow snapshot
+  committed to `tools/review/`, §0 updated.
+
+## 5. CHECKPOINT — then (later, on Adnaan's go) e2e and THE FLIP
+
+**RULED 2026-08-19: the executor STOPS at the first quiet iteration
+(or after 18) and reports to Adnaan. The independent e2e does NOT run
+until he explicitly says go.** The report is verdict-first and carries
+the §7 payment-surface list.
+
+For the LATER session that gets the go (keep, unexecuted): the
+independent REAL e2e is a fresh agent that wrote and reviewed none of
+this code exercising the actual system, modeled on FLIP_RUNBOOK §5
+(canary shape, Mac-local): fresh HL_PIPELINE_HOME, TEST-mode Telegram,
+real VLM calls (bounded spend), real Drive II `_pipeline_test/`
+uploads purged via `deliver.cleanup_test_folder`, local sample bundles
+as seeds, 3-leg kill -9 matrix; verdict relayed VERBATIM — a
+BLOCKED-with-error never becomes a pass. Then THE FLIP per
+`FLIP_RUNBOOK.md` end to end (§5 canary → §6 flip → §7 payment
+endgame with the final invariant anchor `2026-08-16T05:32:50+00:00` →
+§8 tree verify + LAST destructive act → reject-reason table → final
+independent live verifier → final report per
+`FLIP_SESSION_KICKOFF_PROMPT.md` §6 steps 7–9), destructive gates
+intact (parachute before reset-class actions, preview before
+`--send`, `recal_verify_tree.py` CLEAN before any deletion). e2e
+prereqs last verified on this Mac 2026-08-19: `rclone listremotes`
+shows drive-collect:/drive-deliver:;
 `~/.config/hl-gamedata/secrets.env` has GEMINI+TELEGRAM vars (never
 print it).
 
-## 6. THE FLIP (this work stream executes)
+## 6. Reporting
 
-Execute `FLIP_RUNBOOK.md` end to end — §5 canary → §6 flip (stop
-units → E2→C2D resize with balloon check → `CONT_DAILY_REPORTS=False`
-committed → deploy by rsync → §6c verification greps on the VM BEFORE
-arming → `recal_refix_reset` dry-run → review JSON (`paid_pieces_to_
-record` + `skipped_sealed`; `skipped_mixed`/`sealed_roots` stay `[]`)
-→ `--yes` → `vm_setup.sh --enable-continuous` → watch the first hour)
-→ §7 payment endgame (driver stopped → `recal_regen_sheets.py` preview
-→ sanity-read BOTH sheets → `--send`; final invariant anchor ==
-`2026-08-16T05:32:50+00:00` → `CONT_DAILY_REPORTS=True`, commit,
-deploy, restart; update `NOTE_FOR_D3.md`) → §8 tree verify + LAST
-destructive act → reject-reason table (both baselines, labelled
-mixed-methodology) → final independent live verifier (verdict
-verbatim) → final report (`FLIP_SESSION_KICKOFF_PROMPT.md` §6 steps
-7–9). Destructive gates keep their runbook protections: parachute
-backup before reset-class actions, preview before `--send`,
-`recal_verify_tree.py` CLEAN before any deletion.
-
-## 7. Reporting
-
-Verdict-first, per phase. The final report to Adnaan surfaces every
-observable payment-surface change of this stream: F6 (NULL-duration
-roots' accepted hours now paid), F7 + r12 #1/#2 + G1 + H1 (the
-compare-and-set stamps and the '' adjudication chain, including H1's
-pre-build anchor), G5 + H3/H9a (rebuild-reset under ruling C, its
-split-artifact discard and the depth-2 memory keying), and the two
-C6-era rewritten payment tests. Label every mixed-methodology
-comparison as such. Relay verifier verdicts verbatim.
+Verdict-first, per phase. The checkpoint report (and later the final
+report) surfaces every observable payment-surface change of this
+stream: F6 (NULL-duration roots' accepted hours now paid), F7 + r12
+#1/#2 + G1 + H1 (the compare-and-set stamps and the '' adjudication
+chain incl. the pre-build counted_at anchor), G5 + H3/H9a
+(rebuild-reset under ruling C: split-artifact discard, depth-2 memory
+keying), the two C6-era rewritten payment tests, **I1 + I2 (players
+with symbol-key or combo binds are no longer wrongly rejected — their
+hours now reach sheets), the I7 ruling (a vanished folder is
+permanently dropped from intake; the correction is a re-upload under
+a NEW folder name — sessions restored under the same name are
+deliberately never processed or paid), and the fix_sync_from_v1
+repairs (resolve_actions crash + portable copy).** Label every
+mixed-methodology comparison as such. Relay verifier verdicts
+verbatim.
