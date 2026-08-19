@@ -105,7 +105,8 @@ def build_resolver(keybind: dict):
 
 def resolve_actions(held: set[str], motion, rules, *,
                     context: str | None = None,
-                    allowed: dict[str, frozenset[str]] | None = None):
+                    allowed: dict[str, frozenset[str]] | None = None,
+                    credited_out: set[str] | None = None):
     """Resolve one frame -> (actions, dead_literals).
 
     `motion` is (dx_active, dy_active); a bare bool means both axes (legacy).
@@ -115,6 +116,17 @@ def resolve_actions(held: set[str], motion, rules, *,
     returned in dead_literals — the key does nothing in this game mode, so the
     caller can strip it from input_keys (v2 "unbound in this context" rule).
     With context=None nothing is gated and dead_literals is always empty.
+
+    `credited_out`, when a set is passed, receives the CREDITED literals:
+    held tokens appearing in a group of a rule whose FULL group set was
+    satisfied and that fired (ctx_ok). A bound token NOT in this set did
+    nothing this frame — the {modifier, key} combo-half case: both halves
+    are in bound_literals, but a half held alone satisfies no rule, so
+    keeping it ships a key with null actions and violates the delivery
+    invariant (r15 #5, RULED 2026-08-19: strip-and-count at the writer).
+    The accounting existed for the context path; this exposes it to the
+    no-context path too. Motion-axis rules credit no literals (their lits
+    set is empty), so keys are never stripped for lacking motion.
 
     Actions keep keybind insertion order, deduped. Note a literal may fire >1
     semantic in one context (Space in suit: jump + jetpack_boost); the caller
@@ -146,6 +158,8 @@ def resolve_actions(held: set[str], motion, rules, *,
             credited |= lits
         else:
             blocked |= lits
+    if credited_out is not None:
+        credited_out |= credited
     return list(fired.keys()), blocked - credited
 
 

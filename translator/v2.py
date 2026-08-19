@@ -191,17 +191,38 @@ def _iso_utc(d: datetime) -> str:
     return d.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%f") + "Z"
 
 
-def _v2_rows(rows: list[list], bound: frozenset[str], strip_stats: dict) -> list[list]:
-    """v1 binner rows -> v2 rows: strip unbound keys, v2 names, float dx/dy."""
+def _v2_rows(rows: list[list], bound: frozenset[str], strip_stats: dict,
+             rules) -> list[list]:
+    """v1 binner rows -> v2 rows: strip unbound and uncredited keys, v2
+    names, float dx/dy.
+
+    A kept token must be CREDITED by a satisfied rule (r15 #5, RULED
+    2026-08-19): bound_literals includes every alt of a {modifier, key}
+    combo group, so both halves are "bound" — but resolve_actions fires
+    only when ALL of a rule's groups are held, so a half pressed alone
+    shipped keys with null actions and check_session_v2 FAILed the
+    keys-have-actions invariant through BOTH fix routes (terminal
+    reject). A combo half alone is stripped-and-counted exactly like an
+    unbound key; fix_key_hygiene mirrors this rule."""
     extra_null = [""] * len(CAMERA_EXTRA_COLS)
     out = []
     for row in rows:
         head, (keys, actions, btns, dx, dy) = row[:-5], row[-5:]
+        kset = {k for k in (keys or "").split("|") if k}
+        bset = {b for b in (btns or "").split("|") if b}
+        credited: set[str] = set()
+        if rules and kset:
+            # motion is deliberately (False, False): motion-axis rules
+            # credit no literals (their lits set is empty), so keys are
+            # never stripped for lacking motion — credit depends only on
+            # the held set
+            resolve_actions(kset | bset, (False, False), rules,
+                            credited_out=credited)
         kept = []
         for k in (keys or "").split("|"):
             if not k:
                 continue
-            if k in bound:
+            if k in bound and (not rules or k in credited):
                 kept.append(key_display(k))
             else:
                 strip_stats[k] = strip_stats.get(k, 0) + 1
@@ -429,7 +450,7 @@ def translate_bundle_v2(bundle_dir: Path, out_root: Path, *,
                 "--with opencv-python-headless)")
 
     strip_stats: dict[str, int] = {}
-    v2rows = _v2_rows(rows, bound, strip_stats)
+    v2rows = _v2_rows(rows, bound, strip_stats, rules)
     with (out_dir / "frames.csv").open("w", newline="") as f:
         w = csv.writer(f)
         w.writerow(V2_FRAME_COLS)

@@ -1025,7 +1025,7 @@ def retranslate_from_sidecars(work: Path, *,
             note += " | context track length mismatch — gating skipped"
 
     strip: dict = {}
-    v2rows = _v2_rows(rows, bound, strip)
+    v2rows = _v2_rows(rows, bound, strip, rules)
     _write_csv(work, V2_FRAME_COLS, v2rows)
     fix_sessionjson_recompute(work, slug)
 
@@ -1119,7 +1119,22 @@ def fix_key_hygiene(work: Path, game: str) -> str:
                 except ValueError:
                     return False
             motion = (_moving(r[dxi]), _moving(r[dyi]))
-            acts, _ = resolve_actions(kset | set(btns), motion, rules)
+            credited: set[str] = set()
+            acts, _ = resolve_actions(kset | set(btns), motion, rules,
+                                      credited_out=credited)
+            if bound:
+                # mirror _v2_rows' credited-token rule (r15 #5): a
+                # {modifier, key} combo half held alone is bound but
+                # satisfies no rule, so keeping it re-fires the
+                # keys-without-actions FAIL this fix is planned for —
+                # the bound sibling of the unbound strip above. Buttons
+                # keep today's behavior (the checker's invariant covers
+                # keys only). Stripping after the resolve is exact: an
+                # uncredited token contributed to no satisfied rule, so
+                # the resolved actions cannot change.
+                uncredited = {t for t in kset if t not in credited}
+                stripped += len(uncredited)
+                kset -= uncredited
             r[ai] = "|".join(acts)
         r[ki] = "|".join(key_display(t) for t in sorted(kset))
         r[bi] = "|".join(_BTN_DISPLAY.get(b, b) for b in btns)

@@ -169,8 +169,18 @@ def remap(src_keys, src_btns, src_dx, src_dy, pts2, shift_us, rules):
         # and the writer's "|".join crashed on every run (found by the
         # r14 #13 twin test; this tool had zero coverage). context=None
         # here, so dead_literals is always empty — discard is correct.
-        actions = resolve_actions(kset | bset, moving, rules)[0] \
+        credited: set[str] = set()
+        actions = resolve_actions(kset | bset, moving, rules,
+                                  credited_out=credited)[0] \
             if rules else []
+        if rules:
+            # r15 #5 sweep sibling: this tool writes v2 deliveries under
+            # the same keys-have-actions invariant as _v2_rows — a
+            # {modifier, key} combo half held alone satisfies no rule and
+            # must not ship with null actions. Uncredited tokens (unbound
+            # ones included — the writer's bound filter dropped those
+            # anyway) are stripped here.
+            kset &= credited
         rows.append((sorted(kset), actions, sorted(bset), dx_d[j], dy_d[j]))
     return rows, uncovered
 

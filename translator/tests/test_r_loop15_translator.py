@@ -67,6 +67,81 @@ def test_symbol_key_bind_passes_the_v2_token_grammar(tmp_path):
         "the symbol key's action must ride with it"
 
 
+# ------- r15 #5 (I2): the writer strips action-less combo halves
+
+
+def _combo_bundle(tmp_path):
+    """A Kamla bundle with a {modifier, key} combo bind (interact =
+    Ctrl+E), a single bind (move_up = w), a bare-'e' press, a
+    modifier-lead, and a full Ctrl+E chord — every arm of the r15 #5
+    discriminator in one clip. No mouse_raw events: the retranslate
+    route's always-on lag corrector spuriously 'corrects' synthetic
+    clips (testsrc2's global motion correlates with anything) and
+    shifts every event off the video."""
+    d = _bundle(tmp_path, {"session_id": "combobind",
+                           "game": {"name": "Kamla"},
+                           "recording": dict(_GOOD_REC)})
+    (d / "keybind.json").write_text(json.dumps(
+        {"interact": {"modifier": "ctrl", "key": "e"}, "move_up": "w"}))
+    evs = [
+        {"t": int(0.10e6), "type": "key", "key": "w", "action": "down"},
+        {"t": int(0.90e6), "type": "key", "key": "w", "action": "up"},
+        # bare combo half: must strip (r15 #5)
+        {"t": int(0.20e6), "type": "key", "key": "e", "action": "down"},
+        {"t": int(0.35e6), "type": "key", "key": "e", "action": "up"},
+        # modifier lead, then the full chord
+        {"t": int(0.50e6), "type": "key", "key": "ctrl", "action": "down"},
+        {"t": int(0.55e6), "type": "key", "key": "e", "action": "down"},
+        {"t": int(0.70e6), "type": "key", "key": "e", "action": "up"},
+        {"t": int(0.75e6), "type": "key", "key": "ctrl", "action": "up"},
+    ]
+    (d / "inputs.jsonl").write_text(
+        "\n".join(json.dumps(e) for e in sorted(evs, key=lambda e: e["t"])))
+    return d
+
+
+def _assert_combo_invariant(rows):
+    """The r15 #5 delivery invariant + both §2-rule-3 splits on one CSV."""
+    for x in rows:
+        assert not (x["input_keys"] and not x["input_actions"]), \
+            f"keys with null actions shipped: {x['input_keys']!r}"
+    e_rows = [x for x in rows
+              if "E" in (x["input_keys"] or "").split("|")]
+    assert e_rows, "the full chord's frames must keep the combo key"
+    for x in e_rows:
+        assert "Ctrl" in x["input_keys"].split("|"), \
+            "a kept E must ride with its modifier (bare halves strip)"
+        assert "interact" in (x["input_actions"] or "").split("|")
+    w_rows = [x for x in rows
+              if "W" in (x["input_keys"] or "").split("|")]
+    assert w_rows and all(
+        "move_up" in (x["input_actions"] or "").split("|")
+        for x in w_rows), \
+        "plain single binds must be unaffected (motion never strips keys)"
+
+
+@needs_ffmpeg
+def test_combo_half_pressed_alone_is_stripped_at_the_writer(tmp_path):
+    """r15 #5 (I2, RULED 2026-08-19): bound_literals includes every alt
+    of a {modifier, key} combo group, so both halves are 'bound' and
+    _v2_rows kept them — but resolve_actions fires only when ALL groups
+    are held, so a bare half shipped keys with null actions and the
+    checker FAILed the keys-have-actions invariant through BOTH fix
+    routes (terminal reject, player unpaid). A combo half pressed alone
+    is now stripped-and-counted exactly like an unbound key."""
+    d = _combo_bundle(tmp_path)
+    rep = v2.translate_bundle_v2(d, tmp_path / "out", make_rrd=False,
+                                 head_s=0.0, tail_s=0.0, lag_correct=False)
+    out_dir = Path(rep["out_dir"])
+    (out_dir / "session.rrd").touch()
+    _assert_combo_invariant(_delivered_rows(out_dir))
+    assert rep["stripped_keys"].get("e", 0) >= 1, rep["stripped_keys"]
+    assert rep["stripped_keys"].get("ctrl", 0) >= 1, \
+        "the modifier-lead frames strip the lone modifier too"
+    r = v2.check_session_v2(out_dir)
+    assert not any("null input_actions" in i for i in r.issues), r.issues
+
+
 @needs_ffmpeg
 def test_lowercase_letter_and_snake_tokens_still_fail_the_grammar(tmp_path):
     """I1 control (§2 rule 3, the other side of the exemption): tokens
