@@ -65,8 +65,9 @@ class FixFailed(Exception):
 
 
 def has_raw_sidecars(work: Path) -> bool:
-    """BOTH sidecars — the condition retranslate_from_sidecars actually
-    needs (it opens raw/metadata.json unconditionally).
+    """BOTH sidecars, USABLE — the condition retranslate_from_sidecars
+    actually needs (it opens and parses raw/metadata.json
+    unconditionally).
 
     validate.validate_session already required both; the two drivers
     tested only inputs.jsonl, so a zip upload missing metadata.json was
@@ -74,9 +75,24 @@ def has_raw_sidecars(work: Path) -> bool:
     attempts and was REJECTED "fix retries exhausted" — while every code
     in that group has a working CSV-level fallback. This is also the
     settled gray-zone rule ("sidecars missing: raw-needing fixes fall
-    back to CSV-level") being silently violated (r-loop 7)."""
+    back to CSV-level") being silently violated (r-loop 7).
+
+    PRESENT-but-unparseable metadata.json is the same failure as missing
+    (r18 #4 — the r-loop-7 shape's open half): existence alone planned a
+    FIX_RETRANSLATE that crashed JSONDecodeError on both attempts,
+    superseding the CSV-level repairs that would have delivered the
+    session. inputs.jsonl needs no parse test here — load_events reads
+    it with errors='replace' line-tolerantly (r-loop 4)."""
     raw = Path(work) / "raw"
-    return (raw / "inputs.jsonl").exists() and (raw / "metadata.json").exists()
+    if not ((raw / "inputs.jsonl").exists()
+            and (raw / "metadata.json").exists()):
+        return False
+    try:
+        meta = json.loads((raw / "metadata.json").read_text(
+            encoding="utf-8", errors="replace"))
+    except (OSError, json.JSONDecodeError):
+        return False
+    return isinstance(meta, dict)
 
 
 def _read_session_json(work: Path) -> dict:
@@ -887,9 +903,17 @@ def retranslate_from_sidecars(work: Path, *,
     still wins when usable (r13 #4 intent intact)."""
     from translator.v2 import GAME_TITLES
     raw = work / "raw"
-    # see translator/v2.py: player-typed free text, non-UTF-8 reachable
-    meta = json.loads((raw / "metadata.json").read_text(
-        encoding="utf-8", errors="replace"))
+    # see translator/v2.py: player-typed free text, non-UTF-8 reachable.
+    # has_raw_sidecars gates planning on this file PARSING (r18 #4), so
+    # a crash here should be unreachable — belt-and-braces: any residual
+    # path (direct callers, a race on the file) stays a typed, named
+    # failure instead of a bare JSONDecodeError
+    try:
+        meta = json.loads((raw / "metadata.json").read_text(
+            encoding="utf-8", errors="replace"))
+    except (OSError, json.JSONDecodeError) as e:
+        raise FixFailed(f"raw/metadata.json unreadable "
+                        f"({type(e).__name__}: {e})") from e
     s = _read_session_json(work)
     game_info = meta.get("game", {}) if isinstance(meta, dict) else {}
     if not isinstance(game_info, dict):

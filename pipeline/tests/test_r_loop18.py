@@ -149,3 +149,70 @@ def test_v1_conversion_corrupt_session_json_degrades(tmp_path):
     assert "converted v1 -> v2" in note
     s = json.loads((work / "session.json").read_text())
     assert s.get("game_title"), "recompute rebuilt session.json"
+
+
+# ------- r18 #4 (L2): unusable raw/metadata.json falls back to
+# ------- CSV-level fixes
+
+
+def _raw_dir(tmp_path, metadata_text):
+    work = tmp_path / "l2work"
+    (work / "raw").mkdir(parents=True)
+    (work / "raw" / "inputs.jsonl").write_text('{"t": 0}\n')
+    if metadata_text is not None:
+        (work / "raw" / "metadata.json").write_text(metadata_text)
+    return work
+
+
+def test_unusable_metadata_plans_csv_level_not_retranslate(tmp_path):
+    """r18 #4 (L2): has_raw_sidecars tested only EXISTENCE while
+    retranslate_from_sidecars parses raw/metadata.json unconditionally
+    — so a present-but-corrupt sidecar planned a FIX_RETRANSLATE that
+    crashed JSONDecodeError (session-kind, no refund) on both attempts,
+    SUPERSEDING the CSV-level repairs that would have delivered the
+    session: having the sidecars made it strictly worse off, the exact
+    r-loop-7 shape left open for this class. Unusable now equals
+    missing — the settled gray-zone rule ('raw-needing fixes fall back
+    to CSV-level') — so plan_fixes keeps FIX_TSREPAIR_PTS."""
+    from pipeline import fix as fixmod
+    for bad in ('{"recording": {"started_at', '[1, 2, 3]'):
+        work = _raw_dir(tmp_path / bad[:4].strip('[{"'), bad)
+        assert fixmod.has_raw_sidecars(work) is False, \
+            f"unusable metadata must read as no-sidecars: {bad!r}"
+        plan = fixmod.plan_fixes(
+            [{"code": "SYN_TS_NOT_PTS", "blocking": True, "fixable": True,
+              "params": {}, "evidence": "e"}],
+            game="kamla", has_raw=fixmod.has_raw_sidecars(work))
+        ids = [fid for fid, _p in plan["steps"]]
+        assert "FIX_TSREPAIR_PTS" in ids and "FIX_RETRANSLATE" not in ids
+
+
+def test_usable_metadata_still_plans_retranslate_control(tmp_path):
+    """L2 control (§2 rule 4, the proceed side): both sidecars present
+    and parseable keep today's retranslate supersede; a missing file
+    keeps reading False (the r-loop-7 pin's own ground)."""
+    from pipeline import fix as fixmod
+    work = _raw_dir(tmp_path, '{"recording": {"started_at": 1}}')
+    assert fixmod.has_raw_sidecars(work) is True
+    plan = fixmod.plan_fixes(
+        [{"code": "SYN_TS_NOT_PTS", "blocking": True, "fixable": True,
+          "params": {}, "evidence": "e"}],
+        game="kamla", has_raw=fixmod.has_raw_sidecars(work))
+    ids = [fid for fid, _p in plan["steps"]]
+    assert "FIX_RETRANSLATE" in ids and "FIX_TSREPAIR_PTS" not in ids
+    assert fixmod.has_raw_sidecars(_raw_dir(tmp_path / "m", None)) is False
+
+
+def test_retranslate_metadata_read_is_typed_belt_and_braces(tmp_path):
+    """L2 belt-and-braces: any residual path into
+    retranslate_from_sidecars with an unreadable metadata.json (direct
+    callers, a race after planning) raises a typed FixFailed NAMING the
+    file instead of a bare JSONDecodeError the classifier reads as an
+    anonymous session crash."""
+    import pytest
+
+    from pipeline import fix as fixmod
+    work = _raw_dir(tmp_path, '{"recording": {"started_at')
+    with pytest.raises(fixmod.FixFailed) as ei:
+        fixmod.retranslate_from_sidecars(work, ledger_game="kamla")
+    assert "metadata.json unreadable" in str(ei.value)
