@@ -64,10 +64,18 @@ def safe_session_id(session_id, bundle_dir: Path) -> str:
     (r-loop 11 #12): metadata.json is player-typed, and a session_id of
     '../../../../ESCAPED_dir' was joined into the output path verbatim —
     all four delivery files written OUTSIDE out/ (path traversal on the
-    pipeline VM). The r-loop-9 guard closed only the non-str crash."""
+    pipeline VM). The r-loop-9 guard closed only the non-str crash.
+
+    Control characters are rejected too (r-loop 14 #8): an embedded NUL
+    passes every test below yet crashes the join's resolve()/mkdir with
+    an untyped ValueError — burning both fix attempts into a terminal
+    'fix retries exhausted' reject, for a session the designed
+    folder-name fallback translates fine. One shared decision point
+    covers all five join sites."""
     if isinstance(session_id, str) and session_id not in ("", ".") \
             and "/" not in session_id and "\\" not in session_id \
-            and os.sep not in session_id and ".." not in session_id:
+            and os.sep not in session_id and ".." not in session_id \
+            and not any(ord(c) < 32 for c in session_id):
         return session_id
     return Path(bundle_dir).name
 
