@@ -262,3 +262,92 @@ def test_vanished_detail_and_loud_line_carry_the_rename_coaching(
     err = capsys.readouterr().err
     assert "[vanished-discovered]" in err
     assert "re-upload under a NEW folder name" in err
+
+
+def test_coached_rename_reupload_enters_despite_dead_quarantined_row(
+        cfg, ledger):
+    """r17 #6 (K6, tests-only): entry 70's load-bearing precondition —
+    'both dedupe sites exclude QUARANTINED rows, so the dead row never
+    blocks or dup-rejects the renamed copy' — existed only as
+    docstring prose: deleting the QUARANTINED exclusion from the
+    scan-time dedupe passed the FULL arming gate at 782/778
+    (finder-proven), while every player following the pipeline's own
+    printed coaching got the re-upload terminally parked as DUPLICATE
+    of a row that can never deliver (the same-player arm fires BEFORE
+    the adjudicated-loser strip). Scan-time site: a NEW sid at a
+    different path, SAME md5 + same player as the dead row, must land
+    DISCOVERED with no dup verdict anywhere. Mutation-proofed with
+    the finder's EXACT deletion in a fixed-tree scratch copy (session
+    scratchpad): it fails this pin."""
+    from pipeline import ingest
+    from pipeline.tests.conftest import make_session_entries
+    from pipeline.tests.test_r_loop14 import _H5_SID, _h5_discovered
+    _h5_discovered(cfg, ledger)
+    ingest.scan(cfg, ledger, entries=make_session_entries(
+        sid="2026-08-14T11-00-00Z_kamla_c_00000000000000b6", md5="h6-md5"))
+    assert ledger.get(_H5_SID)["state"] == "QUARANTINED"
+    # the coached correction: same footage re-uploaded under a NEW
+    # folder name -> a NEW session id at a different path
+    new_sid = "2026-08-14T12-00-00Z_kamla_c_00000000000000c6"
+    res = ingest.scan(cfg, ledger, entries=make_session_entries(
+        op="op2@x.com", sid=new_sid, md5="h5-md5",
+        ctime="2026-08-14T12:00:00.000Z"))
+    row = ledger.get(new_sid)
+    assert row["state"] == "DISCOVERED", \
+        "the coached re-upload must enter intake, not park as DUPLICATE"
+    assert new_sid in res.discovered
+    assert res.duplicates == [] and res.dup_cross == []
+    assert "INT_DUP_CROSS" not in (row["reasons_json"] or "")
+    assert ledger.get(_H5_SID)["state"] == "QUARANTINED", \
+        "the dead row stays dead (gone-is-gone)"
+
+
+def test_coached_rename_reupload_survives_download_dedupe_too(
+        cfg, ledger, monkeypatch):
+    """K6 download-time twin (the ruling names BOTH sites): a
+    zip-payload re-upload carries no Drive-side md5, so the
+    download-time backfill dedupe is the only judge — removing
+    QUARANTINED from ITS exclusion tuple parks the coached correction
+    at download instead (same-player arm, work dir wiped). The dead
+    row's md5 is the REAL hash of the re-uploaded bytes here, exactly
+    the byte-identical rename-re-upload the coaching promises works.
+    The finder's exact tuple mutant fails this pin (fixed-tree
+    scratch proof)."""
+    import hashlib
+    import subprocess
+
+    from pipeline import ingest
+    from pipeline.tests.conftest import make_session_entries
+    from pipeline.tests.test_r_loop14 import _H5_SID
+    payload = b"h5-rename-bytes"
+    real_md5 = hashlib.md5(payload).hexdigest()
+    ingest.scan(cfg, ledger,
+                entries=make_session_entries(sid=_H5_SID, md5=real_md5))
+    ingest.scan(cfg, ledger, entries=make_session_entries(
+        sid="2026-08-14T11-00-00Z_kamla_c_00000000000000b6", md5="h6-md5"))
+    assert ledger.get(_H5_SID)["state"] == "QUARANTINED"
+    new_sid = "2026-08-14T12-00-00Z_kamla_c_00000000000000c6"
+    res = ingest.scan(cfg, ledger, entries=make_session_entries(
+        op="op2@x.com", sid=new_sid, files=["bundle.zip"],
+        ctime="2026-08-14T12:00:00.000Z"))
+    assert new_sid in res.discovered
+
+    def fake_rclone(args, **kw):
+        d = None
+        for a in args:
+            if str(cfg.work) in str(a):
+                d = ingest.Path(a)
+        d.mkdir(parents=True, exist_ok=True)
+        (d / "video.mp4").write_bytes(payload)
+        (d / "frames.csv").write_text("frame_id\n")
+        (d / "session.json").write_text('{"game_title": "Kamla"}')
+        return subprocess.CompletedProcess(args, 0, "", "")
+    monkeypatch.setattr(ingest, "run_rclone", fake_rclone)
+    monkeypatch.setattr(ingest, "_probe_duration", lambda v: 123.0)
+    kind = ingest.download(cfg, ledger, new_sid)
+    assert kind != "duplicate", \
+        "the coached re-upload must not dup-park at the download dedupe"
+    row = ledger.get(new_sid)
+    assert row["state"] == "INGESTED"
+    assert "INT_DUP_CROSS" not in (row["reasons_json"] or "")
+    assert ledger.get(_H5_SID)["state"] == "QUARANTINED"
