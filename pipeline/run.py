@@ -1291,6 +1291,17 @@ def send_daily_report_if_due(cfg: C.Config, ledger: Ledger,
     counted: list[str] = []
     accepted: list[str] = []
     md5s: dict[str, str] = {}
+    # count-time anchor, captured BEFORE the sheet's row read (r-loop 14
+    # #2≡#3): captured after write_payment_sheet returned, it left the
+    # whole build (rollup + CSV/MD writes + record write) as a blind
+    # window — a ZIP_ADJ_CHANGED adjudication landing there was neither
+    # "before the row read" (the snapshot already held '') nor
+    # ">= counted_at", so the stamp landed silently and the re-upload's
+    # hours reached no sheet. A marker at-or-after this instant is not
+    # provably pre-count, and skipping is the money-safe direction; a
+    # marker strictly before it leaves a REAL md5 in the snapshot and
+    # routes to the CAS arm instead (reports._stamp).
+    counted_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
     csv_path, _md = reports.write_payment_sheet(cfg, ledger, now_ist,
                                                 bounds=(lo, hi),
                                                 counted_out=counted,
@@ -1306,7 +1317,6 @@ def send_daily_report_if_due(cfg: C.Config, ledger: Ledger,
     # header-only) sheet overwrote payment-<day>.csv and went out as the
     # payment document. From here on a retry RESUMES instead (see
     # _resume_daily_send).
-    counted_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
     tmp = record.with_name(record.name + f".tmp{os.getpid()}")
     tmp.write_text(json.dumps({
         "lo": lo, "hi": hi, "counted": counted, "accepted": accepted,
@@ -1319,8 +1329,9 @@ def send_daily_report_if_due(cfg: C.Config, ledger: Ledger,
         # and the stamps compare-and-set on it. "at" is ALSO the
         # recorded-'' arm's count-time anchor (r-loop 13 #2): _stamp
         # skips a recorded-'' sid whose ZIP_ADJ_CHANGED adjudication
-        # marker postdates it. Captured once, above, so the record and
-        # the stamp calls below carry the IDENTICAL string.
+        # marker postdates it. Captured once, above the sheet build
+        # (r-loop 14 #2≡#3), so the record and the stamp calls below
+        # carry the IDENTICAL string.
         "md5": md5s,
         "at": counted_at}))
     os.replace(tmp, record)

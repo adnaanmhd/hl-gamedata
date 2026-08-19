@@ -349,10 +349,15 @@ def _stamp(ledger: Ledger, sid: str, column: str, now: str,
         # the download-time deferral has since adjudicated the bytes
         # CHANGED (durable marker at-or-after the count) — then the
         # sheet counted the old bytes and the new hours must stay
-        # countable. `>=`, not `>`: a marker in the record-write second
-        # is post-count too (a marker BEFORE the sheet's row read would
-        # have left a REAL md5 in the snapshot and this arm is never
-        # reached), while `>` let a same-second adjudication re-stamp.
+        # countable. `counted_at` is captured BEFORE the sheet's row
+        # read (r-loop 14 #2≡#3 — the post-build capture left the whole
+        # build as a blind window), so a marker the read did not already
+        # see as a REAL md5 always satisfies `>=` here; a marker strictly
+        # before the capture leaves a REAL md5 in the snapshot and this
+        # arm is never reached. `>=`, not `>`: a marker in the capture's
+        # own second is not provably pre-count and skipping is the
+        # money-safe direction, while `>` let a same-second adjudication
+        # re-stamp.
         if counted_at:
             adj = ledger.db.execute(
                 "SELECT 1 FROM events WHERE session_id=? AND "
