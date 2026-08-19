@@ -240,3 +240,55 @@ def test_retranslate_wrong_game_metadata_loses_to_the_ledger_slug(
         f"the LEDGER game's semantics must govern: {e_actions}"
     assert not {"general_confirm", "general_primary_interact"} \
         & e_actions, "the metadata game's semantics must NOT leak in"
+
+
+# ------- r14 #10 (H3): rebuild-reset discards split manifests +
+# ------- rowless segment dirs
+
+def test_rebuild_reset_discards_split_manifests_and_rowless_dirs(
+        cfg, monkeypatch):
+    """r14 #10 (H3): the teardown wiped only work/<sid> — a kill in the
+    cutter's manifest-to-child-insert window (manifest + segment dirs on
+    disk, zero child rows) carried the pre-recalibration cut through the
+    reset; the re-run's crash triage then ADOPTED the VOID gen-1 cut
+    (_recover_split -> complete=True over the stale segments) and the
+    dirs leaked unreclaimably. The teardown now discards the split
+    artifacts and the -analysis dir, as the refix sibling always did."""
+    from pipeline.ledger import Ledger
+    from pipeline.tests.test_payment_split_r6 import _put
+    from pipeline.tests.test_r_loop13 import _rebuild_tool
+    reset, parachute, _sys = _rebuild_tool(cfg, monkeypatch)
+    led = Ledger(cfg.ledger_path)
+    root = "2026-08-14T09-00-00Z_kamla_c_0000000000000h30"
+    _put(led, root, state="FIXING", raw=3600.0, player="h3@x.com")
+    led.close()
+    work = cfg.work
+    (work / root).mkdir(parents=True)
+    for n in (1, 2):
+        seg = work / f"{root}-p{n}"
+        seg.mkdir(parents=True)
+        (seg / "video.mp4").write_bytes(b"x" * 64)
+    (work / f"{root}-analysis").mkdir()
+    (work / f"{root}.split-manifest.json").write_text(json.dumps(
+        {"segments": [f"{root}-p1", f"{root}-p2"]}))
+    monkeypatch.setattr(_sys, "argv", ["recal_rebuild_reset.py", "--yes",
+                                       "--backup", str(parachute)])
+    assert reset.main() == 0
+    assert not (work / f"{root}.split-manifest.json").exists(), \
+        "the VOID cut's manifest must not survive the reset"
+    assert not (work / f"{root}-p1").exists() and \
+        not (work / f"{root}-p2").exists(), \
+        "rowless segment dirs must not survive the reset"
+    assert not (work / f"{root}-analysis").exists()
+    # the re-run reaches FIXING again: crash triage must RE-DERIVE,
+    # never adopt the pre-recalibration cut
+    led = Ledger(cfg.ledger_path)
+    try:
+        led.set_state(root, "FIXING")
+        complete, kids = runmod._recover_split(cfg, led, root,
+                                               led.get(root))
+        assert complete is False and kids == [], \
+            "no stale adoption: the re-run must re-derive under the " \
+            "new rules"
+    finally:
+        led.close()

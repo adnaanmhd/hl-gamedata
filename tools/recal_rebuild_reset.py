@@ -68,6 +68,7 @@ def main() -> int:
 
 
 def _locked_main(cfg, args) -> int:
+    from pipeline.run import _discard_split_artifacts
     bk = Path(args.backup)
     if not bk.exists() or bk.stat().st_size < 1024:
         print(f"ABORT: backup {bk} missing/empty — take the parachute first")
@@ -241,6 +242,18 @@ def _locked_main(cfg, args) -> int:
         wd = cfg.work / sid
         if wd.exists():
             shutil.rmtree(wd, ignore_errors=True)
+        # split manifests + rowless segment dirs + the analysis dir go
+        # too (r14 #10): a kill in the cutter's manifest-to-child-insert
+        # window leaves manifest + segment dirs with zero child rows;
+        # carried through the reset, the re-run's crash triage ADOPTS
+        # the pre-recalibration (VOID) cut over the stale gen-1
+        # segments, and the dirs leak unreclaimably (_sweep_terminal_work
+        # needs a SPLIT/REJECTED/DELIVERED parent or a rowed sid). The
+        # child rows are already DELETEd above, so every segment dir of
+        # every sid is rowless here — the shared discard wipes them all,
+        # exactly as the refix sibling does in its teardown.
+        _discard_split_artifacts(cfg, ledger, sid)
+        shutil.rmtree(cfg.work / f"{sid}-analysis", ignore_errors=True)
         if report.exists():
             _locked_report_remove(report, sid)
             cleared += 1
