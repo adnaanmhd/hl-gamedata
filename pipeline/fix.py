@@ -1489,8 +1489,18 @@ def fix_sessionjson_recompute(work: Path, game: str) -> str:
 
 def fix_v1_to_v2(work: Path, game: str) -> str:
     """ARR_V1_FORMAT: mechanical v1→v2 (playbook §6 — actions are already
-    resolved; raws not needed)."""
-    s = json.loads((work / "session.json").read_text())
+    resolved; raws not needed).
+
+    Every read of the player-typed v1 payload DEGRADES instead of
+    crashing (r18 #1≡#2≡#3≡#5 — the class K3 fixed at _active and its
+    sweep NOTED here): this route's crashes are unrescuable by design,
+    because the checker early-returns on key_binding.json before the
+    CSV is ever scanned, so no STR_SENTINELS (or any other repair) can
+    ever precede this step — an uncaught ValueError burned both
+    attempts into a wrongful terminal reject of a repairable session.
+    A corrupt session.json is reachable here too: sniff types the
+    payload v1 on key_binding.json alone, without parsing it."""
+    s = _read_session_json(work)
     if "canonical" not in s and "game_title" in s:
         # already a flat v2 session that merely carries a stray
         # key_binding.json — the correct fix is deleting the file, never
@@ -1498,6 +1508,11 @@ def fix_v1_to_v2(work: Path, game: str) -> str:
         (work / "key_binding.json").unlink(missing_ok=True)
         return "stray key_binding.json deleted (session was already v2)"
     canonical = s.get("canonical", {})
+    if not isinstance(canonical, dict):
+        # a non-dict canonical block would crash every .get below —
+        # degrade to {}: session_id falls back to the folder name and
+        # fix_sessionjson_recompute rebuilds the rest from ground truth
+        canonical = {}
     header, rows = _read_csv(work)
     col = {c: i for i, c in enumerate(header)}
     need = ["frame_id", "timestamp_ms", "input_keys", "input_actions",
@@ -1534,8 +1549,26 @@ def fix_v1_to_v2(work: Path, game: str) -> str:
     from translator.v2 import CAMERA_EXTRA_COLS
     cam_null = [""] * (len(C2W_COLS) + len(CAMERA_COLS)
                        + len(CAMERA_EXTRA_COLS))
-    has_motion = any(r[col["input_mouse_dx"]] not in ("", "0")
-                     or r[col["input_mouse_dy"]] not in ("", "0")
+    import math
+
+    def _parse_motion(v) -> float:
+        # unparseable/non-finite degrades to 0.0, exactly like
+        # fix_sentinels' _parse and translator/v2's _num_cell — a junk
+        # cell is not motion (r18 #1≡#2≡#3≡#5: the bare float here
+        # crashed both attempts on one '1,5' cell, and on this route
+        # no sentinel repair can ever run first)
+        try:
+            x = float(v or 0)
+        except (TypeError, ValueError):
+            return 0.0
+        return x if math.isfinite(x) else 0.0
+
+    # has_motion judges PARSED values (fix_sentinels' own has_motion
+    # rule): the old string test counted junk and '0.0' cells as
+    # motion, so a junk-only column fabricated an all-zero motion
+    # track instead of the blank no-capture form
+    has_motion = any(_parse_motion(r[col["input_mouse_dx"]]) != 0.0
+                     or _parse_motion(r[col["input_mouse_dy"]]) != 0.0
                      for r in rows)
     for r in rows:
         keys = [t for t in (r[col["input_keys"]] or "").split("|") if t]
@@ -1560,8 +1593,8 @@ def fix_v1_to_v2(work: Path, game: str) -> str:
                 btns.append(_BTN_DISPLAY[canon])
         dx, dy = r[col["input_mouse_dx"]], r[col["input_mouse_dy"]]
         if has_motion:
-            dx = f"{float(dx or 0):.1f}"
-            dy = f"{float(dy or 0):.1f}"
+            dx = f"{_parse_motion(dx):.1f}"
+            dy = f"{_parse_motion(dy):.1f}"
         else:
             dx = dy = ""
         out.append([r[col["frame_id"]], r[col["timestamp_ms"]]] + cam_null
@@ -1571,19 +1604,29 @@ def fix_v1_to_v2(work: Path, game: str) -> str:
 
     new_s = {"session_id": canonical.get("session_id", work.name)}
     ca = canonical.get("created_at_utc")
-    trim_meta = canonical.get("trim") or {}
+    trim_meta = canonical.get("trim")
+    if not isinstance(trim_meta, dict):
+        trim_meta = {}
     if ca:
-        created = datetime.fromisoformat(ca.replace("Z", "+00:00"))
-        if created.tzinfo is None:
-            # a naive v1 stamp is UTC by contract — repair it in place so
-            # .astimezone below can't shift it by the host's offset
-            # (r15 #7: the sole omission of the sibling guard; the qa
-            # checker that would flag naive stamps never runs before
-            # ARR_V1_FORMAT routes here)
-            created = created.replace(tzinfo=timezone.utc)
-        created += timedelta(seconds=trim_meta.get("head_cut_s") or 0.0)
-        new_s["created_at_utc"] = created.astimezone(timezone.utc).strftime(
-            "%Y-%m-%dT%H:%M:%S.%f") + "Z"
+        try:
+            created = datetime.fromisoformat(str(ca).replace("Z", "+00:00"))
+            if created.tzinfo is None:
+                # a naive v1 stamp is UTC by contract — repair it in
+                # place so .astimezone below can't shift it by the
+                # host's offset (r15 #7: the sole omission of the
+                # sibling guard; the qa checker that would flag naive
+                # stamps never runs before ARR_V1_FORMAT routes here)
+                created = created.replace(tzinfo=timezone.utc)
+            created += timedelta(
+                seconds=float(trim_meta.get("head_cut_s") or 0.0))
+            new_s["created_at_utc"] = created.astimezone(
+                timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%f") + "Z"
+        except (TypeError, ValueError):
+            # an unusable stamp/trim is OMITTED, not crashed on (r18
+            # #1≡#2≡#3≡#5 sibling read): fix_sessionjson_recompute
+            # below synthesizes a canonical created_at_utc from ground
+            # truth — its designed r-loop 7/8 job for exactly this
+            pass
     (work / "session.json").write_text(json.dumps(new_s, indent=2))
     fix_sessionjson_recompute(work, slug)
     (work / "key_binding.json").unlink(missing_ok=True)
