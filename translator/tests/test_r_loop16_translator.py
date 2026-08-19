@@ -37,6 +37,94 @@ def test_lone_surrogate_session_id_falls_back(tmp_path):
     assert safe_session_id("x" * 201, tmp_path / "b") == "b"
 
 
+# ------- r16 #5 (J6, RULED): the comma key ships as the named token
+# ------- 'Comma'
+
+
+def test_comma_key_display_round_trip():
+    """r16 #5 (J6, RULED 2026-08-19 option A) unit: the comma key is
+    NAMED like Space/Enter — key_display(',') == 'Comma', the inverse
+    round-trips, and a keybind literal written as 'Comma' binds the
+    raw ',' events via the alias."""
+    from translator.keys import normalize_literal
+    from translator.v2 import key_canonical, key_display
+    assert key_display(",") == "Comma"
+    assert key_canonical("Comma") == ","
+    assert normalize_literal("Comma") == ","
+    assert normalize_literal(",") == ","
+
+
+@needs_ffmpeg
+def test_comma_key_bind_ships_the_named_token(tmp_path):
+    """r16 #5 (J6): a comma-bind player's presses terminal-rejected
+    exactly like the r15 #4 ';' case one arm over — the checker's
+    comma arm flags the bare ',' token the writer itself emits, and
+    hygiene no-ops (proven end-to-end by the finder). The delivery now
+    carries 'Comma' (cased, no comma character in the cell): the
+    grammar passes and the action rides."""
+    d = _bundle(tmp_path, {"session_id": "commabind",
+                           "game": {"name": "Kamla"},
+                           "recording": dict(_GOOD_REC)})
+    (d / "keybind.json").write_text(json.dumps(
+        {"interact": ",", "move_up": "w"}))
+    evs = []
+    for k, t0, t1 in ((",", 0.20, 0.50), ("w", 0.10, 0.40)):
+        evs.append({"t": int(t0 * 1e6), "type": "key", "key": k,
+                    "action": "down"})
+        evs.append({"t": int(t1 * 1e6), "type": "key", "key": k,
+                    "action": "up"})
+    (d / "inputs.jsonl").write_text(
+        "\n".join(json.dumps(e) for e in sorted(evs, key=lambda e: e["t"])))
+    rep = v2.translate_bundle_v2(d, tmp_path / "out", make_rrd=False,
+                                 head_s=0.0, tail_s=0.0, lag_correct=False)
+    out_dir = Path(rep["out_dir"])
+    (out_dir / "session.rrd").touch()
+    r = v2.check_session_v2(out_dir)
+    assert not any("non-v2 key tokens" in i for i in r.issues), r.issues
+    rows = _delivered_rows(out_dir)
+    hits = [x for x in rows
+            if "Comma" in (x["input_keys"] or "").split("|")]
+    assert hits, "the comma presses must ride as the named token"
+    assert all("interact" in (x["input_actions"] or "").split("|")
+               for x in hits)
+    assert not any("," in (x["input_keys"] or "") for x in rows), \
+        "no raw comma character inside a delivered input_keys cell"
+
+
+@needs_ffmpeg
+def test_glued_token_still_fails_the_comma_arm(tmp_path):
+    """J6 control (§2 rule 3): the comma arm's real target — a
+    glued/malformed multi-char token containing a comma — still FAILs
+    the grammar; only the NAMED comma key was rescued."""
+    import csv
+    d = _bundle(tmp_path, {"session_id": "gluedtok",
+                           "game": {"name": "Kamla"},
+                           "recording": dict(_GOOD_REC)})
+    rep = v2.translate_bundle_v2(d, tmp_path / "out", make_rrd=False,
+                                 head_s=0.0, tail_s=0.0, lag_correct=False)
+    out_dir = Path(rep["out_dir"])
+    (out_dir / "session.rrd").touch()
+    with (out_dir / "frames.csv").open(newline="") as f:
+        rdr = csv.reader(f)
+        header = next(rdr)
+        body = list(rdr)
+    ki, ai = header.index("input_keys"), header.index("input_actions")
+    body[0][ki], body[0][ai] = "W,A", "move_up"
+    with (out_dir / "frames.csv").open("w", newline="") as f:
+        w = csv.writer(f)
+        w.writerow(header)
+        w.writerows(body)
+    r = v2.check_session_v2(out_dir)
+    assert any("non-v2 key tokens" in i and "W,A" in i
+               for i in r.issues), r.issues
+
+
+def _delivered_rows(out_dir):
+    import csv
+    with (Path(out_dir) / "frames.csv").open(newline="") as f:
+        return list(csv.DictReader(f))
+
+
 @needs_ffmpeg
 def test_lone_surrogate_session_id_e2e_translates_under_fallback(tmp_path):
     """J1 e2e: the surrogate arrives through the production shape — an

@@ -49,6 +49,7 @@ _LITERAL_ALIASES: dict[str, str] = {
     "return": "enter", "del": "delete", "ins": "insert",
     "pageup": "page_up", "page up": "page_up", "pagedown": "page_down", "page down": "page_down",
     "capslock": "caps_lock",
+    "comma": ",",     # a keybind writing the key as 'Comma' binds the raw ',' events (r16 #5)
     "mouseleft": "mouse_left", "mouseright": "mouse_right", "mousemiddle": "mouse_middle",
     "mouse4": "mouse_x1", "mouse5": "mouse_x2",
     "mousex": "mouse_x", "mousey": "mouse_y", "mouse": "mouse",

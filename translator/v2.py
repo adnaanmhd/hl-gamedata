@@ -95,6 +95,15 @@ _KEY_DISPLAY = {
     "backspace": "Backspace", "delete": "Delete", "home": "Home", "end": "End",
     "page_up": "PageUp", "page_down": "PageDown",
     "up": "Up", "down": "Down", "left": "Left", "right": "Right",
+    # the comma KEY gets a NAMED display like Space/Enter (r16 #5, RULED
+    # 2026-08-19 option A): the bare ',' character key_display would
+    # otherwise emit is exactly what the checker's comma arm flags
+    # (glued-token detection), so a comma-bind player terminal-rejected
+    # through a no-op hygiene loop — the r15 #4 class one arm over. The
+    # named token also keeps a raw comma out of the pipe-joined CSV
+    # cells, and makes a foreign bare-',' cell genuinely repairable by
+    # hygiene in one attempt (canonical ',' round-trips to 'Comma').
+    ",": "Comma",
 }
 _BTN_DISPLAY = {"mouse_left": "Left", "mouse_right": "Right",
                 "mouse_middle": "Middle", "mouse_x1": "X1", "mouse_x2": "X2"}

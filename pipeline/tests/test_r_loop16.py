@@ -204,6 +204,59 @@ def test_daily_first_ever_send_with_no_reports_dir_proceeds(
     assert csv_path.exists()
 
 
+# ------- r16 #5 (J6, RULED): hygiene repairs a foreign bare-',' cell
+
+
+@needs_ffmpeg
+def test_hygiene_repairs_a_foreign_bare_comma_cell(tmp_path):
+    """r16 #5 (J6): with the comma key NAMED (option A), a foreign
+    delivery carrying the bare ',' token — which still FAILs the
+    checker's comma arm, by design — becomes genuinely repairable by
+    FIX_KEY_HYGIENE in ONE attempt: canonical ',' round-trips to
+    'Comma' and the FAIL can never re-fire. Pre-J6 hygiene re-wrote
+    the bare ',' and the identical FAIL burned both attempts."""
+    import csv
+    import shutil
+    from pathlib import Path
+
+    from pipeline import fix as fixmod
+    from translator import v2
+    from translator.tests.test_r_loop16_translator import _GOOD_REC, _bundle
+    d = _bundle(tmp_path, {"session_id": "commafix",
+                           "game": {"name": "Kamla"},
+                           "recording": dict(_GOOD_REC)})
+    (d / "keybind.json").write_text(json.dumps(
+        {"interact": ",", "move_up": "w"}))
+    rep = v2.translate_bundle_v2(d, tmp_path / "out", make_rrd=False,
+                                 head_s=0.0, tail_s=0.0, lag_correct=False)
+    work = tmp_path / "work"
+    shutil.copytree(Path(rep["out_dir"]), work)
+    (work / "session.rrd").touch()
+    raw = work / "raw"
+    raw.mkdir(exist_ok=True)
+    shutil.copy2(d / "keybind.json", raw / "keybind.json")
+    with (work / "frames.csv").open(newline="") as f:
+        rdr = csv.reader(f)
+        header = next(rdr)
+        body = list(rdr)
+    ki, ai = header.index("input_keys"), header.index("input_actions")
+    body[0][ki], body[0][ai] = ",", "interact"   # the foreign v1-era shape
+    with (work / "frames.csv").open("w", newline="") as f:
+        w = csv.writer(f)
+        w.writerow(header)
+        w.writerows(body)
+    assert any("non-v2 key tokens" in i
+               for i in v2.check_session_v2(work).issues), \
+        "the bare ',' cell must still FAIL pre-hygiene (comma arm intact)"
+    fixmod.fix_key_hygiene(work, "kamla")
+    with (work / "frames.csv").open(newline="") as f:
+        rows = list(csv.DictReader(f))
+    assert rows[0]["input_keys"] == "Comma" and \
+        "interact" in rows[0]["input_actions"], rows[0]
+    r = v2.check_session_v2(work)
+    assert not any("non-v2 key tokens" in i for i in r.issues), r.issues
+
+
 # ------- r16 #6 (J3, tests-only): the fix_sync remap credited-strip pin
 
 
