@@ -75,12 +75,19 @@ verdicts: session scratchpads `r11-results.json` … `r14-results.json`.
   confirmed major/minor fixed with the suite green on both hosts —
   13/13 confirmed findings fixed by H1–H9 `1dd69fa..747422e`,
   0 blockers, 0 dead-verifier findings, both gates green 749/749)
-- [ ] Review iteration 15 (confirmation pass, runs REGARDLESS of 14's
-  verdict — RULED by Adnaan 2026-08-19, his standing preference; ALL 7
-  lanes — the driver-core conditional resolved NOT-triggered; check
-  usage-credit headroom with Adnaan BEFORE the ~40-agent launch; if 15
-  is not quiet: **STOP, hand Adnaan the list, severity-ordered — do
-  NOT fix, do NOT proceed**)
+- [x] Review iteration 15 RAN 2026-08-19 (headroom confirmed by Adnaan
+  pre-launch; run `wf_0098c165-80b`, 27 agents, 0 errors, ~3.23M
+  subagent tokens): **NOT QUIET — 10 raised → 10 confirmed (6 major /
+  4 minor, 0 blockers), 0 killed** (`R15_FINDINGS.md`, snapshot
+  `tools/review/flip-review-iter15.js`, machine results
+  `r15-results.json` in the session scratchpad). Clusters: #1≡#2≡#3≡#10
+  (H5 same-path heal gap — a REGRESSION-class gap in the H set, four
+  lanes independently); #6/#9 = pins for H2/H6 halves; #4/#5/#7/#8
+  pre-existing. **STOPPED per Adnaan's binding sequencing: list handed
+  over severity-ordered; NOTHING fixed, NOTHING proceeds** — e2e and
+  the flip wait on his call.
+- [ ] BLOCKED ON ADNAAN: disposition of the 10 confirmed r15 findings
+  (fix specs to be vetted only after his ruling)
 - [ ] Independent REAL e2e verification (fresh agent, verdict relayed
   VERBATIM)
 - [ ] FLIP §5 canary (kill matrix, autoscale, digest; `_pipeline_test/`
