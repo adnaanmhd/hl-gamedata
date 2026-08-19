@@ -242,6 +242,70 @@ def test_retranslate_wrong_game_metadata_loses_to_the_ledger_slug(
         & e_actions, "the metadata game's semantics must NOT leak in"
 
 
+# ------- r15 #6 (I3, tests-only): the H2 slug half pinned where its
+# ------- consumers are LIVE (outer_wilds ledger rows)
+
+
+@needs_ffmpeg
+def test_retranslate_ow_ledger_applies_keybind_patches_via_the_slug(
+        tmp_path, monkeypatch):
+    """r15 #6 (I3): all three H2 tests used kamla, where every slug
+    consumer (KEYBIND_PATCHES, CONTEXT_GAMES gating,
+    fix_sessionjson_recompute) is a no-op — reverting ONLY the slug
+    assignment in retranslate's non-override branch passed the FULL
+    arming gate while silently stripping every patch-bound key press in
+    production. This pin runs where the patches are live: OW ledger +
+    degraded metadata + a usable custom keybind — the 'e' press must
+    survive with the KEYBIND_PATCHES action. Mutation-proofed with the
+    finder's EXACT mutant (slug = game_key_from_name(...) without the
+    ledger anchor) in a fixed-tree scratch copy (session scratchpad):
+    it passes the full pre-I3 gate and fails this test."""
+    from translator import context as ctxmod
+    monkeypatch.setattr(ctxmod, "available", lambda: False)
+    work = _h2_bundle(tmp_path, "i3patches", {"name": 12345},
+                      keybind={"jump": "space"})
+    out = _retranslate(work, tmp_path, "outer_wilds", "d-i3a")
+    assert not out["error"], out
+    keys, e_actions = _letter_rows(work, "E")
+    assert "E" in keys, \
+        "the OW KEYBIND_PATCHES-bound press must survive: keyed on the " \
+        f"ledger slug, not the degraded metadata ({keys})"
+    assert "general_confirm" in e_actions, e_actions
+
+
+@needs_ffmpeg
+def test_retranslate_ow_ledger_context_gating_keys_on_the_slug(
+        tmp_path, monkeypatch):
+    """r15 #6 (I3) second half: mandatory OW context gating keys on the
+    ledger slug too — under the mutant (slug 'unknown_game') gating is
+    silently SKIPPED and a context-dead press ships with its action.
+    Custom bind q -> flight_autopilot (cockpit-only) on an all-on_foot
+    track must be stripped as context-dead; the ungated w ->
+    general_flashlight control survives the same run."""
+    from translator import context as ctxmod
+    from translator import video as V
+    seen: list[str] = []
+
+    def classify(video, fps, game):
+        seen.append(game)
+        return ["on_foot"] * V.probe(video).frame_count
+    monkeypatch.setattr(ctxmod, "available", lambda: True)
+    monkeypatch.setattr(ctxmod, "classify_video", classify)
+    work = _h2_bundle(tmp_path, "i3context", {"name": 12345},
+                      keybind={"flight_autopilot": "q",
+                               "general_flashlight": "w"})
+    out = _retranslate(work, tmp_path, "outer_wilds", "d-i3b")
+    assert not out["error"], out
+    assert seen == ["outer_wilds"], \
+        f"gating must run, keyed on the LEDGER slug ({seen})"
+    keys, q_actions = _letter_rows(work, "Q")
+    assert "Q" not in keys and not q_actions, \
+        f"a cockpit-only bind pressed on_foot is context-dead ({keys})"
+    w_keys, w_actions = _letter_rows(work, "W")
+    assert "W" in w_keys and "general_flashlight" in w_actions, \
+        "the ungated custom bind must survive the same gated run"
+
+
 # ------- r14 #10 (H3): rebuild-reset discards split manifests +
 # ------- rowless segment dirs
 
