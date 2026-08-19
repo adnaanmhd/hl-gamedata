@@ -532,7 +532,15 @@ def test_regen_rerun_after_a_send_does_not_false_abort(cfg, monkeypatch):
 
 def test_rebuild_reset_clears_the_accepted_mark(cfg, monkeypatch):
     """Untested until r-loop 7: deleting the reset left the suite green,
-    and a stale root-level mark is read as a whole-tree SEAL."""
+    and a stale root-level mark is read as a whole-tree SEAL.
+
+    Re-keyed by G5 (r13 #8 — ruling C extended to the rebuild tool): a
+    stamped cohort now needs --allow-reported; under it the accepted
+    mark is still cleared (the paid-piece memory carries the payment
+    fact instead), while the UPLOADED stamp is PRESERVED — un-stamping
+    it re-paid the same footage via the late-arrival guard once
+    dailies resume. The refusal/memory shapes are pinned in
+    test_r_loop13."""
     reset = _load("recal_rebuild_reset")
     led = Ledger(cfg.ledger_path)
     sid = "2026-08-14T09-00-00Z_kamla_c_0000000000000rr1"
@@ -550,13 +558,13 @@ def test_rebuild_reset_clears_the_accepted_mark(cfg, monkeypatch):
     monkeypatch.setenv("HL_PIPELINE_HOME", str(cfg.home))
     monkeypatch.setattr(sys, "argv",
                         ["recal_rebuild_reset.py", "--yes",
-                         "--backup", str(parachute)])
+                         "--allow-reported", "--backup", str(parachute)])
     assert reset.main() == 0
     led = Ledger(cfg.ledger_path)
     try:
         row = led.get(sid)
         assert row["accepted_reported_at"] is None
-        assert row["uploaded_reported_at"] is None
+        assert row["uploaded_reported_at"], "preserved under G5"
     finally:
         led.close()
 

@@ -11,6 +11,14 @@ duration_raw_s KEPT), tears down SPLIT child rows (cutter re-derives;
 their events rows are kept — audit is append-only), archives existing
 dossiers to history/prerecal-<stamp>/, wipes work/<sid> dirs and clears
 translation_report.json entries via the locked helper.
+
+Payment evidence (r13 #8, ruling C extended here): REFUSES rc=2 when
+any in-scope root carries uploaded_reported_at or any DELIVERED node
+carries accepted_reported_at, unless --allow-reported. Under the flag,
+uploaded stamps are PRESERVED through the reset (nothing double-pays
+via the late-arrival guard) and every accepted-stamped DELIVERED node
+is recorded in ledger.paid_pieces BEFORE the child DELETE; the
+accepted marks are then nulled — the memory carries the payment fact.
 """
 import argparse
 import json
@@ -41,6 +49,11 @@ def main() -> int:
     ap.add_argument("--backup", required=True,
                     help="path of the already-taken ledger backup")
     ap.add_argument("--yes", action="store_true")
+    ap.add_argument("--allow-reported", action="store_true",
+                    help="proceed although payment stamps exist: uploaded "
+                         "stamps are preserved and accepted-stamped "
+                         "DELIVERED nodes are recorded as paid pieces "
+                         "(ruling C) before the teardown")
     args = ap.parse_args()
 
     cfg = C.load()
@@ -98,20 +111,87 @@ def _locked_main(cfg, args) -> int:
         return 2
 
     roots = ledger.db.execute(
-        "SELECT session_id, state FROM sessions WHERE parent_id IS NULL "
-        "AND state NOT IN (?,?)", KEEP_STATES).fetchall()
+        "SELECT session_id, state, uploaded_reported_at FROM sessions "
+        "WHERE parent_id IS NULL AND state NOT IN (?,?)",
+        KEEP_STATES).fetchall()
     children = ledger.db.execute(
         "SELECT session_id FROM sessions WHERE parent_id IS NOT NULL"
     ).fetchall()
+
+    # PAYMENT-EVIDENCE refusal + per-piece memory (r13 #8; extends
+    # ruling C to this tool). The refix sibling's doctrine, mirrored:
+    # already-REPORTED footage needs a human decision, not a silent
+    # teardown — once dailies resume, build_sheet_rows re-counts every
+    # un-stamped root via the late-arrival guard, so nulling the stamps
+    # here pays the same footage on two sheets, and deleting an
+    # accepted-stamped DELIVERED child destroys the only record that
+    # its hours were already paid.
+    stamped_roots = [r["session_id"] for r in roots
+                     if r["uploaded_reported_at"]]
+    acc_nodes = ledger.db.execute(
+        "SELECT session_id, parent_id, duration_delivered_s FROM sessions"
+        " WHERE state='DELIVERED' AND accepted_reported_at IS NOT NULL"
+    ).fetchall()
+    if (stamped_roots or acc_nodes) and not args.allow_reported:
+        print(json.dumps({
+            "ABORT": "payment stamps exist in the reset scope",
+            "stamped_roots": stamped_roots,
+            "accepted_stamped_delivered_nodes":
+                [n["session_id"] for n in acc_nodes],
+            "why": ("their hours are already counted on a sent payment "
+                    "sheet; resetting/deleting them un-stamped would "
+                    "re-count the same footage on a later sheet "
+                    "(late-arrival guard) — a silent double-pay"),
+            "how": ("re-run with --allow-reported once reconciled: "
+                    "uploaded stamps are then preserved and each "
+                    "accepted-stamped DELIVERED node is recorded as a "
+                    "paid piece (ruling C) before the teardown"),
+        }, indent=1))
+        return 2
+    # (sid, seconds, seg-detail, tree-root) per accepted-counted
+    # DELIVERED node — root included; resolved to the TREE root because
+    # build_sheet_rows keys paid_pieces on it, and -p1-p1 nesting makes
+    # the immediate parent the wrong key (refix walks [root]+kids)
+    parent_of = {r["session_id"]: r["parent_id"] for r in
+                 ledger.db.execute(
+                     "SELECT session_id, parent_id FROM sessions")}
+
+    def _tree_root(sid: str) -> str:
+        seen: set = set()
+        while parent_of.get(sid) and sid not in seen:
+            seen.add(sid)
+            sid = parent_of[sid]
+        return sid
+
+    paid_to_record = []
+    for n in acc_nodes:
+        segrow = ledger.db.execute(
+            "SELECT detail FROM events WHERE session_id=? AND "
+            "detail LIKE 'split segment %' ORDER BY ts LIMIT 1",
+            (n["session_id"],)).fetchone()
+        paid_to_record.append((_tree_root(n["session_id"]),
+                               n["session_id"],
+                               n["duration_delivered_s"],
+                               segrow["detail"] if segrow else None))
+
     before = ledger.counts_by_state()
     print(json.dumps({"before": before, "roots_to_reset": len(roots),
-                      "children_to_delete": len(children)}, indent=1))
+                      "children_to_delete": len(children),
+                      "stamped_roots_preserved": len(stamped_roots),
+                      "accepted_stamped_delivered_nodes": len(acc_nodes),
+                      "paid_pieces_to_record": len(paid_to_record)},
+                     indent=1))
     if not args.yes:
         print("dry run only (no --yes) — nothing changed")
         return 0
 
     all_sids = [r["session_id"] for r in roots] + \
                [c["session_id"] for c in children]
+
+    # record the paid pieces BEFORE the child DELETE destroys the rows
+    # (refix's recording block; INSERT OR IGNORE — first record wins)
+    for root_id, psid, secs, seg in paid_to_record:
+        ledger.record_paid_piece(root_id, psid, secs, seg)
 
     # dossier archive (supersede pattern) BEFORE the DB flip
     archived = 0
@@ -131,10 +211,18 @@ def _locked_main(cfg, args) -> int:
     cur = ledger.db
     for r in roots:
         sid = r["session_id"]
+        # uploaded_reported_at is DELIBERATELY preserved (r13 #8; the
+        # refix comment's rationale verbatim: the video identity is
+        # unchanged, so these are not new uploaded hours — the stamp is
+        # the only thing stopping the late-arrival guard from counting
+        # the root a second time; preserved stamps mean nothing is
+        # double-paid). accepted_reported_at IS nulled — the paid-piece
+        # memory recorded above now carries the payment fact per node
+        # (ruling C). tree_sealed_at=NULL stays (r8 C6).
         cur.execute(
             "UPDATE sessions SET state='DISCOVERED', bin=NULL,"
             " reasons_json='[]', fix_attempts=0, duration_delivered_s=NULL,"
-            " rrd_sampled=0, delivered_at=NULL, uploaded_reported_at=NULL,"
+            " rrd_sampled=0, delivered_at=NULL,"
             " accepted_reported_at=NULL, tree_sealed_at=NULL,"
             " updated_at=? WHERE session_id=?", (now, sid))
         cur.execute(
@@ -162,6 +250,9 @@ def _locked_main(cfg, args) -> int:
         "after": after, "reset_roots": len(roots),
         "deleted_children": len(children), "dossiers_archived": archived,
         "report_entries_cleared": cleared,
+        "stamped_roots_preserved": len(stamped_roots),
+        "accepted_stamped_delivered_nodes": len(acc_nodes),
+        "paid_pieces_recorded": len(paid_to_record),
         "stage_leftovers": [str(p.parent) for p in leftover_stage],
     }, indent=1))
     return 0

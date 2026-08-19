@@ -318,6 +318,136 @@ def test_edge_flags_judged_on_probed_not_claimed_duration():
         "2s before the REAL end is a fixable tail edge, not mid-clip"
 
 
+# ------- r13 #8 (G5): rebuild-reset payment-evidence refusal + memory
+# ------- (ruling C extended to the rebuild tool — payment-surface)
+
+def _rebuild_tool(cfg, monkeypatch):
+    import sys as _sys
+
+    from pipeline.tests.test_payment_split_r6 import _load
+    reset = _load("recal_rebuild_reset")
+    parachute = cfg.home / "parachute.db"
+    parachute.write_bytes(b"x" * 2048)
+    monkeypatch.setenv("HL_PIPELINE_HOME", str(cfg.home))
+    return reset, parachute, _sys
+
+
+def _stamped_cohort(cfg, player="g5@x.com"):
+    from pipeline.ledger import Ledger
+    from pipeline.tests.test_payment_split_r6 import _put
+    led = Ledger(cfg.ledger_path)
+    root = "2026-08-14T09-00-00Z_kamla_c_0000000000000gg5"
+    kid = f"{root}-p1"
+    _put(led, root, state="SPLIT", raw=3600.0, player=player)
+    _put(led, kid, state="DELIVERED", parent=root, raw=1900.0,
+         delivered=1850.0, player=player)
+    led.update(root, uploaded_reported_at="2026-08-15T00:00:00+00:00")
+    led.update(kid, accepted_reported_at="2026-08-15T00:00:00+00:00")
+    led.close()
+    return root, kid
+
+
+def test_rebuild_reset_refuses_a_stamped_cohort(cfg, monkeypatch,
+                                                capsys):
+    """r13 #8: the tool silently nulled uploaded/accepted stamps and
+    DELETEd paid DELIVERED children — once dailies resume, the
+    late-arrival guard re-counts every un-stamped root, paying the same
+    footage twice. Its own sibling (recal_refix_reset) treats exactly
+    this as refuse-by-default; the rebuild tool now does too."""
+    from pipeline.ledger import Ledger
+    reset, parachute, _sys = _rebuild_tool(cfg, monkeypatch)
+    root, kid = _stamped_cohort(cfg)
+    monkeypatch.setattr(_sys, "argv", ["recal_rebuild_reset.py", "--yes",
+                                       "--backup", str(parachute)])
+    assert reset.main() == 2
+    assert "payment stamps exist" in capsys.readouterr().out
+    led = Ledger(cfg.ledger_path)
+    try:
+        assert led.get(root)["state"] == "SPLIT", "nothing changed"
+        assert led.get(root)["uploaded_reported_at"]
+        assert led.get(kid)["accepted_reported_at"]
+        assert led.db.execute(
+            "SELECT COUNT(*) c FROM paid_pieces").fetchone()["c"] == 0
+    finally:
+        led.close()
+
+
+def test_rebuild_reset_allow_reported_preserves_and_records(
+        cfg, monkeypatch, capsys):
+    """Under --allow-reported: uploaded stamps SURVIVE the reset
+    (refix's rationale — preserved stamps mean nothing is double-paid),
+    every accepted-stamped DELIVERED node is recorded as a paid piece
+    BEFORE the child DELETE, and the next sheet skips a same-id/
+    same-seconds re-delivery via the memory while a genuinely new
+    piece counts once."""
+    from datetime import datetime
+
+    from pipeline import config as C
+    from pipeline import reports
+    from pipeline.ledger import Ledger
+    from pipeline.tests.test_payment_split_r6 import _put
+    reset, parachute, _sys = _rebuild_tool(cfg, monkeypatch)
+    root, kid = _stamped_cohort(cfg)
+    monkeypatch.setattr(_sys, "argv", ["recal_rebuild_reset.py", "--yes",
+                                       "--allow-reported",
+                                       "--backup", str(parachute)])
+    assert reset.main() == 0
+    assert '"paid_pieces_recorded": 1' in capsys.readouterr().out
+    led = Ledger(cfg.ledger_path)
+    try:
+        row = led.get(root)
+        assert row["state"] == "DISCOVERED"
+        assert row["uploaded_reported_at"], \
+            "uploaded stamp survives (late-arrival guard stays armed)"
+        assert row["accepted_reported_at"] is None
+        assert led.get(kid) is None, "children torn down"
+        assert led.paid_pieces_for(root) == {kid: 1850.0}
+        # simulated re-run: deterministic cutter re-creates the same id
+        # with the same seconds — the memory, not a stamp, must skip it
+        _put(led, kid, state="DELIVERED", parent=root, raw=1900.0,
+             delivered=1850.0, player="g5@x.com")
+        led.set_state(root, "SPLIT")
+        fresh = "2026-08-14T11-00-00Z_kamla_c_0000000000000gg6"
+        _put(led, fresh, state="DELIVERED", raw=1200.0, delivered=1100.0,
+             player="new5@x.com")
+        rows = reports.build_sheet_rows(
+            led, datetime.now(C.IST),
+            bounds=("2026-08-14T00:00:00+00:00",
+                    "2026-08-16T00:00:00+00:00"))
+        assert not [r for r in rows if r["player_email"] == "g5@x.com"], \
+            "same-id/same-seconds re-delivery must skip via the memory"
+        new = [r for r in rows if r["player_email"] == "new5@x.com"]
+        assert len(new) == 1 and new[0]["kamla_accepted_hrs"] > 0, \
+            "a genuinely new piece still counts, once"
+    finally:
+        led.close()
+
+
+def test_rebuild_reset_dry_run_reports_stamp_counts(cfg, monkeypatch,
+                                                    capsys):
+    """The dry-run plan must name the payment evidence in scope —
+    the 08-16 one-shot printed not one word about destroyed stamps."""
+    from pipeline.ledger import Ledger
+    reset, parachute, _sys = _rebuild_tool(cfg, monkeypatch)
+    root, kid = _stamped_cohort(cfg)
+    monkeypatch.setattr(_sys, "argv", ["recal_rebuild_reset.py",
+                                       "--allow-reported",
+                                       "--backup", str(parachute)])
+    assert reset.main() == 0
+    out = capsys.readouterr().out
+    assert '"stamped_roots_preserved": 1' in out
+    assert '"accepted_stamped_delivered_nodes": 1' in out
+    assert '"paid_pieces_to_record": 1' in out
+    assert "dry run only" in out
+    led = Ledger(cfg.ledger_path)
+    try:
+        assert led.get(kid) is not None, "dry run changed nothing"
+        assert led.db.execute(
+            "SELECT COUNT(*) c FROM paid_pieces").fetchone()["c"] == 0
+    finally:
+        led.close()
+
+
 def test_edge_flags_with_matching_claim_control():
     """Control (the other split direction): claim == probed keeps the
     identical verdicts — the migration changes corrupt-claim behavior
