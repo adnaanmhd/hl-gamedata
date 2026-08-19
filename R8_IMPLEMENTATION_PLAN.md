@@ -175,28 +175,28 @@ scratchpads `r11-results.json` … `r15-results.json` (r15's is in the
   gray-zone rule's missing half; L3 tests-only, the I3 recipe). Per
   the RULING these fixes land UNREVIEWED — the checkpoint report
   labels them honestly:
-  - [ ] L1 = #1≡#2≡#3≡#5 fix_v1_to_v2 degrades junk v1 cells instead
-    of crashing (major): dx/dy through fix_sentinels' _parse semantics
-    (junk/non-finite → 0.0) with has_motion computed from PARSED
-    values (aligning with fix_sentinels' own has_motion — an all-junk/
-    all-zero column ships blank no-capture, never a fabricated motion
-    track); canonical/trim non-dict type guards; created_at_utc parse
-    guarded → unusable stamp OMITTED (fix_sessionjson_recompute below
-    it synthesizes canonically — verified, its r-loop 7/8 job);
-    session.json read via _read_session_json (corrupt file reaches
-    this route because sniff types v1 on key_binding.json alone,
-    without parsing session.json)
-  - [ ] L2 = #4 unusable raw/metadata.json falls back to CSV-level
-    fixes (major): has_raw_sidecars (the single shared decision point
-    for both drivers) also requires metadata.json to parse to a dict;
-    belt-and-braces typed FixFailed at retranslate_from_sidecars' read
-  - [ ] L3 = #6 tests-only: K2's anchor pinned where it is live — an
-    OW-ledger v1 conversion with a parsed-but-unusable keybind
-    ({"look_up": 12345}) keeps W/A/S with their v1 actions; kills the
-    finder's exact game_name=None mutant (arming-gate-green at
-    793/789) and makes KEYBIND_PATCHES live in the cohort
-  - [ ] Post-L: floor re-pin (passed − 4), both host gates,
-    tree-verify → STOP (checkpoint)
+  - [x] L1 = #1≡#2≡#3≡#5 fix_v1_to_v2 degrades junk v1 cells instead
+    of crashing (major) — LANDED `e197244` (fail-first at 324ac8b:
+    ALL FIVE pins fail there with the exact crash classes; dx/dy via
+    fix_sentinels' _parse semantics, has_motion from PARSED values,
+    canonical/trim guards, unusable stamp OMITTED → recompute
+    synthesizes, session.json via _read_session_json; Mac gate 798)
+  - [x] L2 = #4 unusable raw/metadata.json falls back to CSV-level
+    fixes (major) — LANDED `21c983e` (fail-first at 324ac8b: corrupt
+    metadata read has_raw=True and planned the crashing retranslate;
+    has_raw_sidecars now requires a dict parse — the single shared
+    decision point for both drivers — plus typed FixFailed
+    belt-and-braces at the retranslate read; Mac gate 801)
+  - [x] L3 = #6 tests-only: K2's anchor pinned where it is live —
+    LANDED `f57b3ff` (OW ledger slug + degraded canonical + unusable
+    keybind keeps W/A/S with their v1 actions; the finder's exact
+    game_name=None mutant fails ONLY the new pin, 8 cohort tests stay
+    green; KEYBIND_PATCHES live in the cohort; Mac gate 802)
+  - [x] Post-L: SUITE_FLOOR 798 pinned `74b4a17` (802 passed − 4,
+    run_suite.sh + FLIP_RUNBOOK §6b); BOTH host gates green — Mac
+    802/798 (150.6s), VM 802/798 (524.1s, 2026-08-19); tree-verify
+    clean (no MUTATION markers, only pre-existing junk) → STOP
+    (checkpoint; L1–L3 are landed-but-UNREVIEWED per the ruling)
 - [ ] **CHECKPOINT (RULED 2026-08-19): STOP at the first quiet
   iteration (or after 18).** Report to Adnaan verdict-first with the
   full payment-surface list (§7). The independent e2e and THE FLIP
@@ -588,7 +588,20 @@ looping as host-blamed crashes), and K1 once landed (the
 quarantined-path heal regains the r5 #41 identity guard: a session
 folder moved into another player's tree can no longer flip payment
 attribution in two scans; byte-identical moves and same-player
-renames still heal). Also report the QUEUED new-scope item promised
+renames still heal).
+
+**r18 additions to the same list (landed-but-UNREVIEWED per the
+ruling — label them so):** L1 (v1-format uploads carrying junk dx/dy
+cells, an unusable created_at stamp/trim block, or a corrupt
+session.json are no longer wrongly terminally rejected — the
+conversion degrades per the settled house semantics and their hours
+reach sheets; an all-junk motion column ships the blank no-capture
+form, never a fabricated all-zero track) and L2 (sessions whose
+raw/metadata.json arrives corrupt are no longer made WORSE by their
+own sidecars — the planner falls back to the CSV-level repairs that
+deliver them, so those hours reach sheets too).
+
+Also report the QUEUED new-scope item promised
 to Adnaan 2026-08-19: the OW Observatory satellite-camera terminal is
 an unmodelled context (memory `ow-satellite-camera-context-gap`) —
 spec'd as a `satellite_camera` template + label in
