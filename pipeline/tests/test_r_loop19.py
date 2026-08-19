@@ -265,3 +265,107 @@ def _v1_rows_19(work):
     import csv as _csv
     with (work / "frames.csv").open(newline="") as f:
         return list(_csv.DictReader(f))
+
+
+# ------- r19 #5 (M4, RULED fix-now 2026-08-20): the zip-class ''
+# ------- supersede preserves the payment stamps it cannot justify
+# ------- clearing — the download-time adjudicator owns the bytes
+
+
+def test_ordinary_identical_rezip_counts_once(cfg, ledger, monkeypatch):
+    """r19 #5 (M4): the ORDINARY path — a root counted on a fully
+    SETTLED sheet is re-uploaded as the same zip bytes (new Drive
+    ctime fires the re-upload branch; '' = md5 unknowable from the
+    listing). ledger.supersede cleared both payment stamps +
+    duration_raw_s unconditionally; the download adjudicator correctly
+    declines to clear for identical bytes but restores nothing, so the
+    next sheet re-counted the same uploaded hours and reject label — a
+    silent double-pay across two SENT payment documents. The ''
+    supersede over a real stored md5 now PRESERVES the payment columns
+    (state/attempts/bin/reasons/delivered fields still reset; the
+    prev_md5 breadcrumb still written) and the deferral keeps owning
+    byte adjudication. The r13 mid-send pins are unchanged besides."""
+    import hashlib
+    from datetime import timedelta
+
+    from pipeline import run as runmod
+    from pipeline.tests.test_r_loop8 import _daily_seed
+    from pipeline.tests.test_r_loop13 import _adj_events, _download_with_bytes
+    docs: list[bytes] = []
+    send, sid, csv_path, day = _daily_seed(cfg, ledger, monkeypatch,
+                                           docs=docs)
+    payload = b"same-old-bytes"
+    ledger.update(sid, md5_video=hashlib.md5(payload).hexdigest(),
+                  duration_raw_s=1800.0)
+    assert runmod.send_daily_report_if_due(cfg, ledger, send) is True
+    row = ledger.get(sid)
+    assert row["uploaded_reported_at"] and row["accepted_reported_at"]
+    ledger.supersede(sid, new_md5="", new_bytes=22,
+                     new_ctime="2026-08-21T00:00:00.000Z",
+                     dossier_root=cfg.dossiers)
+    row = ledger.get(sid)
+    assert row["state"] == "DISCOVERED" and row["fix_attempts"] == 0
+    assert row["md5_video"] == "" and row["delivered_at"] is None
+    assert row["uploaded_reported_at"] and row["accepted_reported_at"] \
+        and row["duration_raw_s"] == 1800.0, \
+        "'' means the bytes are unknowable — the counted stamps stand " \
+        "until the deferral SEES changed bytes"
+    _download_with_bytes(cfg, ledger, monkeypatch, sid, payload)
+    row = ledger.get(sid)
+    assert row["uploaded_reported_at"] and row["accepted_reported_at"]
+    assert not _adj_events(ledger, sid), \
+        "identical bytes: no adjudication marker"
+    assert runmod.send_daily_report_if_due(
+        cfg, ledger, send + timedelta(days=1)) is True
+    assert b"p@x.com" not in docs[-1], \
+        "the same hours never re-enter a later sheet (counted once)"
+
+
+def test_ordinary_changed_rezip_clears_at_download(cfg, ledger,
+                                                   monkeypatch):
+    """M4 proceed-side control (§2 rule 4): CHANGED bytes still get the
+    full clear — now at download, where the bytes are KNOWN, via the
+    prev_md5 breadcrumb + the durable ZIP_ADJ_CHANGED marker — so a
+    genuinely corrected re-upload's hours re-enter a later sheet (the
+    review-r5 #7 direction, enforced by the adjudicator that can
+    actually see the bytes)."""
+    import hashlib
+
+    from pipeline import run as runmod
+    from pipeline.tests.test_r_loop8 import _daily_seed
+    from pipeline.tests.test_r_loop13 import _adj_events, _download_with_bytes
+    send, sid, csv_path, day = _daily_seed(cfg, ledger, monkeypatch)
+    ledger.update(sid, md5_video=hashlib.md5(b"old-bytes").hexdigest(),
+                  duration_raw_s=1800.0)
+    assert runmod.send_daily_report_if_due(cfg, ledger, send) is True
+    ledger.supersede(sid, new_md5="", new_bytes=22,
+                     new_ctime="2026-08-21T00:00:00.000Z",
+                     dossier_root=cfg.dossiers)
+    _download_with_bytes(cfg, ledger, monkeypatch, sid, b"genuinely-new")
+    row = ledger.get(sid)
+    assert not row["uploaded_reported_at"] \
+        and not row["accepted_reported_at"] \
+        and row["tree_sealed_at"] is None, \
+        "changed bytes: the deferral applies the full supersede-style clear"
+    assert _adj_events(ledger, sid), "the durable CHANGED marker is written"
+
+
+def test_real_md5_supersede_still_clears(cfg, ledger, monkeypatch):
+    """M4 refuse-side twin: a supersede carrying a REAL new md5 keeps
+    the immediate full clear — the bytes are KNOWN changed at scan
+    time and review-r5 #7's rule (inherited stamps block the corrected
+    re-upload's genuinely-new hours) is unchanged there."""
+    from pipeline import run as runmod
+    from pipeline.tests.test_r_loop8 import _daily_seed
+    send, sid, csv_path, day = _daily_seed(cfg, ledger, monkeypatch)
+    ledger.update(sid, md5_video="a" * 32, duration_raw_s=1800.0)
+    assert runmod.send_daily_report_if_due(cfg, ledger, send) is True
+    assert ledger.get(sid)["uploaded_reported_at"]
+    ledger.supersede(sid, new_md5="b" * 32, new_bytes=22,
+                     new_ctime="2026-08-21T00:00:00.000Z",
+                     dossier_root=cfg.dossiers)
+    row = ledger.get(sid)
+    assert row["uploaded_reported_at"] is None \
+        and row["accepted_reported_at"] is None \
+        and row["duration_raw_s"] is None, \
+        "a real new md5 is known changed bytes — the full clear stands"

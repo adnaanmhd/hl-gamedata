@@ -281,25 +281,43 @@ class Ledger:
         assert row is not None
         self.archive_dossier(session_id, dossier_root)
         now = _now()
+        zip_unknowable = (not new_md5) and bool(row["md5_video"])
+        # uploaded_reported_at cleared below for a REAL new md5: the
+        # stamp belonged to the OLD upload's sheet — inherited, it
+        # blocked the corrected re-upload's hours from the late-arrival
+        # guard on every future sheet (review-r5 #7).
+        # accepted_reported_at goes with it for the same reason: the new
+        # bytes' delivered hours are genuinely new, and an inherited
+        # accepted mark would seal them out of every future sheet (the
+        # §4 bug in its other form). tree_sealed_at likewise (r-loop 8):
+        # new bytes = new hours; a stale whole-tree seal would lock the
+        # re-upload's tree out of every sheet.
+        #
+        # The zip-class '' writer must NOT make those clears (r19 #5):
+        # '' means the bytes are UNKNOWABLE from the Drive listing, and
+        # every rationale above starts from "the bytes changed". An
+        # identical-bytes re-zip (new Drive ctime, same footage) had its
+        # counted stamps cleared here, the download-time adjudicator
+        # correctly declined to re-clear — and restored nothing — so the
+        # same hours and reject label re-entered a second sent sheet: a
+        # silent double-pay. The payment columns now ride the deferral
+        # for this writer: PRESERVED here, cleared at download iff the
+        # bytes prove changed (the prev_md5 breadcrumb below + the
+        # durable ZIP_ADJ_CHANGED marker at ingest.download). The
+        # never-downloads case is money-safe too: preserved stamps mean
+        # the root cannot re-count.
+        pay_clears = ("" if zip_unknowable else
+                      " duration_raw_s=NULL, uploaded_reported_at=NULL,"
+                      " accepted_reported_at=NULL, tree_sealed_at=NULL,")
         self.db.execute(
             "UPDATE sessions SET md5_video=?, bytes=?, drive_ctime=?,"
             " fix_attempts=0, bin=NULL, reasons_json='[]',"
-            " duration_delivered_s=NULL, duration_raw_s=NULL, rrd_sampled=0,"
-            " delivered_at=NULL, uploaded_reported_at=NULL,"
-            " accepted_reported_at=NULL, tree_sealed_at=NULL, updated_at=?"
+            " duration_delivered_s=NULL, rrd_sampled=0,"
+            " delivered_at=NULL," + pay_clears + " updated_at=?"
             " WHERE session_id=?",
             (new_md5, new_bytes, new_ctime, now, session_id))
-        # uploaded_reported_at cleared above: the stamp belonged to the
-        # OLD upload's sheet — inherited, it blocked the corrected
-        # re-upload's hours from the late-arrival guard on every future
-        # sheet (review-r5 #7). accepted_reported_at goes with it for the
-        # same reason: the new bytes' delivered hours are genuinely new,
-        # and an inherited accepted mark would seal them out of every
-        # future sheet (the §4 bug in its other form). tree_sealed_at
-        # likewise (r-loop 8): new bytes = new hours; a stale whole-tree
-        # seal would lock the re-upload's tree out of every sheet.
         detail = f"superseded: new md5 {new_md5}"
-        if not new_md5 and row["md5_video"]:
+        if zip_unknowable:
             # zip-class supersede (ingest's re-upload branch passes ""):
             # the new bytes' md5 is UNKNOWABLE from the Drive listing, so
             # remember the pre-reset md5 in the SAME breadcrumb format the
