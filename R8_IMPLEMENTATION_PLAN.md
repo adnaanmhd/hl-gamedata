@@ -160,9 +160,43 @@ scratchpads `r11-results.json` … `r15-results.json` (r15's is in the
     793/789 (148.3s), VM 793/789 (517.9s, 2026-08-19); tree-verify
     clean (no MUTATION markers, only pre-existing junk) →
     iteration 18 (headroom check with Adnaan first)
-- [ ] Review iteration 18 (ONLY if 17 was not quiet; same rules; if 18
-  is ALSO not quiet: fix its confirmed set, then STOP — report the
-  fixes as landed-but-unreviewed, honestly labelled)
+- [x] Review iteration 18 RAN (headroom OK'd by Adnaan 2026-08-19; run
+  `wf_e3359c57-a84`, 19 agents, 0 errors, ~2.71M subagent tokens):
+  **NOT QUIET pre-fix — 6 raised → 6 confirmed (6 major, 0 blockers),
+  0 killed** (`R18_FINDINGS.md`, snapshot
+  `tools/review/flip-review-iter18.js`, machine results
+  `r18-results.json` in the session scratchpad). Clusters: #1≡#2≡#3≡#5
+  (the entry-82 NOTED fix_v1_to_v2 bare-float class, proven by four
+  lanes), #4 pre-existing, #6 tests-coverage pin for K2's anchor.
+  Fix-in-iteration L-set (pre-fix ref `324ac8b`; all three vetted
+  under standing rules — L1 = K3's degrade-never-crash doctrine at the
+  site K3's own sweep NOTED, scope = the same function's sibling
+  foreign-value reads per §2 rule 1; L2 = the r-loop-7 sidecar
+  gray-zone rule's missing half; L3 tests-only, the I3 recipe). Per
+  the RULING these fixes land UNREVIEWED — the checkpoint report
+  labels them honestly:
+  - [ ] L1 = #1≡#2≡#3≡#5 fix_v1_to_v2 degrades junk v1 cells instead
+    of crashing (major): dx/dy through fix_sentinels' _parse semantics
+    (junk/non-finite → 0.0) with has_motion computed from PARSED
+    values (aligning with fix_sentinels' own has_motion — an all-junk/
+    all-zero column ships blank no-capture, never a fabricated motion
+    track); canonical/trim non-dict type guards; created_at_utc parse
+    guarded → unusable stamp OMITTED (fix_sessionjson_recompute below
+    it synthesizes canonically — verified, its r-loop 7/8 job);
+    session.json read via _read_session_json (corrupt file reaches
+    this route because sniff types v1 on key_binding.json alone,
+    without parsing session.json)
+  - [ ] L2 = #4 unusable raw/metadata.json falls back to CSV-level
+    fixes (major): has_raw_sidecars (the single shared decision point
+    for both drivers) also requires metadata.json to parse to a dict;
+    belt-and-braces typed FixFailed at retranslate_from_sidecars' read
+  - [ ] L3 = #6 tests-only: K2's anchor pinned where it is live — an
+    OW-ledger v1 conversion with a parsed-but-unusable keybind
+    ({"look_up": 12345}) keeps W/A/S with their v1 actions; kills the
+    finder's exact game_name=None mutant (arming-gate-green at
+    793/789) and makes KEYBIND_PATCHES live in the cohort
+  - [ ] Post-L: floor re-pin (passed − 4), both host gates,
+    tree-verify → STOP (checkpoint)
 - [ ] **CHECKPOINT (RULED 2026-08-19): STOP at the first quiet
   iteration (or after 18).** Report to Adnaan verdict-first with the
   full payment-surface list (§7). The independent e2e and THE FLIP
