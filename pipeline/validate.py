@@ -549,6 +549,51 @@ def _map_flags(rep: dict, aux: dict, reasons: list[dict],
                 f"{c.get('what', '')}"))
 
 
+def _joint_edge_short(reasons: list[dict]) -> None:
+    """Joint head+tail composition of the r12 #7 map-time CNT_SHORT
+    (r-loop 14 #7): the individual edge arms judge each edge ALONE, so a
+    70-78s clip with one confirmed head flag and one confirmed tail flag
+    that each pass individually still planned BOTH cuts — the cutter
+    then dropped every segment (< MIN_CLIP_S) and the session terminally
+    rejected under 'split produced no >=70s segment': a burned attempt,
+    a pointless ffmpeg cut, and a misdirecting reason. The joint outcome
+    is fully decided at map time, so it is judged here, composing
+    EXACTLY the cut points plan_fixes will derive (its
+    CNT_EDGE_NONGAMEPLAY / CNT_NOTIF_EDGE / CNT_CHAT_PII accumulation,
+    including the t±1.0 margins) — entry 26's _map_windows geometry is
+    untouched. Skips when an individual arm already emitted CNT_SHORT:
+    the session is already terminally short-bound and the reason list
+    stays duplicate-free (reject-reason reporting is exhaustive with no
+    xN counts)."""
+    if any(r["code"] == "CNT_SHORT" for r in reasons):
+        return
+    head_cut: float | None = None
+    tail_cut: float | None = None
+    for r in reasons:
+        if not r.get("blocking") or not r.get("fixable"):
+            continue
+        p = r.get("params") or {}
+        if r["code"] == "CNT_EDGE_NONGAMEPLAY":
+            if p.get("edge") == "head":
+                head_cut = max(head_cut or 0.0, p["cut_at_s"])
+            else:
+                tail_cut = min(tail_cut or 1e9, p["cut_at_s"])
+        elif r["code"] in ("CNT_NOTIF_EDGE", "CNT_CHAT_PII"):
+            t = p.get("t", 0.0)
+            if p.get("edge") == "head" or t <= 3.0:
+                head_cut = max(head_cut or 0.0, t + 1.0)
+            else:
+                tail_cut = min(tail_cut or 1e9, t - 1.0)
+    if head_cut is None or tail_cut is None:
+        return
+    joint = round(tail_cut - head_cut, 1)
+    if joint < C.MIN_CLIP_S:
+        reasons.append(_reason(
+            "CNT_SHORT", True, False, {"post_cut_s": joint},
+            f"confirmed head+tail edge flags; the joint cut leaves "
+            f"{joint:.0f}s (<{C.MIN_CLIP_S:.0f}s)"))
+
+
 def map_gate_failures(fails: list[str], *, has_raw: bool) -> list[dict]:
     """Final-gate (§12.3) qa-v2 FAIL strings -> reason codes, so a
     failed-gate session re-enters Phase III with a real fix plan instead
@@ -595,6 +640,7 @@ def map_reasons(rep: dict, aux: dict,
     if vlm_ran:
         _map_windows(rep, aux, reasons, advisories)
         _map_flags(rep, aux, reasons, advisories)
+        _joint_edge_short(reasons)
 
     # duration / actions / drops (§10.4 escalations)
     # CNT_SHORT and the soft-max advisory judge the PROBED video duration

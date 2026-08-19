@@ -36,14 +36,20 @@ verdicts: session scratchpads `r11-results.json` … `r14-results.json`.
   iteration 14's quiet is judged there AFTER fixing.
 
 **ACTIVE — resume from the first unchecked item:**
-- [ ] H1 counted_at captured BEFORE the sheet's row read (r14 #2≡#3) — §3
-- [ ] H2 retranslate session branch anchors its fallback on the ledger
-  slug (r14 #1≡#6, MAJOR) — §3
-- [ ] H3 rebuild-reset discards split manifests + rowless segment dirs
-  (r14 #10, MAJOR) — §3
-- [ ] H4 stable alert dedup: rclone stderr normalized at the choke
-  point (r14 #4, MAJOR) — §3
-- [ ] H5 vanished-folder arm for DISCOVERED rows (r14 #5) — §3
+- [x] H1 counted_at captured BEFORE the sheet's row read (r14 #2≡#3) —
+  landed `1dd69fa`, fail-first at 5f7015b, gate 725/725
+- [x] H2 retranslate session branch anchors its fallback on the ledger
+  slug (r14 #1≡#6, MAJOR) — landed `1d54775`, fail-first at 5f7015b
+  (both harm shapes), gate 728/728
+- [x] H3 rebuild-reset discards split manifests + rowless segment dirs
+  (r14 #10, MAJOR) — landed `a13e2ac`, fail-first at 5f7015b, gate
+  729/729
+- [x] H4 stable alert dedup: rclone stderr normalized at the choke
+  point (r14 #4, MAJOR) — landed `924755b`, fail-first at 5f7015b,
+  gate 732/732
+- [x] H5 vanished-folder arm for DISCOVERED rows (r14 #5) — landed
+  `c731e32`, fail-first at 5f7015b, gate 736/736 (two sibling tests'
+  partial listings corrected in-commit)
 - [ ] H6 joint head+tail edge cuts get the map-time CNT_SHORT (r14 #7) — §3
 - [ ] H7 safe_session_id rejects control characters (r14 #8) — §3
 - [ ] H8 analyze_sample verdicts judge the probed duration (r14 #9) — §3
@@ -323,6 +329,10 @@ Tests (§2 rule 3; fail-first at `5f7015b`): probed 75s, confirmed head
 notif t=2.5 + tail chat t=73 → exactly CNT_SHORT with
 post_cut_s == 69.0 (pre-fix: two fixable edge reasons); probed 200s
 control → both fixable edges stand; single-edge tests unchanged.
+[EXECUTOR DEVIATION 2026-08-19: the t=2.5/69.0 pair is arithmetically
+inconsistent (head cut t+1.0 = 3.5, tail cut 72.0 → 68.5); the
+finding's own probe (R14_FINDINGS #7) uses head t=2.0 → 3.0, joint
+69.0. Test written with t=2.0 → 69.0 per the authority chain.]
 
 ### H7 — safe_session_id rejects control characters (r14 #8, minor)
 

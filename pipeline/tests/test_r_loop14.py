@@ -477,3 +477,81 @@ def test_vanished_discovered_reappearing_folder_heals(cfg, ledger):
     assert row["state"] == "DISCOVERED", \
         "a reappearing folder must re-register via the heal branch"
     assert "op2@x.com" in row["drive_path"]
+
+
+# ------- r14 #7 (H6): joint head+tail edge cuts get the map-time
+# ------- CNT_SHORT
+
+def _h6_map(probed, notif_t, chat_t):
+    from pipeline import validate
+    return validate.map_reasons(
+        {"duration_s": probed, "vlm": {"samples": [1]}},
+        {"probed_duration_s": probed, "has_raw": False,
+         "notifs": [{"t": notif_t, "confirmed": True, "what": "toast"}],
+         "chats": [{"t": chat_t, "confirmed": True, "what": "pii"}]})
+
+
+def test_joint_head_tail_edge_cuts_get_map_time_cnt_short():
+    """r14 #7 (H6): the CNT_SHORT arms judged each edge individually —
+    a 75s clip with a confirmed head notif and a confirmed tail chat
+    that each pass alone still planned BOTH cuts, the cutter dropped
+    every segment, and the session terminally rejected under 'split
+    produced no >=70s segment': a burned attempt, a pointless ffmpeg
+    cut, and a misdirecting reason (the r12 #7 class, composition
+    case). The joint remainder (min tail_cut − max head_cut, the exact
+    plan_fixes geometry: t=2.0→cut 3.0, t=73.0→cut 72.0) is judged at
+    map time. NOTE: the finding's probe (R14_FINDINGS #7) fixes the
+    expected value at 69.0 via t=2.0; plan §3's test line says
+    't=2.5 … 69.0', an arithmetic slip (2.5 would give 68.5) —
+    deviation recorded in the plan."""
+    res = _h6_map(75.0, 2.0, 73.0)
+    shorts = [r for r in res.reasons if r["code"] == "CNT_SHORT"]
+    assert len(shorts) == 1, res.reasons
+    assert shorts[0]["params"]["post_cut_s"] == 69.0
+    assert shorts[0]["blocking"] and not shorts[0]["fixable"]
+    assert res.bin == 3, "terminal at once — no burned attempt"
+
+
+def test_joint_edge_cuts_on_a_long_clip_stay_fixable():
+    """H6 control (§2 rule 3, the other split): the same two confirmed
+    edge flags on a 200s clip leave a >=70s joint keep — both fixable
+    edge reasons stand and no CNT_SHORT appears."""
+    res = _h6_map(200.0, 2.0, 198.0)
+    codes = sorted(r["code"] for r in res.reasons)
+    assert codes == ["CNT_CHAT_PII", "CNT_NOTIF_EDGE"], res.reasons
+    assert all(r["fixable"] for r in res.reasons)
+
+
+def test_joint_edge_composition_includes_edge_nongameplay_cuts():
+    """H6: the composition consumes CNT_EDGE_NONGAMEPLAY's cut_at_s
+    exactly as plan_fixes does — a head nongameplay cut at 4.0s plus a
+    tail chat at 73.0s on a 75s clip jointly leave 68.0s."""
+    from pipeline import validate
+    reasons = [
+        {"code": "CNT_EDGE_NONGAMEPLAY", "blocking": True,
+         "fixable": True, "params": {"edge": "head", "cut_at_s": 4.0},
+         "evidence": "e"},
+        {"code": "CNT_CHAT_PII", "blocking": True, "fixable": True,
+         "params": {"t": 73.0}, "evidence": "e"},
+    ]
+    validate._joint_edge_short(reasons)
+    shorts = [r for r in reasons if r["code"] == "CNT_SHORT"]
+    assert len(shorts) == 1 and \
+        shorts[0]["params"]["post_cut_s"] == 68.0
+
+
+def test_joint_edge_composition_defers_to_an_individual_cnt_short():
+    """H6: when an individual edge arm already emitted CNT_SHORT the
+    composition appends nothing — the reason list stays duplicate-free
+    (reject-reason reporting is exhaustive with no xN counts)."""
+    from pipeline import validate
+    reasons = [
+        {"code": "CNT_SHORT", "blocking": True, "fixable": False,
+         "params": {"post_cut_s": 50.0}, "evidence": "e"},
+        {"code": "CNT_NOTIF_EDGE", "blocking": True, "fixable": True,
+         "params": {"t": 2.0, "edge": "head"}, "evidence": "e"},
+        {"code": "CNT_CHAT_PII", "blocking": True, "fixable": True,
+         "params": {"t": 73.0}, "evidence": "e"},
+    ]
+    validate._joint_edge_short(reasons)
+    assert [r["code"] for r in reasons].count("CNT_SHORT") == 1
