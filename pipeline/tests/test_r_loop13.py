@@ -349,6 +349,110 @@ def test_fix_actions_tool_contains_a_traversal_session_id(tmp_path):
     assert not (tmp_path.parent / "ESCAPED").exists()
 
 
+# ------- r13 #10 (G8a): the operator twin's keybind resolution pinned
+
+def _tool_session_dir(tmp_path, monkeypatch, key, keybind):
+    """A v2 session dir for the OPERATOR TOOL — the r12 _context_work
+    shape (gate CSV + context stubs) plus the tool's extra required
+    files."""
+    from pipeline.tests.test_r_loop12 import _context_work
+    work = _context_work(tmp_path, monkeypatch, key, keybind)
+    (work / "session.json").write_text(json.dumps(
+        {"fps": 30.0, "game_title": "Outer Wilds",
+         "session_id": work.name}))
+    for name in ("video.mp4", "rrd_creation.py"):
+        (work / name).write_bytes(b"x")
+    return work
+
+
+def _tool_key_rows(res):
+    from pathlib import Path
+    with (Path(res["out_dir"]) / "frames.csv").open(newline="") as f:
+        return list(csv.DictReader(f))
+
+
+def test_fix_actions_tool_honors_the_sessions_own_keybind(tmp_path,
+                                                          monkeypatch):
+    """r13 #10: the r12 #5/#8 fix changed two sites; only the pipeline
+    half (fix_actions_context) was pinned — reverting the operator-twin
+    half (tools/fix_actions_from_v2's resolve_keybind on
+    raw/keybind.json) left the full 696-test gate green."""
+    from pipeline.tests.test_payment_split_r6 import _load
+    tool = _load("fix_actions_from_v2")
+    monkeypatch.setattr(tool.rrd, "generate", lambda d: None)
+    work = _tool_session_dir(tmp_path, monkeypatch, "G",
+                             {"general_flashlight": "g"})
+    res = tool.fix_session(work, tmp_path / "out", "08-19-2026", {})
+    rows = _tool_key_rows(res)
+    carrying = [r for r in rows
+                if "G" in (r["input_keys"] or "").split("|")]
+    assert len(carrying) == 6, res
+    assert all("general_flashlight" in (r["input_actions"] or "")
+               for r in carrying), \
+        "the custom bind's action must survive the operator tool"
+
+
+def test_fix_actions_tool_without_sidecar_uses_the_builtin(tmp_path,
+                                                           monkeypatch):
+    """Control: no raw/keybind.json — the built-in governs unchanged."""
+    from pipeline.tests.test_payment_split_r6 import _load
+    tool = _load("fix_actions_from_v2")
+    monkeypatch.setattr(tool.rrd, "generate", lambda d: None)
+    work = _tool_session_dir(tmp_path, monkeypatch, "F", None)
+    res = tool.fix_session(work, tmp_path / "out", "08-19-2026", {})
+    rows = _tool_key_rows(res)
+    carrying = [r for r in rows
+                if "F" in (r["input_keys"] or "").split("|")]
+    assert len(carrying) == 6, res
+    assert all("general_flashlight" in (r["input_actions"] or "")
+               for r in carrying)
+
+
+# ------- r13 #11 (G8b): rebuild-reset lock — both sides of the guard
+
+def test_rebuild_reset_refuses_a_live_lock(cfg, monkeypatch, capsys):
+    """r13 #11: refuse-when-live was unpinned — a STEAL mutant (rmtree +
+    acquire on a live driver's lock, then the full teardown racing live
+    validation) passed the whole 696-test arming gate."""
+    from pipeline import run as _run
+    from pipeline.ledger import Ledger
+    from pipeline.tests.test_payment_split_r6 import _put
+    reset, parachute, _sys = _rebuild_tool(cfg, monkeypatch)
+    led = Ledger(cfg.ledger_path)
+    sid = "2026-08-14T09-00-00Z_kamla_c_0000000000000lk1"
+    _put(led, sid, state="DELIVERED", raw=3600.0, delivered=3400.0)
+    led.close()
+    cfg.lock_dir.mkdir(parents=True)
+    (cfg.lock_dir / "pid").write_text("12345")
+    monkeypatch.setattr(_run, "_pid_is_pipeline", lambda pid: True)
+    monkeypatch.setattr(_sys, "argv", ["recal_rebuild_reset.py", "--yes",
+                                       "--backup", str(parachute)])
+    assert reset.main() == 2
+    assert "run lock held" in capsys.readouterr().out
+    assert cfg.lock_dir.exists() and \
+        (cfg.lock_dir / "pid").read_text() == "12345", \
+        "a live driver's lock must not be stolen"
+    led = Ledger(cfg.ledger_path)
+    try:
+        assert led.get(sid)["state"] == "DELIVERED", "ledger untouched"
+    finally:
+        led.close()
+
+
+def test_rebuild_reset_reclaims_a_stale_lock(cfg, monkeypatch):
+    """The #12 half: a dead holder's lock is reclaimed (no false
+    refusal), the tool proceeds and releases after."""
+    from pipeline import run as _run
+    reset, parachute, _sys = _rebuild_tool(cfg, monkeypatch)
+    cfg.lock_dir.mkdir(parents=True)
+    (cfg.lock_dir / "pid").write_text("12345")
+    monkeypatch.setattr(_run, "_pid_is_pipeline", lambda pid: False)
+    monkeypatch.setattr(_sys, "argv", ["recal_rebuild_reset.py", "--yes",
+                                       "--backup", str(parachute)])
+    assert reset.main() == 0
+    assert not cfg.lock_dir.exists(), "released after the run"
+
+
 # ------- r13 #9 (G6): kind-specific pending-interlock diagnosis
 
 def test_pending_interlock_diagnoses_a_daily_record(cfg, monkeypatch,
