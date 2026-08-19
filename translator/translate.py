@@ -80,13 +80,25 @@ def safe_session_id(session_id, bundle_dir: Path) -> str:
     same crash kills both G7 operator tools mid-batch. The bound is
     200 bytes, not 255: the pipeline derives longer names from the sid
     (<sid>.split-manifest.json +20, <sid>-analysis +9, -pN segment and
-    grandchild suffixes) that must all stay under NAME_MAX."""
+    grandchild suffixes) that must all stay under NAME_MAX.
+
+    The byte length is measured with a STRICT encode (r16 #1≡#4): the
+    joins strict-encode the id at mkdir/resolve, so measuring with
+    errors="ignore" judged a different string than the one they use —
+    a JSON-legal lone surrogate (json.loads accepts the \\ud800 escape)
+    passed every arm here and crashed every join with
+    UnicodeEncodeError, a ValueError the fix lane classifies session:
+    both attempts burned, wrongful terminal reject. An id the
+    filesystem cannot encode is garbage and takes the fallback."""
     if isinstance(session_id, str) and session_id not in ("", ".") \
             and "/" not in session_id and "\\" not in session_id \
             and os.sep not in session_id and ".." not in session_id \
-            and not any(ord(c) < 32 for c in session_id) \
-            and len(session_id.encode("utf-8", "ignore")) <= 200:
-        return session_id
+            and not any(ord(c) < 32 for c in session_id):
+        try:
+            if len(session_id.encode("utf-8")) <= 200:
+                return session_id
+        except UnicodeEncodeError:
+            pass
     return Path(bundle_dir).name
 
 
