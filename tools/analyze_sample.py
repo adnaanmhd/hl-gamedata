@@ -748,6 +748,13 @@ def rows_in_window(inv: dict, rows, col, t0: float, t1: float) -> dict:
 def build_verdict(a: SessionAnalysis, vlm_ran: bool) -> None:
     reasons_re, reasons_fix, advisories = [], [], []
     inv = a.inventory
+    # length and edge-ness judge the PROBED duration (r-loop 14 #9 —
+    # the D2/G3 doctrine applied to this operator tool): a.duration_s
+    # is the player-typed claim, and a corrupt-small claim told the
+    # operator to re-record good footage while a corrupt-large one
+    # turned every genuine tail window into "mid-clip". The claim is
+    # only the fallback when the probe yielded nothing.
+    dur_true = float(a.video_probe.get("duration_s") or 0) or a.duration_s
 
     # fix_actions_from_v2.py is a verbatim file-copy no-op for games outside
     # translator/context.py CONTEXT_GAMES — only recommend it where it works.
@@ -824,7 +831,7 @@ def build_verdict(a: SessionAnalysis, vlm_ran: bool) -> None:
                 "eyeball the contact sheet for firing before accepting"))
 
     # --- VLM windows
-    dur = a.duration_s
+    dur = dur_true
     for w in a.vlm.get("windows", []):
         if not w["gating"]:
             advisories.append(Finding(
@@ -1003,13 +1010,13 @@ def build_verdict(a: SessionAnalysis, vlm_ran: bool) -> None:
             f"because timestamps are real PTS"))
     if a.tail_nit:
         advisories.append(Finding("spec_tail_nit", "info", a.tail_nit))
-    if a.duration_s and a.duration_s < 70.0:
+    if dur_true and dur_true < 70.0:
         reasons_re.append(
-            f"clip {a.duration_s:.1f}s under the hard 70s delivery minimum "
+            f"clip {dur_true:.1f}s under the hard 70s delivery minimum "
             f"— unfixable in post; re-record")
         advisories.append(Finding(
             "clip_short", "capture-side",
-            f"clip {a.duration_s:.1f}s under the 70s minimum — "
+            f"clip {dur_true:.1f}s under the 70s minimum — "
             f"capture-side"))
 
     # --- roll up
