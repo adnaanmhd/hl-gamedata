@@ -103,7 +103,32 @@ scratchpads `r11-results.json` … `r15-results.json` (r15's is in the
     BOTH host gates green — Mac 782/778 (148s), VM 782/778 (515.6s,
     2026-08-19); tree-verify clean (no MUTATION markers, only
     plan-ledger edit + pre-existing junk)
-- [ ] Review iteration 17 (ONLY if 16 was not quiet; same rules)
+- [x] Review iteration 17 RAN (headroom OK'd by Adnaan; run
+  `wf_7f33bc0c-52c`, 19 agents, 0 errors, ~2.58M subagent tokens):
+  **NOT QUIET pre-fix — 6 raised → 6 confirmed (4 major / 2 minor, 0
+  blockers), 0 killed** (`R17_FINDINGS.md`, snapshot
+  `tools/review/flip-review-iter17.js`, machine results
+  `r17-results.json` in the session scratchpad). Fix-in-iteration
+  K-set (pre-fix ref `7ad7b71`; all six vetted under standing rules —
+  K1 RESTORES the r5 #41 identity guard the H5 arm bypassed, entry 70
+  untouched; K2 = F4 doctrine instance 4; K3 = degrade-never-crash;
+  K4–K6 tests-only; K1 flagged for the §6 payment-surface list):
+  - [ ] K1 = #1 quarantined-path heal gains the move-heal identity
+    guard for rows with a real prior registration (major)
+  - [ ] K2 = #2 fix_v1_to_v2 resolves the session's own keybind
+    (major; deviation: the finder's key_binding.json fallback arm NOT
+    adopted — the inversion sniff mis-flip risk outweighs it;
+    keybind.json root/raw only, else built-ins)
+  - [ ] K3 = #3 apply_context_to_rows' _active degrades on junk cells
+    (major; deviation: the belt-and-braces plan reorder NOT adopted —
+    the guard closes the confirmed mechanism; sync.py's bare float
+    noted for iteration 18's lanes)
+  - [ ] K4 = #4 tests-only: J2 camel-token discriminator (CapsLock)
+  - [ ] K5 = #5 tests-only: J3 overlap-frame pin
+  - [ ] K6 = #6 tests-only: I7 coached rename-re-upload path pinned
+    against the QUARANTINED-exclusion mutant
+  - [ ] Post-K: floor re-pin (passed − 4), both host gates,
+    tree-verify → iteration 18
 - [ ] Review iteration 18 (ONLY if 17 was not quiet; same rules; if 18
   is ALSO not quiet: fix its confirmed set, then STOP — report the
   fixes as landed-but-unreviewed, honestly labelled)
