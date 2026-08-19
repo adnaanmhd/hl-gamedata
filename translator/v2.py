@@ -777,8 +777,19 @@ def check_session_v2(session_dir: Path, raw_bundle: Path | None = None) -> V2Res
         if not keys and not acts:
             null_key_rows += 1
         for t in keys.split("|") if keys else []:
+            # the case clause flags only tokens that HAVE case (r15 #4,
+            # RULED 2026-08-19): the writer's own key_display returns
+            # tok.upper() for single-char tokens, which for symbol keys
+            # (';', '-', '[', …) IS the caseless token — flagging those
+            # terminal-rejected every symbol-bind player through a
+            # provably no-op FIX_KEY_HYGIENE loop (the fixer re-tokenizes
+            # through the SAME key_display). Caseless tokens are real
+            # gameplay data and stay in the delivery; multi-char
+            # lowercase tokens ('left_shift') still flag (their upper
+            # differs), digits stay exempt.
             if not t or t != t.strip() or "," in t or " " in t \
-                    or (t.lower() == t and not t.isdigit()):
+                    or (t.lower() == t and t.upper() != t
+                        and not t.isdigit()):
                 bad_tokens.add(t)
         for b in btns.split("|") if btns else []:
             if b not in {"Left", "Right", "Middle", "X1", "X2"}:
