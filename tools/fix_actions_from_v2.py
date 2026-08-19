@@ -37,7 +37,8 @@ from translator import context as ctxmod                     # noqa: E402
 from translator import rrd                                   # noqa: E402
 from translator.keybind import build_resolver                # noqa: E402
 from translator.keybinds import KEYBINDS, game_key_from_name # noqa: E402
-from translator.translate import resolve_keybind             # noqa: E402
+from translator.translate import (resolve_keybind,           # noqa: E402
+                                  safe_session_id)
 from translator.v2 import (KEYBIND_PATCHES, V2_FRAME_COLS,   # noqa: E402
                            apply_context_to_rows, key_canonical, key_display,
                            _BTN_DISPLAY, _BTN_DISPLAY_INV)
@@ -49,9 +50,14 @@ def fix_session(session_dir: Path, out_root: Path, date: str,
                 overrides: dict) -> dict:
     session_dir = Path(session_dir)
     s = json.loads((session_dir / "session.json").read_text())
-    sid = s["session_id"]
+    # player-typed session.json: constrain the id to ONE safe path
+    # component + the same containment assert the v1/v2 translate joins
+    # carry (F9 sibling missed until r13 #7)
+    sid = safe_session_id(s.get("session_id"), session_dir)
     slug = game_key_from_name(s.get("game_title", "")) or "unknown_game"
     out_dir = out_root / VENDOR / date / slug / sid
+    assert out_dir.resolve().is_relative_to(Path(out_root).resolve()), \
+        f"{sid}: out_dir escapes the output root"
     out_dir.mkdir(parents=True, exist_ok=True)
 
     for name in ("video.mp4", "session.json", "rrd_creation.py"):

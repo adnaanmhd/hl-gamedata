@@ -59,7 +59,7 @@ from translator import rrd, sync
 from translator import video as V
 from translator.keybind import bound_literals, build_resolver, resolve_actions
 from translator.keybinds import game_key_from_name
-from translator.translate import VENDOR, resolve_keybind
+from translator.translate import VENDOR, resolve_keybind, safe_session_id
 from translator.v2 import (_BTN_DISPLAY, _KEY_DISPLAY, KEYBIND_PATCHES,
                            V2_FRAME_COLS, key_display)
 
@@ -171,7 +171,10 @@ def remap(src_keys, src_btns, src_dx, src_dy, pts2, shift_us, rules):
 
 def fix_session(v1_dir: Path, v2_dir: Path, out_root: Path, date: str) -> dict:
     s = json.loads((v2_dir / "session.json").read_text())
-    session_id = s["session_id"]
+    # player-typed session.json: same sanitize+containment as the
+    # translate joins (r13 #7 sweep — this tool had the identical
+    # unsanitized join as fix_actions_from_v2)
+    session_id = safe_session_id(s.get("session_id"), v2_dir)
     slug = game_key_from_name(s["game_title"]) or "unknown_game"
     fps = s["fps"]
     print(f"== {session_id} ({s['game_title']})")
@@ -256,6 +259,8 @@ def fix_session(v1_dir: Path, v2_dir: Path, out_root: Path, date: str) -> dict:
 
     status, msg = sync.verdict(est, fps)
     out_dir = out_root / VENDOR / date / slug / session_id
+    assert out_dir.resolve().is_relative_to(Path(out_root).resolve()), \
+        f"{session_id}: out_dir escapes the output root"
     out_dir.mkdir(parents=True, exist_ok=True)
 
     extra_null = [""] * (len(V2_FRAME_COLS) - 2 - 5)

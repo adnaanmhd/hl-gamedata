@@ -318,6 +318,37 @@ def test_edge_flags_judged_on_probed_not_claimed_duration():
         "2s before the REAL end is a fixable tail edge, not mid-clip"
 
 
+# ------- r13 #7 (G7): fix_actions_from_v2 session_id sanitized
+
+def test_fix_actions_tool_contains_a_traversal_session_id(tmp_path):
+    """r13 #7: the operator twin joined the delivered session.json's
+    session_id into the output path verbatim — sid '../../../../X'
+    wrote all delivery files OUTSIDE out_root (the F9 class, fixed at
+    the v1/v2 translate joins in r-loop 11 and missed here)."""
+    from pathlib import Path
+
+    from pipeline.tests.test_payment_split_r6 import _load
+    from translator.v2 import V2_FRAME_COLS
+    tool = _load("fix_actions_from_v2")
+    sdir = tmp_path / "sess"
+    sdir.mkdir()
+    (sdir / "session.json").write_text(json.dumps(
+        {"session_id": "../../../../ESCAPED", "game_title": "Kamla",
+         "fps": 30.0}))
+    with (sdir / "frames.csv").open("w", newline="") as f:
+        csv.writer(f).writerow(V2_FRAME_COLS)
+    for name in ("video.mp4", "rrd_creation.py", "session.rrd"):
+        (sdir / name).write_bytes(b"x")
+    out_root = tmp_path / "out"
+    res = tool.fix_session(sdir, out_root, "08-19-2026", {})
+    out_dir = Path(res["out_dir"]).resolve()
+    assert out_dir.is_relative_to(out_root.resolve()), out_dir
+    assert res["session"] == "sess", \
+        "traversal id falls back to the bundle dir name (safe_session_id)"
+    assert not (tmp_path / "ESCAPED").exists()
+    assert not (tmp_path.parent / "ESCAPED").exists()
+
+
 # ------- r13 #9 (G6): kind-specific pending-interlock diagnosis
 
 def test_pending_interlock_diagnoses_a_daily_record(cfg, monkeypatch,
