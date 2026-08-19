@@ -292,3 +292,86 @@ def test_rebuild_reset_discards_split_manifests_and_rowless_dirs(
             "new rules"
     finally:
         led.close()
+
+
+# ------- r14 #4 (H4): stable alert dedup — rclone stderr normalized
+# ------- at the choke point
+
+def _fake_rclone_run(calls):
+    """A subprocess.run stand-in producing production-shaped rclone
+    stderr whose wall-clock prefix differs on every attempt (verified
+    live against rclone v1.75.0 in R14_FINDINGS #4)."""
+    import subprocess
+
+    def fake_run(argv, **kw):
+        calls["n"] += 1
+        ts = f"2026/08/19 12:{calls['n']:02d}:07"
+        return subprocess.CompletedProcess(
+            argv, 3, "",
+            f"{ts} ERROR : dir not found\n"
+            f"{ts} ERROR : Attempt 3/3 failed with 1 errors")
+    return fake_run
+
+
+def test_rclone_alert_text_dedups_across_attempts(cfg, monkeypatch):
+    """r14 #4 (H4): AlertBook dedups on the literal message text, and
+    every rclone-backed failure alert embedded per-attempt-timestamped
+    stderr — the 60-min TTL never fired and one failing session alerted
+    every retry (12/h, measured) instead of the designed 1 per TTL
+    (accepted item 11). The choke-point normalization restores the
+    contract for all three embedders at once."""
+    from pipeline import continuous as cont
+    from pipeline import ingest
+    sent: list[str] = []
+    monkeypatch.setattr(cont.telegram, "send_message",
+                        lambda c, t: sent.append(t))
+    clock = {"t": 0.0}
+    book = cont.AlertBook(cfg, 3600.0, mono_fn=lambda: clock["t"])
+    calls = {"n": 0}
+    monkeypatch.setattr(ingest.subprocess, "run", _fake_rclone_run(calls))
+    for _ in range(12):              # one failing attempt every 5 min
+        p = ingest.run_rclone(["copy", "src", "dst"])
+        # the exact download-lane text shape: continuous._download_one
+        # wrapping ingest.download's DownloadError
+        book.alert(f"download failed for sid-x (will retry): "
+                   f"rclone copy failed x3: {p.stderr.strip()[:300]}")
+        clock["t"] += 300.0
+    assert len(sent) == 1, \
+        f"designed cadence is 1 send per 60-min TTL, got {len(sent)}"
+
+
+def test_run_rclone_strips_the_stderr_timestamp_prefix(monkeypatch):
+    """H4 unit: the choke point strips the leading wall-clock prefix
+    from every stderr line; rc/stdout and non-prefixed lines ride
+    through untouched."""
+    import subprocess
+
+    from pipeline import ingest
+
+    def fake_run(argv, **kw):
+        return subprocess.CompletedProcess(
+            argv, 3, "listing-output",
+            "2026/08/19 12:47:07 ERROR : boom\n"
+            "2026/08/19 12:47:08 ERROR : Attempt 3/3 failed\n"
+            "plain tail line")
+    monkeypatch.setattr(ingest.subprocess, "run", fake_run)
+    p = ingest.run_rclone(["lsjson", "remote:x"])
+    assert p.stderr == ("ERROR : boom\n"
+                        "ERROR : Attempt 3/3 failed\n"
+                        "plain tail line")
+    assert p.returncode == 3 and p.stdout == "listing-output"
+
+
+def test_run_rclone_timeout_text_is_stable(monkeypatch):
+    """H4 control: the synthetic timeout branch was already stable —
+    it must come through byte-identical (the one alert text that
+    dedup'd correctly pre-fix)."""
+    import subprocess
+
+    from pipeline import ingest
+
+    def raise_timeout(argv, **kw):
+        raise subprocess.TimeoutExpired(argv, 5)
+    monkeypatch.setattr(ingest.subprocess, "run", raise_timeout)
+    p = ingest.run_rclone(["copy", "x", "y"], timeout_s=5)
+    assert p.returncode == 124 and p.stderr == "timed out after 5s"

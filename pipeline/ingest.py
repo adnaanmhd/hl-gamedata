@@ -52,19 +52,40 @@ ZIP_PARTS_MARKER = "zip parts incomplete"
 ZIP_ADJ_CHANGED = "zip-backfill: bytes CHANGED"
 
 
+# rclone prefixes every stderr line with a wall-clock timestamp
+# ('2026/08/19 12:47:07 ERROR : …') — stripped at the choke point below
+# (r-loop 14 #4): AlertBook dedups on the literal message text, so a
+# per-attempt timestamp gave every rclone-backed failure alert
+# (download/upload/scan) a fresh dedup key and the 60-min TTL never
+# fired — a Drive/network incident became a per-retry alert storm on
+# the flip's only ops surface instead of the designed 1/hour cadence.
+_RCLONE_TS_PREFIX = re.compile(r"^\d{4}/\d{2}/\d{2} \d{2}:\d{2}:\d{2} ",
+                               re.MULTILINE)
+
+
 def run_rclone(args: list[str], *, timeout_s: int = 3600
                ) -> subprocess.CompletedProcess:
     """Single choke point for rclone — tests monkeypatch this.
 
     A timeout comes back as a failed CompletedProcess (rc 124) so callers'
     normal retry/quarantine paths handle it — an uncaught TimeoutExpired
-    would wedge the whole run every 30 minutes (review finding #5)."""
+    would wedge the whole run every 30 minutes (review finding #5). The
+    synthetic timeout text is already timestamp-free and stays unchanged.
+
+    stderr comes back with rclone's per-line wall-clock prefix stripped
+    (r-loop 14 #4) so every embedder — present and future — gets a
+    stable alert-dedup key for free; the full error text still rides."""
     try:
-        return subprocess.run(["rclone", *args], capture_output=True,
-                              text=True, timeout=timeout_s)
+        p = subprocess.run(["rclone", *args], capture_output=True,
+                           text=True, timeout=timeout_s)
     except subprocess.TimeoutExpired:
         return subprocess.CompletedProcess(
             ["rclone", *args], 124, "", f"timed out after {timeout_s}s")
+    if p.stderr:
+        p = subprocess.CompletedProcess(
+            p.args, p.returncode, p.stdout,
+            _RCLONE_TS_PREFIX.sub("", p.stderr))
+    return p
 
 
 def _md5_file(path: Path) -> str:
