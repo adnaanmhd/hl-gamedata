@@ -1608,6 +1608,14 @@ def fix_v1_to_v2(work: Path, game: str) -> str:
             "input_mouse_buttons", "input_mouse_dx", "input_mouse_dy"]
     if not all(c in col for c in need):
         raise FixFailed("v1 frames.csv missing input columns")
+    for r in rows:
+        # r19 #3 (M3): one ragged row (truncated write, an unquoted
+        # newline) raised IndexError past every guard on this
+        # checker-blind route — a missing cell degrades to '', the
+        # empty value every read below already handles ('' keys split
+        # to none, _parse_motion('') is 0.0)
+        if len(r) < len(header):
+            r += [""] * (len(header) - len(r))
     slug = game or game_key_from_name(canonical.get("game", "")) or ""
 
     # ---- r19 #1 (BLOCKER) / #4≡#6 / #10 (M1): resolve the delivered

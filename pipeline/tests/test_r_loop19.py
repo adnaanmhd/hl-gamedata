@@ -226,3 +226,42 @@ def test_v1_junk_head_cut_value_keeps_valid_stamp(tmp_path):
         out = json.loads((work / "session.json").read_text())
         assert out["created_at_utc"] == "2026-08-10T15:34:03.000000Z", \
             "a junk trim value must not cost the valid stamp"
+
+
+# ------- r19 #3 (M3): a ragged v1 row degrades, never crashes
+
+
+@needs_ffmpeg
+def test_v1_ragged_row_degrades(tmp_path):
+    """r19 #3 (M3): fix_v1_to_v2 indexed every row at fixed column
+    positions with no length guard, so ONE truncated body row (lost
+    trailing cells — the 'ragged/short rows' population validate.py's
+    own notes anticipate) raised IndexError past every guard on both
+    attempts: a wrongful terminal reject on the checker-blind route
+    (the early return on key_binding.json means no rows-surgery can
+    ever precede this step). A short row now pads to the header width
+    — each missing cell degrades to the empty value every downstream
+    read already handles."""
+    import csv as _csv
+
+    from pipeline import fix as fixmod
+    from pipeline.tests.test_r_loop15 import _v1_work
+    work = _v1_work(tmp_path, "2026-08-10T15:34:03Z", "m3ragged")
+    with (work / "frames.csv").open(newline="") as f:
+        rows = list(_csv.reader(f))
+    rows[11] = rows[11][:3]
+    with (work / "frames.csv").open("w", newline="") as f:
+        _csv.writer(f).writerows(rows)
+    note = fixmod.fix_v1_to_v2(work, "kamla")
+    assert "converted v1 -> v2" in note
+    out = _v1_rows_19(work)
+    assert out[10]["input_keys"] == rows[11][2], \
+        "the surviving cells ship; body row 11 is CSV row index 10"
+    assert out[10]["input_mouse_dx"] in ("", "0.0"), \
+        "the lost motion cells degrade like empty cells"
+
+
+def _v1_rows_19(work):
+    import csv as _csv
+    with (work / "frames.csv").open(newline="") as f:
+        return list(_csv.DictReader(f))
