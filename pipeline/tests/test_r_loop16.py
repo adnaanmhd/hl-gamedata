@@ -292,21 +292,36 @@ def test_fix_sync_remap_strips_uncredited_combo_half():
     delivery would ship keys with null actions. Mutation-proofed with
     that EXACT revert in a fixed-tree scratch copy (session
     scratchpad): it fails this pin. The chord and single-bind controls
-    ride the same call (§2 rule 3)."""
+    ride the same call (§2 rule 3).
+
+    The ['w','e'] OVERLAP frame rides since r17 #5 (K5): the original
+    three DISJOINT frames were indistinguishable from a row-level
+    rewrite (`if rules and not actions: kset = set()`), which passed
+    the FULL arming gate at 782/778 (finder-proven) while shipping an
+    uncredited combo half masked behind a credited key — per-token
+    key-to-action mislabeling the checker cannot see (its
+    keys-have-actions test is row-level and actions is non-null).
+    Mirrors the I2 cohort's overlap case (entry 72's reserved defect
+    class: credit accounting diverging from rule satisfaction) at this
+    fourth writer site; that EXACT row-level mutant fails this pin
+    (fixed-tree scratch proof, session scratchpad)."""
     from pipeline.tests.test_payment_split_r6 import _load
     from translator.keybind import build_resolver
     tool = _load("fix_sync_from_v1")
     rules = build_resolver({"interact": {"modifier": "ctrl", "key": "e"},
                             "move_up": "w"})
-    pts2 = [0, 33333, 66667]
+    pts2 = [0, 33333, 66667, 100000]
     rows, uncovered = tool.remap(
-        [["e"], ["ctrl", "e"], ["w"]], [[], [], []],
-        [0.0, 0.0, 0.0], [0.0, 0.0, 0.0], pts2, 0, rules)
+        [["e"], ["ctrl", "e"], ["w"], ["w", "e"]], [[], [], [], []],
+        [0.0, 0.0, 0.0, 0.0], [0.0, 0.0, 0.0, 0.0], pts2, 0, rules)
     assert uncovered == 0
     assert rows[0][0] == [] and rows[0][1] == [], \
         f"the bare combo half must be stripped: {rows[0]}"
     assert rows[1][0] == ["ctrl", "e"] and "interact" in rows[1][1]
     assert rows[2][0] == ["w"] and rows[2][1] == ["move_up"]
+    assert rows[3][0] == ["w"] and rows[3][1] == ["move_up"], \
+        f"an uncredited combo half must not ride masked behind a " \
+        f"credited key: {rows[3]}"
     for keys, actions, _btns, _dx, _dy in rows:
         assert not (keys and not actions), rows
 
