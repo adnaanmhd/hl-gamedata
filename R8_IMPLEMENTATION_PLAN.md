@@ -509,6 +509,26 @@ hours now reach sheets), the I7 ruling (a vanished folder is
 permanently dropped from intake; the correction is a re-upload under
 a NEW folder name — sessions restored under the same name are
 deliberately never processed or paid), and the fix_sync_from_v1
-repairs (resolve_actions crash + portable copy).** Label every
-mixed-methodology comparison as such. Relay verifier verdicts
-verbatim.
+repairs (resolve_actions crash + portable copy).**
+
+**r16/r17 additions to the same list:** J5 (RULED fail-CLOSED: a
+transient reports-dir listing failure can no longer double-pay a
+pending day's hours onto two sent sheets; worst case the daily sheet
+is one 600s tick late), J6 (RULED option A: comma-bind players are no
+longer wrongly rejected — their presses ship as 'Comma' and their
+hours reach sheets), J2 (players binding OS-pattern keys — insert,
+caps_lock, F-keys — are no longer wrongly rejected), J1 (surrogate-id
+bundles now translate under the folder-name fallback instead of
+looping as host-blamed crashes), and K1 once landed (the
+quarantined-path heal regains the r5 #41 identity guard: a session
+folder moved into another player's tree can no longer flip payment
+attribution in two scans; byte-identical moves and same-player
+renames still heal). Also report the QUEUED new-scope item promised
+to Adnaan 2026-08-19: the OW Observatory satellite-camera terminal is
+an unmodelled context (memory `ow-satellite-camera-context-gap`) —
+spec'd as a `satellite_camera` template + label in
+translator/context.py + frame-verification; delivery-vocabulary
+choice (strip vs new snapshot semantics) is Adnaan's/the client's; it
+lands as its own ruled task AFTER the checkpoint go, not in this
+stream. Label every mixed-methodology comparison as such. Relay
+verifier verdicts verbatim.
