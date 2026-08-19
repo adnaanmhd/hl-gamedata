@@ -81,18 +81,28 @@ scratchpads `r11-results.json` … `r15-results.json` (r15's is in the
   `r16-results.json` in the session scratchpad). Clusters: #1≡#4 (I5
   lone-surrogate hole), #6/#7 (pins for I2/I4 sweep halves), #2/#3/#5
   pre-existing. Fix-in-iteration J-set (pre-fix ref `4dc37b4`):
-  - [ ] J1 = #1≡#4 safe_session_id rejects unencodable ids (minor)
-  - [ ] J2 = #3 INP_OSKEYS trigger made bound-aware (major; aligns
-    with the locked strip-unless-bound rule + r11 #11's named fix)
-  - [ ] J3 = #6 tests-only: fix_sync remap credited-strip pin
-  - [ ] J4 = #7 tests-only: retrim naive-guard pin
-  - [ ] J5 = #2 daily resume scan fails CLOSED (major,
-    payment-surface — Adnaan BEFORE implementing)
-  - [ ] J6 = #5 comma-key bind delivery vocabulary (major — needs
-    Adnaan's ruling like I1; finder recommends the Comma display
-    rename over a checker exemption)
-  - [ ] Post-J: floor re-pin (passed − 4), both host gates,
-    tree-verify → iteration 17
+  - [x] J1 = #1≡#4 safe_session_id rejects unencodable ids — LANDED
+    `c4f1fda` (fail-first at 4dc37b4; Mac gate 767)
+  - [x] J2 = #3 INP_OSKEYS trigger made bound-aware — LANDED
+    `c0d37de` (fail-first at 4dc37b4 incl. the e2e wiring pin;
+    over-filter mutant killed)
+  - [x] J3 = #6 tests-only: fix_sync remap credited-strip pin —
+    LANDED `c0d37de` (finder's exact revert mutant killed)
+  - [x] J4 = #7 tests-only: retrim naive-guard pin — LANDED
+    `c0d37de` (exact guard-deletion mutant killed; Mac gate 776)
+  - [x] J5 = #2 daily resume scan fails CLOSED — **RULED (Adnaan
+    2026-08-19: fail CLOSED)**, LANDED `eaaee0d` (fail-first at
+    c0d37de: the flaky tick provably built, sent AND stamped;
+    asymmetric-transient repro at the helper seam; first-ever-send
+    control)
+  - [x] J6 = #5 comma key — **RULED (Adnaan 2026-08-19: option A,
+    'Comma' named display token)**, LANDED `ddc6da8` (fail-first at
+    eaaee0d; one-attempt hygiene repair of foreign bare-',' cells;
+    glued-token control; sweep across every display consumer)
+  - [x] Post-J: SUITE_FLOOR 778 pinned `cba8fd2` (782 passed − 4);
+    BOTH host gates green — Mac 782/778 (148s), VM 782/778 (515.6s,
+    2026-08-19); tree-verify clean (no MUTATION markers, only
+    plan-ledger edit + pre-existing junk)
 - [ ] Review iteration 17 (ONLY if 16 was not quiet; same rules)
 - [ ] Review iteration 18 (ONLY if 17 was not quiet; same rules; if 18
   is ALSO not quiet: fix its confirmed set, then STOP — report the
