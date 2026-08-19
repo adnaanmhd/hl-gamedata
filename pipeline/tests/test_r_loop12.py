@@ -205,17 +205,38 @@ def test_edge_notification_on_a_barely_long_clip_is_short_at_map_time():
     """The CNT_EDGE arm has had this check since day one; the notif/chat
     siblings did not — a 70-74s clip burned a fix attempt and a paid
     sweep reaching an INEVITABLE CNT_SHORT under a reason that
-    misdirects the re-record coaching."""
+    misdirects the re-record coaching.
+
+    De-vacuoused by G9 (r13 #12, §2 rule 3): both r12 tests set
+    probed == claimed, so the fix's core clause — the remainder is
+    judged on the PROBED duration — was never distinguished from the
+    claim; the finder's dur-for-dur_true mutant passed 696/696. The
+    variables are now split BOTH ways (reverse control below)."""
     from pipeline import validate
     reasons: list = []
     validate._map_flags(
-        {"duration_s": 71.0},
-        {"probed_duration_s": 71.0,
+        {"duration_s": 500.0},           # claim says plenty of clip…
+        {"probed_duration_s": 71.0,      # …the real timeline disagrees
          "notifs": [{"t": 2.5, "confirmed": True, "what": "steam toast"}]},
         reasons, [])
     assert [r["code"] for r in reasons] == ["CNT_SHORT"], reasons
     assert reasons[0]["fixable"] is False
     assert reasons[0]["params"]["post_cut_s"] == 67.5
+
+
+def test_edge_notification_short_call_judges_the_probed_duration():
+    """G9 reverse control (the other split direction): a short CLAIM
+    over a long PROBED timeline must stay a fixable edge cut — the
+    dur-for-dur_true mutant flips this one to CNT_SHORT."""
+    from pipeline import validate
+    reasons: list = []
+    validate._map_flags(
+        {"duration_s": 71.0},
+        {"probed_duration_s": 200.0,
+         "notifs": [{"t": 2.5, "confirmed": True, "what": "toast"}]},
+        reasons, [])
+    assert [r["code"] for r in reasons] == ["CNT_NOTIF_EDGE"], reasons
+    assert reasons[0]["fixable"] is True
 
 
 def test_edge_chat_tail_on_a_barely_long_clip_is_short_at_map_time():
