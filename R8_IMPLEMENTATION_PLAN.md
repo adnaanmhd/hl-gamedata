@@ -64,12 +64,17 @@ verdicts: session scratchpads `r11-results.json` … `r14-results.json`.
   in a HEAD scratch copy (each FAILS on its mutant); DEVIATION: a
   real pre-existing fix_sync_from_v1 resolve_actions-unpack crash
   found and fixed in-commit (recorded inline in §3); gate 749/749
-- [ ] Post-H9 IN PROGRESS 2026-08-19: sweeps recorded per commit ✓;
-  SUITE_FLOOR 745 pinned (`37d7d88`) ✓; Mac gate 749/749 floor 745 ✓;
+- [x] Post-H9 DONE 2026-08-19: sweeps recorded per commit ✓;
+  SUITE_FLOOR 745 pinned (`37d7d88`) ✓; gates green on BOTH hosts at
+  floor 745 (Mac 749/749; VM 749/749 after `82c86da` made the H9c
+  twin's delivery-copy portable — the VM run exposed the tool's own
+  `cp -c` as macOS-only, pre-existing, surfaced not fixed);
   tree-verify ✓ (no MUTATION strings, only pre-existing junk
-  uncommitted); VM gate PENDING gcloud reauth (asked Adnaan to run
-  `! gcloud auth login`); iteration-14 quiet judgment WAITS on the VM
-  gate (R5_TRIAGE §7 needs both gates green)
+  uncommitted). **ITERATION 14 JUDGED QUIET AFTER FIXING per
+  R5_TRIAGE §7** (pre-registered: zero confirmed blockers AND every
+  confirmed major/minor fixed with the suite green on both hosts —
+  13/13 confirmed findings fixed by H1–H9 `1dd69fa..747422e`,
+  0 blockers, 0 dead-verifier findings, both gates green 749/749)
 - [ ] Review iteration 15 (confirmation pass, runs REGARDLESS of 14's
   verdict — RULED by Adnaan 2026-08-19, his standing preference; ALL 7
   lanes — the driver-core conditional resolved NOT-triggered; check
