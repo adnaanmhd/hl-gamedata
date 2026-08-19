@@ -83,8 +83,14 @@ def _stub_phases(monkeypatch, verdicts):
 
 
 def test_process_batch_deliver_and_reject(cfg, ledger, monkeypatch):
-    _seed(cfg, ledger, SID1, "m1")
-    _seed(cfg, ledger, SID2, "m2", ctime="2026-08-14T11:00:00.000Z")
+    # one scan, both folders listed: sequential single-folder scans left
+    # SID1 absent from the second (healthy) listing, which the r14 #5
+    # vanished-folder arm rightly prunes — a partial-listing artifact,
+    # not the production shape (scan always sees the full Drive listing)
+    ingest.scan(cfg, ledger, entries=make_session_entries(
+        sid=SID1, md5="m1")
+        + make_session_entries(sid=SID2, md5="m2",
+                               ctime="2026-08-14T11:00:00.000Z"))
     _stub_phases(monkeypatch, {
         SID1: [{"bin": 1}],
         SID2: [{"bin": 3, "reasons": [

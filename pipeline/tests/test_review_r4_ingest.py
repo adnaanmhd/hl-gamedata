@@ -188,9 +188,16 @@ def test_third_copy_inflight_blocker_spares_discovered_sibling(cfg,
     ledger.set_state(SID_A, "VALIDATING")
     _seed(ledger, SID_B, player="b@x.com", md5="x-dup",
           ctime="2026-08-14T11:00:00.000Z")
+    # B's folder rides in the listing at its registered path: scan sees
+    # the FULL Drive listing in production, and the r14 #5 vanished-
+    # folder arm rightly prunes any DISCOVERED row absent from a healthy
+    # listing — this test pins the dup rule, not the prune
     res = ingest.scan(cfg, ledger, entries=make_session_entries(
         sid=SID_C, player="c@x.com", md5="x-dup",
-        ctime="2026-08-14T09:00:00.000Z"))
+        ctime="2026-08-14T09:00:00.000Z")
+        + make_session_entries(op="Op", player="b@x.com", sid=SID_B,
+                               md5="x-dup",
+                               ctime="2026-08-14T11:00:00.000Z"))
     assert ledger.get(SID_C)["state"] == "REJECTED"
     assert SID_C in res.dup_cross
     assert "INT_DUP_CROSS" in ledger.get(SID_C)["reasons_json"]

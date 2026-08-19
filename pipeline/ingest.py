@@ -694,6 +694,29 @@ def scan(cfg: C.Config, ledger: Ledger,
                          "from the chase list")
         print(f"[bad-path-resolved] {rp} — folder gone from listing",
               file=sys.stderr)
+
+    # DISCOVERED rows whose folder VANISHED from Drive I (r-loop 14 #5):
+    # the third vanished-folder arm, same healthy-listing guard as the
+    # two above. Without a terminal state such a row retried its
+    # download forever — no prune arm covered DISCOVERED, the empty work
+    # dir holds no media so the 12h reclaim never fires, and the
+    # digest's 'undownloaded' backlog stayed permanently inflated (an
+    # --until-idle canary could never reach idle). The trigger is the
+    # listing-derived STATE evidence, never local media. QUARANTINED
+    # with NO INT_PATH reason keeps it off the folder-issues chase
+    # list; if the same sid reappears at a clean path, the existing
+    # quarantined-path heal above re-registers it (self-healing, like
+    # the sibling arms).
+    for r in ledger.by_state("DISCOVERED"):
+        rp = r["drive_path"] or ""
+        parts = Path(rp).parts if rp else ()
+        if len(parts) < 2 or parts[0] not in games_present \
+                or rp in listed_dirs:
+            continue
+        ledger.set_state(r["session_id"], "QUARANTINED",
+                         "folder gone from Drive I — dropped from intake")
+        print(f"[vanished-discovered] {rp} — folder gone from listing; "
+              f"{r['session_id']} dropped from intake", file=sys.stderr)
     return res
 
 

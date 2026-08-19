@@ -375,3 +375,105 @@ def test_run_rclone_timeout_text_is_stable(monkeypatch):
     monkeypatch.setattr(ingest.subprocess, "run", raise_timeout)
     p = ingest.run_rclone(["copy", "x", "y"], timeout_s=5)
     assert p.returncode == 124 and p.stderr == "timed out after 5s"
+
+
+# ------- r14 #5 (H5): vanished-folder arm for DISCOVERED rows
+
+_H5_SID = "2026-08-14T10-00-00Z_kamla_c_00000000000000a5"
+
+
+def _h5_discovered(cfg, ledger):
+    from pipeline import ingest
+    from pipeline.tests.conftest import make_session_entries
+    ingest.scan(cfg, ledger,
+                entries=make_session_entries(sid=_H5_SID, md5="h5-md5"))
+    row = ledger.get(_H5_SID)
+    assert row is not None and row["state"] == "DISCOVERED"
+    return row
+
+
+def test_vanished_discovered_row_leaves_intake(cfg, ledger, capsys):
+    """r14 #5 (H5): a DISCOVERED row whose Drive folder was deleted
+    retried forever — no prune arm covered the state, the empty work
+    dir holds no media for the reclaim, and the digest's undownloaded
+    backlog stayed permanently inflated. A healthy same-game listing
+    missing the path now quarantines it, loudly, with NO INT_PATH
+    reason (off the chase list)."""
+    from pipeline import ingest, reports
+    from pipeline.tests.conftest import make_session_entries
+    _h5_discovered(cfg, ledger)
+    capsys.readouterr()
+    # the folder is deleted; the kamla tree still lists healthy content
+    other = make_session_entries(
+        sid="2026-08-14T11-00-00Z_kamla_c_00000000000000b6", md5="h6-md5")
+    ingest.scan(cfg, ledger, entries=other)
+    row = ledger.get(_H5_SID)
+    assert row["state"] == "QUARANTINED"
+    last = ledger.db.execute(
+        "SELECT from_state, to_state, detail FROM events "
+        "WHERE session_id=? ORDER BY id", (_H5_SID,)).fetchall()[-1]
+    assert (last["from_state"], last["to_state"]) == \
+        ("DISCOVERED", "QUARANTINED"), "a genuine transition (rule 5)"
+    assert "folder gone from Drive I" in last["detail"]
+    assert row["reasons_json"] in ("[]", None, ""), \
+        "no INT_PATH reason — must stay off the folder-issues chase list"
+    assert reports.build_folder_issues(ledger) == []
+    assert "[vanished-discovered]" in capsys.readouterr().err, \
+        "one loud line per pruned row"
+
+
+def test_vanished_discovered_guard_needs_healthy_tree(cfg, ledger):
+    """H5 guard controls (§2 rule 4, both sides): an empty/erroring
+    listing, a listing where only the OTHER game's tree parsed, and a
+    listing that still carries the folder must all leave the row
+    untouched."""
+    from pipeline import ingest
+    from pipeline.tests.conftest import make_session_entries
+    _h5_discovered(cfg, ledger)
+    ingest.scan(cfg, ledger, entries=[])                    # (a) empty
+    assert ledger.get(_H5_SID)["state"] == "DISCOVERED"
+    ingest.scan(cfg, ledger, entries=make_session_entries(  # (b) other game
+        game="outer_wilds",
+        sid="2026-08-14T10-00-00Z_outer_wilds_c_00000000000000f0",
+        md5="ow-md5"))
+    assert ledger.get(_H5_SID)["state"] == "DISCOVERED"
+    ingest.scan(cfg, ledger,                                # (c) still listed
+                entries=make_session_entries(sid=_H5_SID, md5="h5-md5"))
+    assert ledger.get(_H5_SID)["state"] == "DISCOVERED"
+
+
+def test_vanished_discovered_with_local_media_still_pruned(cfg, ledger):
+    """H5: the trigger is the listing-derived STATE evidence, never
+    local media — a DISCOVERED row that happens to hold bytes in work/
+    is pruned by the same arm (the reclaim path is separate and only
+    ever covered media-holding dirs anyway)."""
+    from pipeline import ingest
+    from pipeline.tests.conftest import make_session_entries
+    _h5_discovered(cfg, ledger)
+    wd = cfg.work / _H5_SID
+    wd.mkdir(parents=True, exist_ok=True)
+    (wd / "video.mp4").write_bytes(b"x" * 1024)
+    ingest.scan(cfg, ledger, entries=make_session_entries(
+        sid="2026-08-14T11-00-00Z_kamla_c_00000000000000b6", md5="h6-md5"))
+    assert ledger.get(_H5_SID)["state"] == "QUARANTINED"
+
+
+def test_vanished_discovered_reappearing_folder_heals(cfg, ledger):
+    """H5 self-heal control: if the same sid later reappears at a clean
+    path, the existing quarantined-path heal re-registers it — the arm
+    must not create an unhealable dead end."""
+    from pipeline import ingest
+    from pipeline.tests.conftest import make_session_entries
+    _h5_discovered(cfg, ledger)
+    ingest.scan(cfg, ledger, entries=make_session_entries(
+        sid="2026-08-14T11-00-00Z_kamla_c_00000000000000b6", md5="h6-md5"))
+    assert ledger.get(_H5_SID)["state"] == "QUARANTINED"
+    # the same sid reappears at a CLEAN (different) path — the operator
+    # re-uploads the folder under the corrected tree
+    ingest.scan(cfg, ledger,
+                entries=make_session_entries(op="op2@x.com", sid=_H5_SID,
+                                             md5="h5-md5"))
+    row = ledger.get(_H5_SID)
+    assert row["state"] == "DISCOVERED", \
+        "a reappearing folder must re-register via the heal branch"
+    assert "op2@x.com" in row["drive_path"]
