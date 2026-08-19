@@ -132,27 +132,32 @@ findings docs are the durable record).
     'session.json unreadable' + 'is not a JSON object' map to
     STR_SJ_INVALID (entry-11 semantics preserved); stale rationale
     comment updated.
-  - [ ] M8 (r19 #7/#8/#9, tests-only): failing-side pins for L1's
-    non-dict-canonical arm, L1's str() coercion, and L2's
-    errors='replace' read (each deletion/revert mutant proven
-    gate-green at 802/802 by the finders — kill them, mutation-proof
-    in a fixed-tree scratch copy).
-  - [ ] Then: floor re-pin (passed − 4) in run_suite.sh + FLIP_RUNBOOK
-    §6b, BOTH host gates, tree-verify, §0 tick.
-- [ ] Review iteration 20 (headroom check with Adnaan BEFORE the
-  launch): reviews the M set. **AMENDED RULING (Adnaan, 2026-08-20,
-  mid-M-set — supersedes the fix-in-session arm for 20): if 20 is NOT
-  quiet, STOP — do NOT implement the N-set in this session.** Instead:
-  generate the findings doc + commit the snapshot as usual, SYNTHESIZE
-  the confirmed findings and their vetted fix specs (N-set) into this
-  plan (§0/§3, deviations and payment-surface flags stated), and write
-  a kickoff prompt for a NEW session to execute them (the
-  R19_EXEC_KICKOFF_PROMPT.md pattern).
-- [ ] **CHECKPOINT: STOP after iteration 20 either way** (or after
-  19's fixes if Adnaan aborts 20 at the headroom ask). Report
-  verdict-first with the full payment-surface list (§6). The
-  independent e2e and THE FLIP run ONLY on his explicit go, in a
-  later session — do NOT start them.
+  - [x] M8 (r19 #7/#8/#9, tests-only, `1a023fb`, gate 821):
+    failing-side pins for L1's non-dict-canonical arm, L1's str()
+    coercion, and L2's errors='replace' read — the finders' exact
+    mutants killed, mutation-proven in a fixed-tree scratch copy.
+  - [x] Post-M: floor 817 pinned `a239fad` (821 − 4) in run_suite.sh
+    + FLIP_RUNBOOK §6b; BOTH host gates 821/817 (Mac 158.7s, VM
+    566.9s, 2026-08-20); tree-verify clean (MUTATION grep clean,
+    uncommitted diff = the pre-existing junk only).
+- [ ] Review iteration 20: reviews the M set. **NEW RULING (Adnaan,
+  2026-08-20, post-M-set message — supersedes BOTH the mid-M-set
+  amendment above and the per-launch headroom asks; his words: "run
+  itr 20 automatically", "do NOT ask for token headroom"):**
+  iteration 20 launches automatically; if NOT quiet → implement ALL
+  its confirmed fixes (N-set, full §2 discipline, fail-first proofs,
+  floor re-pin, both host gates, tree-verify) and launch iteration
+  21 automatically; if 21 NOT quiet → implement ALL its fixes
+  (O-set, same discipline) and launch iteration 22 automatically;
+  **iteration 22's results are shown to Adnaan as THE CHECKPOINT**
+  (findings doc + snapshot committed; no fix implementation for 22's
+  findings without his go). **If 20 or 21 comes back QUIET (zero
+  confirmed findings) → automatically launch the independent e2e**
+  (§5's fresh-agent Mac-local canary shape) — this is the explicit
+  go §5 was waiting for, for the e2e ONLY. THE FLIP still waits for
+  its own explicit go. Payment-surface fixes and ruling
+  contradictions in any N/O vetting are still surfaced to Adnaan
+  before implementing (standing rule, not revoked).
 
 ---
 
@@ -266,28 +271,28 @@ The I1–I8 spec bodies that lived here are LANDED — full text at
 are vetted from the current iteration's findings doc into §0 as they
 arise, deviations stated inline — the K/L pattern.
 
-## 4. Review iterations 19–20 (multi-agent, ultracode; Adnaan's ruling 2026-08-20)
+## 4. Review iterations 20–22 (multi-agent, ultracode; Adnaan's rulings 2026-08-20)
 
-- **Run rule (RULED, Adnaan 2026-08-20: "i want to run two more
-  iterations"): iterations 19 and 20 BOTH run — this supersedes the
-  16–18 stream's stop-at-first-quiet rule.** If 19 is not quiet, 20
-  reviews its M-set fixes; if 19 IS quiet, 20 runs as a CONFIRMATION
-  pass (the iteration-15 precedent). Quiet stays as pre-registered
-  in R5_TRIAGE §7 (zero confirmed blockers AND every confirmed
-  major/minor fixed with the suite green on both hosts). The
-  per-launch headroom ask (below) is Adnaan's standing abort lever:
-  if 19 was quiet, RESTATE at the 20 ask that it will be a
-  confirmation pass, so he can redirect.
-- **Not-quiet handling: fix in-iteration for 19** — the executor vets
-  fix specs from the findings (deviations stated), implements with the
-  full §2 discipline (fail-first, sweeps, gates), and iteration 20
-  reviews those fixes. Payment-surface changes and anything
-  contradicting a standing ruling are surfaced to Adnaan BEFORE
-  implementing. **For 20 (AMENDED, Adnaan 2026-08-20 mid-M-set,
-  superseding the fix-its-confirmed-set arm): if not quiet, STOP —
-  no N-set implementation in this session. Synthesize the confirmed
-  findings + vetted N-set specs into this plan and write a
-  continuation kickoff prompt for a new session.**
+- **Run rule (NEW RULING, Adnaan 2026-08-20 post-M-set, superseding
+  the mid-M-set stop-after-20 amendment AND the per-launch headroom
+  asks — "run itr 20 automatically … do NOT ask for token
+  headroom"):** 20 launches automatically after the post-M gates; if
+  20 NOT quiet → fix its confirmed set (N) in-iteration and launch
+  21 automatically; if 21 NOT quiet → fix its set (O) and launch 22
+  automatically; 22's results are THE CHECKPOINT (shown to Adnaan,
+  no 22-fix implementation without his go). **If 20 or 21 comes back
+  QUIET (zero confirmed findings) → launch the independent e2e
+  automatically** (§5 shape; e2e only — the flip still waits).
+  Quiet-after-fixing stays as pre-registered in R5_TRIAGE §7 for
+  reporting, but the branch condition here is Adnaan's own "comes
+  back quiet" = zero confirmed findings from the pass.
+- **Not-quiet handling: fix in-iteration** — the executor vets fix
+  specs from the findings (deviations stated), implements with the
+  full §2 discipline (fail-first, sweeps, gates), and the next
+  iteration reviews those fixes. Payment-surface changes and
+  anything contradicting a standing ruling are surfaced to Adnaan
+  BEFORE implementing (standing rule, not revoked by the automation
+  ruling).
 - Script per iteration: copy the PREVIOUS committed snapshot
   (`tools/review/flip-review-iter18.js` for iteration 19) to the
   session scratchpad as `flip-review-iter<N>.js`. Retarget the
@@ -309,10 +314,10 @@ arise, deviations stated inline — the K/L pattern.
   lane count (7), backtick parity and stale iteration markers before
   launching. Invoke via the Workflow tool with `scriptPath`.
 - Keep: **ALL 7 lanes**, 2-vote refute (a finding dies only at 2/2),
-  whole-codebase + regressions + tests-coverage. **Check usage-credit
-  headroom with Adnaan BEFORE EACH launch** (recent iterations: ~19
-  agents, ~2.6–2.7M subagent tokens; two iteration-11 refuters died
-  on exhaustion).
+  whole-codebase + regressions + tests-coverage. The per-launch
+  headroom ask is REVOKED (NEW RULING above — launches are
+  automatic; recent iterations: 19–33 agents, ~2.7–3.8M subagent
+  tokens).
 - A Workflow launched by a session DIES if that session restarts —
   relaunch with `resumeFromRunId` (completed agents return cached) and
   VERIFY via the run's journal.jsonl whether the cache applied.
@@ -323,12 +328,15 @@ arise, deviations stated inline — the K/L pattern.
 
 ## 5. CHECKPOINT — then (later, on Adnaan's go) e2e and THE FLIP
 
-**The executor STOPS after iteration 20 (RULED 2026-08-20) and
-reports to Adnaan. The independent e2e does NOT run until he
-explicitly says go.** The report is verdict-first and carries the §6
-payment-surface list.
+**AMENDED by the 2026-08-20 NEW RULING (§4): the e2e's explicit go
+is GIVEN, conditionally — it launches automatically if iteration 20
+or 21 comes back quiet (zero confirmed findings). Otherwise the
+checkpoint is iteration 22's results, reported verdict-first with
+the §6 payment-surface list. THE FLIP still waits for its own
+explicit go — nothing below past the e2e runs in this session.**
 
-For the LATER session that gets the go (keep, unexecuted): the
+For the e2e (now conditionally armed, and for the LATER flip
+session): the
 independent REAL e2e is a fresh agent that wrote and reviewed none of
 this code exercising the actual system, modeled on FLIP_RUNBOOK §5
 (canary shape, Mac-local): fresh HL_PIPELINE_HOME, TEST-mode Telegram,
