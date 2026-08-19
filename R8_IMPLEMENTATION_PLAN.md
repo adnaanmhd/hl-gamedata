@@ -140,24 +140,86 @@ findings docs are the durable record).
     + FLIP_RUNBOOK §6b; BOTH host gates 821/817 (Mac 158.7s, VM
     566.9s, 2026-08-20); tree-verify clean (MUTATION grep clean,
     uncommitted diff = the pre-existing junk only).
-- [ ] Review iteration 20: reviews the M set. **NEW RULING (Adnaan,
-  2026-08-20, post-M-set message — supersedes BOTH the mid-M-set
-  amendment above and the per-launch headroom asks; his words: "run
-  itr 20 automatically", "do NOT ask for token headroom"):**
-  iteration 20 launches automatically; if NOT quiet → implement ALL
-  its confirmed fixes (N-set, full §2 discipline, fail-first proofs,
-  floor re-pin, both host gates, tree-verify) and launch iteration
-  21 automatically; if 21 NOT quiet → implement ALL its fixes
-  (O-set, same discipline) and launch iteration 22 automatically;
-  **iteration 22's results are shown to Adnaan as THE CHECKPOINT**
-  (findings doc + snapshot committed; no fix implementation for 22's
-  findings without his go). **If 20 or 21 comes back QUIET (zero
-  confirmed findings) → automatically launch the independent e2e**
-  (§5's fresh-agent Mac-local canary shape) — this is the explicit
-  go §5 was waiting for, for the e2e ONLY. THE FLIP still waits for
-  its own explicit go. Payment-surface fixes and ruling
-  contradictions in any N/O vetting are still surfaced to Adnaan
-  before implementing (standing rule, not revoked).
+- [x] Review iteration 20 RAN 2026-08-20 (automatic per the NEW
+  RULING below) — **NOT QUIET: 11 raised → 11 confirmed (0 blockers
+  / 8 major / 3 minor), 0 killed** (run `wf_c14f39a5-27d`, 29
+  agents, 0 errors, ~3.79M tokens; `R20_FINDINGS.md` + snapshot
+  committed `5524563`; machine results `r20-results.json` in the
+  session scratchpad). Clusters (doc numbering): #1/#5/#10/#11 =
+  M1's stamp/trim resolution block (falsy or-0.0 bypass, destroyed-
+  evidence head-0 on the live route, unguarded emit, overflow
+  misattribution); #2≡#6 + #3/#7 = M4's supersede semantics
+  (payment-surface: stranded delivered hours via the preserved
+  labels-mark; ''-over-'' self-defeat + real-over-'' ignoring the
+  breadcrumb); #4/#9 = M6 overflow holes; #8 = arming-gate-invisible
+  class inside M1's new probe.
+- **NEW RULING (Adnaan, 2026-08-20, post-M-set message — supersedes
+  BOTH the mid-M-set amendment above and the per-launch headroom
+  asks; his words: "run itr 20 automatically", "do NOT ask for token
+  headroom"):** iteration 20 launches automatically; if NOT quiet →
+  implement ALL its confirmed fixes (N-set, full §2 discipline,
+  fail-first proofs, floor re-pin, both host gates, tree-verify) and
+  launch iteration 21 automatically; if 21 NOT quiet → implement ALL
+  its fixes (O-set, same discipline) and launch iteration 22
+  automatically; **iteration 22's results are shown to Adnaan as THE
+  CHECKPOINT** (findings doc + snapshot committed; no fix
+  implementation for 22's findings without his go). **If 20 or 21
+  comes back QUIET (zero confirmed findings) → automatically launch
+  the independent e2e** (§5's fresh-agent Mac-local canary shape) —
+  this is the explicit go §5 was waiting for, for the e2e ONLY. THE
+  FLIP still waits for its own explicit go. NOTE on the standing
+  payment-surface consult: N3/N4 below are payment-surface fixes
+  implemented WITHOUT a fresh ask under "implement all the fixes" —
+  their directions are derivable from standing rulings (count-once
+  conservation, the refix tool's ruled labels-mark doctrine, the M4
+  ruling's own money-safe intent, deferral-owns-bytes), no NEW money
+  policy is being chosen; both are flagged for Adnaan's review at
+  the checkpoint and iteration 21 reviews them.
+- **N-set, vetted from R20_FINDINGS.md (pre-fix ref for all
+  fail-first proofs = `5524563`, code HEAD `a239fad`; every fix
+  fail-first-proven there + per-commit Mac gate; iteration 21
+  reviews the set):**
+  - [ ] N1 (r20 #1 + #5 + #10 + #11): fix_v1_to_v2's stamp/trim
+    resolution COMPLETED — falsy/bool head_cut_s is junk (parse the
+    raw value, no `or 0.0`; only a genuinely ABSENT key is the
+    v1-optional head-0 shape); destroyed trim evidence (unreadable/
+    non-dict session.json or canonical) REFUSES typed on the
+    live-sidecar route instead of recovering at head 0 (genuine
+    absent-trim on a readable well-formed canonical keeps head 0);
+    the created_at emit string is resolved INSIDE the resolution
+    block under an OverflowError guard on both routes (no write
+    precedes a crash); a stamp+head_cut overflow is disambiguated —
+    if timedelta(head_cut) constructs, the STAMP is the junk side
+    (recover/omit), only a head whose own timedelta overflows keeps
+    the canonical.trim refusal.
+  - [ ] N2 (r20 #4 + #9): fix_sessionjson_recompute's overflow
+    degrade completed — the ended_at_utc emit joins the guard, and
+    the except arm cannot re-overflow (recompute ended defensively
+    from the synthesized created; a still-overflowing duration falls
+    back to ended = created).
+  - [ ] N3 (r20 #2≡#6, payment-surface): ledger.supersede's ''
+    preserve arm clears accepted_reported_at when the row is not
+    DELIVERED — on the '' population (REJECTED/QUARANTINED slots)
+    that mark is the refix tool's ruled LABELS-only mark; preserving
+    it strands later-delivered hours (proven), clearing it costs at
+    most one re-printed label (no money). uploaded_reported_at +
+    duration_raw_s + tree_sealed_at stay preserved. Heal's ''
+    preserve arm swept for the same labels rule.
+  - [ ] N4 (r20 #3 + #7, payment-surface): '' means unknowable
+    regardless of the stored md5 — zip_unknowable = not new_md5
+    (''-over-'' preserves; breadcrumb written only over a real prior
+    md5), and a REAL md5 over a stored-'' slot adjudicates against
+    the newest prev_md5 breadcrumb (equal → bytes proven identical →
+    preserve; different → full clear; no breadcrumb → clear as
+    today). The heal's real-over-'' arm gets the same breadcrumb
+    compare.
+  - [ ] N5 (r20 #8, tests-only): failing-side pins for
+    _v1_sidecar_started's errors='replace' read and its
+    OSError/JSONDecodeError degrade (the finders' exact mutants,
+    both proven full-gate-green at 821, killed site-isolated).
+  - [ ] Then: floor re-pin (passed − 4) in run_suite.sh +
+    FLIP_RUNBOOK §6b, BOTH host gates, tree-verify, §0 tick, launch
+    iteration 21 automatically.
 
 ---
 
