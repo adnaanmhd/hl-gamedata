@@ -604,6 +604,54 @@ def test_joint_edge_composition_includes_edge_nongameplay_cuts():
         shorts[0]["params"]["post_cut_s"] == 68.0
 
 
+def test_joint_edge_composition_tail_nongameplay_arm():
+    """r15 #9 (I6, tests-only): _joint_edge_short's
+    CNT_EDGE_NONGAMEPLAY TAIL accumulation was exercised by no test —
+    deleting the else-branch passed the FULL arming gate, reverting a
+    70-78s clip with a head flag + tail nongameplay window to the
+    pre-H6 behavior (burned attempt, pointless ffmpeg cut,
+    misdirecting 'split produced no >=70s segment'). Head notif t=2.0
+    (cut 3.0) + tail nongameplay cut_at_s=71.0 -> exactly one
+    CNT_SHORT of 68.0. Mutation-proofed with the finder's EXACT mutant
+    (delete the else-branch) in a fixed-tree scratch copy (session
+    scratchpad): arming-gate-green pre-I6, fails this test."""
+    from pipeline import validate
+    reasons = [
+        {"code": "CNT_NOTIF_EDGE", "blocking": True, "fixable": True,
+         "params": {"t": 2.0, "edge": "head"}, "evidence": "e"},
+        {"code": "CNT_EDGE_NONGAMEPLAY", "blocking": True,
+         "fixable": True, "params": {"edge": "tail", "cut_at_s": 71.0},
+         "evidence": "e"},
+    ]
+    validate._joint_edge_short(reasons)
+    shorts = [r for r in reasons if r["code"] == "CNT_SHORT"]
+    assert len(shorts) == 1, reasons
+    assert shorts[0]["params"]["post_cut_s"] == 68.0
+    assert shorts[0]["blocking"] and not shorts[0]["fixable"]
+
+
+def test_joint_edge_composition_chat_head_arm():
+    """r15 #9 (I6) sibling: the chat-HEAD sub-branch (t <= 3.0, params
+    carry only t — the exact shape _map_flags emits for CNT_CHAT_PII,
+    no edge key) was likewise untested. Chat at t=2.5 (cut 3.5) + tail
+    nongameplay cut_at_s=71.0 -> one CNT_SHORT of 67.5. A head-arm
+    mutant (drop the t <= 3.0 disjunct) is proven to fail this test in
+    the same scratch copy while the edge='head' test above still
+    passes — the two pins split the head condition's variables."""
+    from pipeline import validate
+    reasons = [
+        {"code": "CNT_CHAT_PII", "blocking": True, "fixable": True,
+         "params": {"t": 2.5}, "evidence": "e"},
+        {"code": "CNT_EDGE_NONGAMEPLAY", "blocking": True,
+         "fixable": True, "params": {"edge": "tail", "cut_at_s": 71.0},
+         "evidence": "e"},
+    ]
+    validate._joint_edge_short(reasons)
+    shorts = [r for r in reasons if r["code"] == "CNT_SHORT"]
+    assert len(shorts) == 1, reasons
+    assert shorts[0]["params"]["post_cut_s"] == 67.5
+
+
 def test_joint_edge_composition_defers_to_an_individual_cnt_short():
     """H6: when an individual edge arm already emitted CNT_SHORT the
     composition appends nothing — the reason list stays duplicate-free
