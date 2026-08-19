@@ -113,22 +113,53 @@ scratchpads `r11-results.json` … `r15-results.json` (r15's is in the
   K1 RESTORES the r5 #41 identity guard the H5 arm bypassed, entry 70
   untouched; K2 = F4 doctrine instance 4; K3 = degrade-never-crash;
   K4–K6 tests-only; K1 flagged for the §6 payment-surface list):
-  - [ ] K1 = #1 quarantined-path heal gains the move-heal identity
-    guard for rows with a real prior registration (major)
-  - [ ] K2 = #2 fix_v1_to_v2 resolves the session's own keybind
-    (major; deviation: the finder's key_binding.json fallback arm NOT
-    adopted — the inversion sniff mis-flip risk outweighs it;
-    keybind.json root/raw only, else built-ins)
-  - [ ] K3 = #3 apply_context_to_rows' _active degrades on junk cells
-    (major; deviation: the belt-and-braces plan reorder NOT adopted —
-    the guard closes the confirmed mechanism; sync.py's bare float
-    noted for iteration 18's lanes)
-  - [ ] K4 = #4 tests-only: J2 camel-token discriminator (CapsLock)
-  - [ ] K5 = #5 tests-only: J3 overlap-frame pin
-  - [ ] K6 = #6 tests-only: I7 coached rename-re-upload path pinned
-    against the QUARANTINED-exclusion mutant
-  - [ ] Post-K: floor re-pin (passed − 4), both host gates,
-    tree-verify → iteration 18
+  - [x] K1 = #1 quarantined-path heal gains the identity guard for
+    rows with a real prior registration (major) — LANDED `c99309e`
+    (fail-first at 7ad7b71; '' == '' hostile mutant killed; Mac gate
+    785). DEVIATION (stated in the commit): the guard refuses exactly
+    the r5 #41 class — cross-player AND no byte identity — NOT the
+    raw move-heal formula the spec transcribed, whose md5 arm also
+    refuses SAME-player different-md5 heals; that is the heal's
+    DESIGNED population (review-r3 #7 correction, bytes can differ
+    per review-r4 #7, stamps clear as new hours per r9 D6) and is
+    pinned by two committed tests the literal formula breaks
+    (test_quarantine_heal_clears_the_tree_seal,
+    test_quarantine_heal_clears_the_accepted_mark) — contradicting
+    the same spec's own 'same-player re-uploads at a new path still
+    heal'. Every K1-mandated case behaves as specified. Two
+    accidental cross-player test SEEDS aligned with their tests' own
+    intent (review-r4 wipe test → player="" INT_PATH population;
+    review-r5 reset test → p1@x.com, its scenario is an operator
+    rename and its assertion already hard-coded the p1 path).
+  - [x] K2 = #2 fix_v1_to_v2 resolves the session's own keybind
+    (major) — LANDED `bd94829` (fail-first at 7ad7b71 incl. the
+    raw/-location re-entrant arm; Mac gate 788; recorded deviation
+    upheld: the key_binding.json fallback arm NOT adopted;
+    reprocess_session's built-ins-only resolve NOTED for iteration
+    18's lanes — CLI-only, outside the pipeline fix family)
+  - [x] K3 = #3 apply_context_to_rows' _active degrades on junk cells
+    (major) — LANDED `22614ef` (fail-first at 7ad7b71 with the exact
+    '1,5' ValueError, unit + fix_actions_context route; Mac gate 790;
+    recorded deviation upheld: no plan reorder; sync.py's bare float
+    AND fix_v1_to_v2's dx/dy float(dx or 0) — same class on the
+    ARR_V1_FORMAT route, found in the K3 sweep — both NOTED for
+    iteration 18's lanes)
+  - [x] K4 = #4 tests-only: J2 camel-token discriminator (CapsLock)
+    — LANDED `3f4f917` (map-level + caps_lock bound in the e2e; the
+    finder's exact t.lower() mutant killed by BOTH pins; Mac gate
+    791)
+  - [x] K5 = #5 tests-only: J3 overlap-frame pin — LANDED `000d87a`
+    (['w','e'] frame added to the same remap call; the finder's exact
+    row-level mutant killed; Mac gate 791)
+  - [x] K6 = #6 tests-only: I7 coached rename-re-upload path pinned
+    at BOTH dedupe sites (scan-time + the download-time twin, adopted
+    as cheap via the r_loop10 fake-rclone idiom) — LANDED `cdd03cc`
+    (both exact mutants killed, site-isolated; Mac gate 793)
+  - [x] Post-K: SUITE_FLOOR 789 pinned `6f97449` (793 passed − 4,
+    run_suite.sh + FLIP_RUNBOOK §6b); BOTH host gates green — Mac
+    793/789 (148.3s), VM 793/789 (517.9s, 2026-08-19); tree-verify
+    clean (no MUTATION markers, only pre-existing junk) →
+    iteration 18 (headroom check with Adnaan first)
 - [ ] Review iteration 18 (ONLY if 17 was not quiet; same rules; if 18
   is ALSO not quiet: fix its confirmed set, then STOP — report the
   fixes as landed-but-unreviewed, honestly labelled)
