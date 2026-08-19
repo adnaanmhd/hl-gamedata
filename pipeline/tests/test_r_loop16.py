@@ -53,6 +53,24 @@ def test_oskeys_trigger_unbound_control_still_fires():
     assert len(hits) == 1 and hits[0]["params"]["keys"] == {"CapsLock": 3}
 
 
+def test_oskeys_trigger_bound_camel_token_canonicalizes():
+    """r17 #4 (K4, tests-only): the whole J2 cohort bound only
+    'Insert', where key_canonical == str.lower — so rewriting the
+    validate.py filter to `t.lower() not in bound` passed the FULL
+    arming gate (finder-proven at 782/778) while every MULTI-WORD
+    bound OS key (caps_lock/num_lock/print_screen) took back the r16
+    #3 wrongful terminal reject: the CSV token is camel ('CapsLock'),
+    its canonical is 'caps_lock', and 'capslock' matches nothing.
+    Mutation-proofed with that EXACT mutant in a fixed-tree scratch
+    copy (session scratchpad): it fails this pin. The r15 #6 cohort
+    lesson, recurring inside the fix set that closed it."""
+    res = _os_map({"CapsLock": 3}, frozenset({"caps_lock"}))
+    assert not any(r["code"] == "INP_OSKEYS" for r in res.reasons), \
+        [r["code"] for r in res.reasons]
+    assert any("BOUND" in a and "CapsLock" in a for a in res.advisories), \
+        res.advisories
+
+
 def test_oskeys_trigger_mixed_filters_per_token():
     """J2 mixed case (kills the over-filter mutant): one bound + one
     unbound OS-pattern key in the same session — the reason lists ONLY
@@ -101,9 +119,12 @@ def test_oskeys_trigger_bound_aware_end_to_end(tmp_path):
     """J2 wiring pinned END TO END (the r15 #6 lesson: pin where the
     behavior is live — deleting the validate_session aux wiring must
     not leave the suite green): a real session whose CSV carries
-    Insert presses and whose raw/keybind.json binds insert passes
-    validation without INP_OSKEYS; the identical session WITHOUT the
-    keybind takes today's blocking reason."""
+    Insert AND CapsLock presses and whose raw/keybind.json binds both
+    passes validation without INP_OSKEYS; the identical session
+    WITHOUT the keybind takes today's blocking reason. caps_lock rides
+    beside insert since r17 #4 (K4): the camel CSV token pins
+    key_canonical where the wiring is live — the suite-green
+    `t.lower()` mutant fails here too."""
     import csv
 
     from pipeline.tests.test_fix_cut_gate import _make_session
@@ -118,6 +139,9 @@ def test_oskeys_trigger_bound_aware_end_to_end(tmp_path):
         for i in range(10, 18):
             body[i][ki] = "Insert"
             body[i][ai] = "interact"
+        for i in range(20, 26):
+            body[i][ki] = "CapsLock"
+            body[i][ai] = "walk_toggle"
         with (d / "frames.csv").open("w", newline="") as f:
             w = csv.writer(f)
             w.writerow(header)
@@ -127,8 +151,8 @@ def test_oskeys_trigger_bound_aware_end_to_end(tmp_path):
     _inject(d)
     (d / "raw").mkdir()
     (d / "raw" / "keybind.json").write_text(
-        json.dumps({"interact": "insert", "move_up": "w",
-                    "move_left": "a", "move_down": "s"}))
+        json.dumps({"interact": "insert", "walk_toggle": "caps_lock",
+                    "move_up": "w", "move_left": "a", "move_down": "s"}))
     res = validate_session(d, tmp_path / "dossier", skip_vlm=True,
                            expected_game="kamla")
     assert not any(r["code"] == "INP_OSKEYS" for r in res.reasons), \
