@@ -38,19 +38,32 @@ results incl. refuter verdicts: session scratchpads
   flip.
 
 **ACTIVE — resume from the first unchecked item:**
-- [ ] G1 zip-class '' adjudication made durable: supersede breadcrumb +
-  CHANGED event + _stamp arms re-keyed (r13 #1/#2/#3) — §3
-- [ ] G2 FIX_RETRANSLATE honors the session keybind; override only on
-  reroute plans (r13 #4) — §3
-- [ ] G3 notif/chat edge-vs-mid judged on the probed duration (r13 #5) — §3
-- [ ] G4 OverflowError arms: _check_session_json + frame-spacing (r13 #6) — §3
-- [ ] G5 rebuild-reset stamped-root refusal + paid-piece recording +
+- [x] G1 zip-class '' adjudication made durable: supersede breadcrumb +
+  CHANGED event + _stamp arms re-keyed (r13 #1/#2/#3) — §3 — LANDED
+  `abf052b` (suite 699/699, floor 692; deviations in commit msg:
+  marker suffix avoids the prev_md5= token; arm-2 skip uses >=)
+- [x] G2 FIX_RETRANSLATE honors the session keybind; override only on
+  reroute plans (r13 #4) — §3 — LANDED `2d1b071` (suite 701/701)
+- [x] G3 notif/chat edge-vs-mid judged on the probed duration (r13 #5)
+  — §3 — LANDED `b383f05` (suite 703/703)
+- [x] G4 OverflowError arms: _check_session_json + frame-spacing +
+  sweep (r13 #6) — §3 — LANDED `161232f` (suite 709/709; sweep found 3
+  extra in-scope sites: video-duration compare, _verify_against_raw
+  x2, analyze_sample _num — all fixed in the same commit)
+- [x] G5 rebuild-reset stamped-root refusal + paid-piece recording +
   visibility (r13 #8) — §3 (payment-surface: extends ruling C to the
-  rebuild tool — flagged to Adnaan in this plan, which he has read)
-- [ ] G6 kind-specific pending-interlock diagnosis (r13 #9) — §3
-- [ ] G7 fix_actions_from_v2 session_id sanitized + contained (r13 #7) — §3
-- [ ] G8 tests-only: operator-twin keybind pin + rebuild-reset lock
-  refuse/steal/stale pins (r13 #10/#11) — §3
+  rebuild tool — flagged to Adnaan in this plan, which he has read) —
+  LANDED `dc97f9d` (suite 712/712; r6 accepted-mark test re-keyed:
+  uploaded stamp now asserted PRESERVED — accepted-behaviours
+  amendment needed in iter14)
+- [x] G6 kind-specific pending-interlock diagnosis (r13 #9) — §3 —
+  LANDED `792ef61` (suite 716/716)
+- [x] G7 fix_actions_from_v2 session_id sanitized + contained (r13 #7)
+  — §3 — LANDED `623ab8a` (suite 717/717; sweep fixed the identical
+  join in tools/fix_sync_from_v1.py in the same commit)
+- [x] G8 tests-only: operator-twin keybind pin + rebuild-reset lock
+  refuse/steal/stale pins (r13 #10/#11) — §3 — LANDED `231d4db`
+  (suite 721/721; both mutants proven caught vs HEAD scratch)
 - [ ] G9 tests-only: split probed-vs-claimed in the r12 #7 edge tests
   (r13 #12) — §3
 - [ ] Post-G9: sibling-site sweep results recorded (§2 discipline); new
