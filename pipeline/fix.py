@@ -1554,6 +1554,13 @@ def fix_v1_to_v2(work: Path, game: str) -> str:
     trim_meta = canonical.get("trim") or {}
     if ca:
         created = datetime.fromisoformat(ca.replace("Z", "+00:00"))
+        if created.tzinfo is None:
+            # a naive v1 stamp is UTC by contract — repair it in place so
+            # .astimezone below can't shift it by the host's offset
+            # (r15 #7: the sole omission of the sibling guard; the qa
+            # checker that would flag naive stamps never runs before
+            # ARR_V1_FORMAT routes here)
+            created = created.replace(tzinfo=timezone.utc)
         created += timedelta(seconds=trim_meta.get("head_cut_s") or 0.0)
         new_s["created_at_utc"] = created.astimezone(timezone.utc).strftime(
             "%Y-%m-%dT%H:%M:%S.%f") + "Z"

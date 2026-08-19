@@ -100,6 +100,8 @@ def retrim(session_dir: Path, head_s: float, out_dir: Path, *,
 
     s = json.loads((session_dir / "session.json").read_text())
     created = datetime.fromisoformat(s["created_at_utc"].replace("Z", "+00:00"))
+    if created.tzinfo is None:
+        created = created.replace(tzinfo=timezone.utc)   # naive == UTC (r15 #7 sweep)
     created += timedelta(microseconds=head_us)
     ended = created + timedelta(seconds=new_info.duration_s)
     iso = lambda d: d.astimezone(timezone.utc).strftime(
