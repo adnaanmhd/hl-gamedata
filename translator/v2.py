@@ -582,7 +582,12 @@ def _check_session_json(s: dict, r: V2Result) -> None:
         if abs(s["frame_count"] - s["fps"] * s["duration_seconds"]) > 2:
             r.fail("frame_count differs from fps*duration_seconds "
                    "by > 2 frames")
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
+        # OverflowError: json.loads parses an unbounded integer literal
+        # to a Python bigint, and int/float or int*float on it raises —
+        # the r12 #10 arm covered the frame-sync max() and inventory()
+        # but this try-block's arithmetic still crashed the checker into
+        # a wrongful terminal QUARANTINE (r13 #6)
         r.fail("session.json numeric fields malformed (non-numeric type)")
     if not isinstance(s["localization"], str) \
             or not _LOC_RE.match(s["localization"]):
@@ -725,20 +730,31 @@ def check_session_v2(session_dir: Path, raw_bundle: Path | None = None) -> V2Res
         return r
     if any(b <= a for a, b in zip(ts, ts[1:])):
         r.fail("timestamp_ms not strictly increasing")
-    frame_iv = 1000.0 / s["fps"] if s.get("fps") else 0.0
-    if ts and ts[0] > frame_iv:
-        r.fail(f"timestamp_ms[0] = {ts[0]} not near zero")
-    if ts and abs(ts[-1] - s["duration_ms"]) > 4 * frame_iv:
-        r.fail(f"timestamp_ms[-1] = {ts[-1]} vs duration_ms {s['duration_ms']} "
-               f"(> 4 frame intervals apart)")
-    dts = [b - a for a, b in zip(ts, ts[1:])]
-    if dts:
-        med = sorted(dts)[len(dts) // 2]
-        irregular = sum(1 for d in dts if abs(d - med) > 0.2 * med)
-        if irregular:
-            r.warn(f"frame spacing irregular in {irregular}/{len(dts)} intervals "
-                   f"(median {med}ms) — capture tool drops frames; timestamps are "
-                   f"REAL frame PTS (correct sync), spacing cannot be fixed in post")
+    try:
+        frame_iv = 1000.0 / s["fps"] if s.get("fps") else 0.0
+        if ts and ts[0] > frame_iv:
+            r.fail(f"timestamp_ms[0] = {ts[0]} not near zero")
+        if ts and abs(ts[-1] - s["duration_ms"]) > 4 * frame_iv:
+            r.fail(f"timestamp_ms[-1] = {ts[-1]} vs duration_ms "
+                   f"{s['duration_ms']} (> 4 frame intervals apart)")
+        dts = [b - a for a, b in zip(ts, ts[1:])]
+        if dts:
+            med = sorted(dts)[len(dts) // 2]
+            irregular = sum(1 for d in dts if abs(d - med) > 0.2 * med)
+            if irregular:
+                r.warn(f"frame spacing irregular in {irregular}/{len(dts)} "
+                       f"intervals (median {med}ms) — capture tool drops "
+                       f"frames; timestamps are REAL frame PTS (correct "
+                       f"sync), spacing cannot be fixed in post")
+    except OverflowError:
+        # int() parses arbitrary-precision timestamp cells and bigint-
+        # vs-float arithmetic converts (1000.0/fps, 0.2*med) — an
+        # all-bigint column or a bigint fps raised OUT of the checker
+        # before the guarded frame-sync arm was ever reached, destroying
+        # the typed verdict (degrade, never crash — r12 #10 doctrine,
+        # sweep completed by r13 #6). Falls to QA_FAIL_UNMAPPED like the
+        # r12 arm: retranslate-when-sidecars is the designed route.
+        r.fail("frame spacing: timestamp_ms or fps values out of range")
 
     # camera columns all null (input-only delivery)
     cam_cols = [col[c] for c in C2W_COLS + CAMERA_COLS + CAMERA_EXTRA_COLS]
@@ -837,9 +853,17 @@ def check_session_v2(session_dir: Path, raw_bundle: Path | None = None) -> V2Res
                f"{s['record_width_px']}x{s['record_height_px']}")
     if info.frame_count != len(rows):
         r.fail(f"video frame count {info.frame_count} != csv rows {len(rows)}")
-    if abs(info.duration_s - s["duration_seconds"]) > 1.0:
-        r.fail(f"video duration {info.duration_s:.2f}s vs duration_seconds "
-               f"{s['duration_seconds']:.2f}s (> 1s)")
+    try:
+        if abs(info.duration_s - s["duration_seconds"]) > 1.0:
+            r.fail(f"video duration {info.duration_s:.2f}s vs "
+                   f"duration_seconds {s['duration_seconds']:.2f}s (> 1s)")
+    except OverflowError:
+        # a bigint duration_seconds survives the type normalization (a
+        # bigint IS an int) and float-vs-bigint arithmetic raises
+        # (r13 #6 sweep). Same 'video duration' prefix so the mapper
+        # routes it to STR_SJ_INVALID like the ordinary mismatch.
+        r.fail(f"video duration {info.duration_s:.2f}s vs "
+               f"duration_seconds out of range (absurd claim)")
     if info.duration_s < 70.0:
         r.warn(f"clip {info.duration_s:.1f}s under 70s minimum")
 
@@ -971,7 +995,9 @@ def _verify_against_raw(session_dir: Path, raw_bundle: Path, s: dict,
         head_us = (created - started).total_seconds() * 1e6 - shift_us
         end_us = head_us + float(s["duration_seconds"]) * 1e6
     except (OSError, json.JSONDecodeError, KeyError, TypeError,
-            ValueError, AttributeError) as e:
+            ValueError, AttributeError, OverflowError) as e:
+        # OverflowError: float(s["duration_seconds"]) on a JSON bigint
+        # (r13 #6 sweep) — degrade to the same skip, never crash
         r.warn(f"raw verification skipped: raw metadata/session timestamps "
                f"unreadable ({type(e).__name__})")
         return
@@ -1008,7 +1034,13 @@ def _verify_against_raw(session_dir: Path, raw_bundle: Path, s: dict,
             continue
         if not (head_us <= e["t"] < end_us):
             continue
-        t = int(e["t"] - head_us)
+        try:
+            t = int(e["t"] - head_us)
+        except OverflowError:
+            # a bigint event t passes the window test only when end_us
+            # is itself corrupt (inf-class duration claim); the event is
+            # garbage — skip it, never crash the checker (r13 #6 sweep)
+            continue
         f = max(bisect_right(pts, t) - 1, 0)
         if f < len(rows):
             # same coercion the binner uses — a malformed dx/dy must

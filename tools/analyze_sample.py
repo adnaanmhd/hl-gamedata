@@ -1331,7 +1331,9 @@ def analyze(sdir: Path, raw_by_sid: dict, gem: Gemini | None,
             return default
         try:
             return cast(v or 0)
-        except (TypeError, ValueError):
+        except (TypeError, ValueError, OverflowError):
+            # OverflowError: float() on a JSON bigint (a bigint IS an
+            # int, so the isinstance gate passes it) — r13 #6 sweep
             return default
 
     a.game_title = s.get("game_title", "") if isinstance(
