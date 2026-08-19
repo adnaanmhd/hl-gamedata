@@ -1190,11 +1190,23 @@ def send_daily_report_if_due(cfg: C.Config, ledger: Ledger,
     # sent. Resume the OLDEST pending day first, one send per tick (the
     # next tick opens today). Pending = record present without its .sent
     # marker, or with the marker but the document not yet delivered (#8).
-    try:
-        day_dirs = sorted(p for p in cfg.reports_dir.iterdir()
-                          if p.is_dir())
-    except OSError:
-        day_dirs = []
+    # fail CLOSED (r16 #2, RULED 2026-08-19 — the r12 #13 doctrine's
+    # last fail-open sibling): the inline try/except read a transient
+    # listing error as 'no pending days', so the fresh path ran past an
+    # older pending day, re-counted its unstamped roots as late
+    # arrivals, and the pending day's later resume re-sent the SAME
+    # hours on its own sheet — two sent payment documents, silent
+    # double-pay (finder-proven by execution). 'Could not look' must
+    # never read as 'nothing pending' where it orders
+    # resume-before-fresh; skip this tick loudly and retry (the
+    # r-loop-11 #10 transient doctrine — no wedge). A genuinely
+    # missing reports dir (first-ever send) returns [] from the shared
+    # helper and keeps the fresh path reachable.
+    day_dirs = reports._report_day_dirs(cfg)
+    if day_dirs is None:
+        print("[daily] reports dir unlistable — cannot order "
+              "resume-before-fresh; retrying next tick", file=sys.stderr)
+        return False
     for d_dir in day_dirs:
         recp = d_dir / ".daily-counted.json"
         if not recp.is_file():

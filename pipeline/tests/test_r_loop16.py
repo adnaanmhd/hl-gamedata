@@ -143,6 +143,67 @@ def test_oskeys_trigger_bound_aware_end_to_end(tmp_path):
         [r["code"] for r in res2.reasons]
 
 
+# ------- r16 #2 (J5, RULED): the daily resume scan fails CLOSED
+
+
+def test_daily_scan_listing_failure_refuses_the_tick(
+        cfg, ledger, monkeypatch, capsys):
+    """r16 #2 (J5, RULED Adnaan 2026-08-19: fail CLOSED): the
+    day-agnostic resume scan's inline try/except read a transient
+    listing OSError as 'no pending days' — the fresh path then ran
+    past an older pending day, re-counted its unstamped roots as late
+    arrivals, and the pending day's later resume re-sent the SAME
+    hours on its own sheet: two sent payment documents, silent
+    double-pay (finder-proven by execution). The harm needs the
+    ASYMMETRIC transient — the regen guard's listing succeeds, the
+    scan's fails (the EMFILE class) — reproduced here at the shared
+    helper seam: call 1 real, call 2 None. The tick must refuse
+    loudly, send nothing, and stamp nothing."""
+    from pipeline import reports
+    from pipeline import run as runmod
+    from pipeline.tests.test_r_loop8 import _daily_seed
+    docs: list[bytes] = []
+    send, sid, csv_path, day = _daily_seed(cfg, ledger, monkeypatch,
+                                           docs=docs)
+    real = reports._report_day_dirs
+    calls = {"n": 0}
+
+    def flaky(c):
+        calls["n"] += 1
+        return real(c) if calls["n"] == 1 else None
+    monkeypatch.setattr(reports, "_report_day_dirs", flaky)
+    capsys.readouterr()
+    assert runmod.send_daily_report_if_due(cfg, ledger, send) is False, \
+        "an unlistable reports dir must refuse the tick, never guess"
+    assert calls["n"] == 2, \
+        "the scan must consult the shared fail-closed helper"
+    assert "unlistable" in capsys.readouterr().err
+    assert docs == [] and not csv_path.exists(), \
+        "nothing may be built or sent on the refused tick"
+    row = ledger.get(sid)
+    assert not row["uploaded_reported_at"] and \
+        not row["accepted_reported_at"], "…and nothing stamped"
+    # transient doctrine: the next healthy tick proceeds normally
+    monkeypatch.setattr(reports, "_report_day_dirs", real)
+    assert runmod.send_daily_report_if_due(cfg, ledger, send) is True
+    assert csv_path.exists()
+
+
+def test_daily_first_ever_send_with_no_reports_dir_proceeds(
+        cfg, ledger, monkeypatch):
+    """J5 control (§2 rule 4, the proceed side): a genuinely MISSING
+    reports dir (first-ever send) is nothing-pending, not a refusal —
+    the shared helper returns [] for it and the fresh path runs."""
+    import shutil
+
+    from pipeline import run as runmod
+    from pipeline.tests.test_r_loop8 import _daily_seed
+    send, sid, csv_path, day = _daily_seed(cfg, ledger, monkeypatch)
+    shutil.rmtree(cfg.reports_dir)
+    assert runmod.send_daily_report_if_due(cfg, ledger, send) is True
+    assert csv_path.exists()
+
+
 # ------- r16 #6 (J3, tests-only): the fix_sync remap credited-strip pin
 
 
