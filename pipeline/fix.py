@@ -1499,11 +1499,25 @@ def fix_sessionjson_recompute(work: Path, game: str) -> str:
     # acceptance is regex AND parse, so a regex-shaped but unparseable
     # stamp (hour 25, month 13) must re-emit too — kept verbatim it
     # re-FAILed 'timestamps unparseable' on both attempts (r-loop 9 #13)
-    if not parsed_ok or not isinstance(created_raw, str) \
-            or not _TS_RE.match(created_raw):
+    try:
+        if not parsed_ok or not isinstance(created_raw, str) \
+                or not _TS_RE.match(created_raw):
+            s["created_at_utc"] = created.astimezone(timezone.utc).strftime(
+                "%Y-%m-%dT%H:%M:%S.%f") + "Z"
+        ended = created + timedelta(seconds=info.duration_s)
+    except OverflowError:
+        # r19 #12 (M6): a PARSEABLE stamp within clip-duration of
+        # datetime.max overflowed the ended addition (and an aware
+        # negative-offset stamp near max overflows the astimezone
+        # above) — the rewrite crashed session-kind on the exact junk
+        # family its STR_SJ_INVALID verdict routes here to repair,
+        # while the checker's own numeric arms degrade (entries
+        # 52/57). Fall back to the designed unusable-stamp degrade:
+        # synthesize from now.
+        created = datetime.now(timezone.utc)
         s["created_at_utc"] = created.astimezone(timezone.utc).strftime(
             "%Y-%m-%dT%H:%M:%S.%f") + "Z"
-    ended = created + timedelta(seconds=info.duration_s)
+        ended = created + timedelta(seconds=info.duration_s)
     slug = game if game in C.GAMES else \
         (game_key_from_name(s.get("game_title", "")) or game)
     plat = s.get("platform")

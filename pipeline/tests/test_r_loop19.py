@@ -448,3 +448,61 @@ def _nonzero_frame_ids(d):
         w = _csv.writer(f)
         w.writerow(header)
         w.writerows(body)
+
+
+# ------- r19 #12 (M6): the session.json rewrite degrades on a
+# ------- parseable-but-absurd stamp instead of crashing
+
+
+@needs_ffmpeg
+def test_recompute_survives_near_max_stamp(tmp_path):
+    """r19 #12 (M6): fix_sessionjson_recompute guarded the PARSE but
+    not the arithmetic — a regex-conformant created_at_utc in the
+    year-9999 tail overflowed `created + duration` (and, for aware
+    non-UTC stamps near datetime.max, the re-emit astimezone), so the
+    rewrite crashed session-kind on the exact junk family its
+    STR_SJ_INVALID verdict routes here to repair. It now falls back to
+    the designed unusable-stamp degrade (synthesize from now)."""
+    import json as _json
+
+    from translator.v2 import _TS_RE
+    from pipeline import fix as fixmod
+    from pipeline.tests.test_fix_cut_gate import _make_session
+    for i, stamp in enumerate(("9999-12-31T23:59:59.000000Z",
+                               "9999-12-31T23:59:59-05:00")):
+        d = _make_session(tmp_path, seconds=80, name=f"m6max{i}")
+        s = _json.loads((d / "session.json").read_text())
+        s["created_at_utc"] = stamp
+        (d / "session.json").write_text(_json.dumps(s))
+        note = fixmod.fix_sessionjson_recompute(d, "kamla")
+        assert "recomputed" in note
+        out = _json.loads((d / "session.json").read_text())
+        assert _TS_RE.match(out["created_at_utc"])
+        assert not out["created_at_utc"].startswith("9999"), \
+            "the absurd stamp is rebuilt, not kept"
+        assert _TS_RE.match(out["ended_at_utc"])
+
+
+# ------- r19 #13 (M7): the two session.json shape FAILs map to the
+# ------- fix that can actually clear them
+
+
+def test_sessionjson_shape_fails_map_to_rewrite(tmp_path):
+    """r19 #13 (M7): 'session.json unreadable' / 'is not a JSON object'
+    fell through to QA_FAIL_UNMAPPED under a stale rationale ('no fix
+    can clear them') that r-loop 7 falsified: FIX_SESSIONJSON_REWRITE
+    rebuilds a valid session.json from {} ground truth, while the
+    unmapped route planned a retranslate that READS session.json for
+    its head offset and deterministically FixFails both attempts (or
+    bin-3 rejected the sidecar-less twin outright). Both strings now
+    map to STR_SJ_INVALID; the rewrite precedes any retranslate and
+    STR_SJ_INVALID never routes through one (entry-11 semantics)."""
+    from pipeline import validate as valmod
+    reasons: list = []
+    valmod._map_qa_issues(
+        ["FAIL: session.json is not a JSON object",
+         "FAIL: session.json unreadable: UnicodeDecodeError"],
+        reasons, True)
+    codes = [r["code"] for r in reasons]
+    assert codes and set(codes) == {"STR_SJ_INVALID"}, codes
+    assert all(r["fixable"] for r in reasons)

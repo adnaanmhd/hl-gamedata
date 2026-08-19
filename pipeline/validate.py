@@ -107,10 +107,20 @@ _QA_STR_MAP = [
     # though FIX_SESSIONJSON_REWRITE recomputes precisely the fields the
     # new FAILs describe. Deliberately NOT mapped, because no fix can clear
     # them and mapping would burn two attempts and two paid VLM sweeps
-    # before rejecting anyway: ragged/short rows (lost columns),
-    # "session.json unreadable", "is not a JSON object", "frames.csv
-    # unreadable/empty" — for those, QA_FAIL_UNMAPPED's retranslate-when-
-    # sidecars-exist behaviour is already the right answer.
+    # before rejecting anyway: ragged/short rows (lost columns) and
+    # "frames.csv unreadable/empty" — for those, QA_FAIL_UNMAPPED's
+    # retranslate-when-sidecars-exist behaviour is already the right
+    # answer (the retranslate rewrites the CSV without reading it).
+    # "session.json unreadable" / "is not a JSON object" WERE in that
+    # list, but the rationale predates r-loop 7's _read_session_json {}
+    # rebuild and was falsified by it (r19 #13): FIX_SESSIONJSON_REWRITE
+    # recomputes a valid session.json from video+CSV ground truth
+    # starting from the {} read, while the unmapped route planned a
+    # retranslate that READS session.json for its head offset and
+    # deterministically FixFails both attempts — or bin-3 rejected the
+    # sidecar-less twin on the spot. Both now map to STR_SJ_INVALID
+    # below: the rewrite precedes any retranslate in every plan, and
+    # STR_SJ_INVALID never routes through one (the r-loop-7 rule).
     # "frame_id column unparseable" is deliberately NOT mapped: with no raw
     # sidecars STR_ROWS_MISMATCH plans FIX_ROWS_SURGERY, which only
     # truncates/appends up to 2 TAIL rows and never rewrites a frame_id
@@ -131,6 +141,8 @@ _QA_STR_MAP = [
     # with a truthful reason instead of a burned budget.
     ("session.json numeric fields malformed", "STR_SJ_INVALID", True),
     ("session.json timestamps", "STR_SJ_INVALID", True),
+    ("session.json unreadable", "STR_SJ_INVALID", True),
+    ("session.json is not a JSON object", "STR_SJ_INVALID", True),
     ("game_title not a string", "STR_SJ_INVALID", True),
     ("timestamp_ms column unparseable", "STR_TS_NONMONO", True),
 ]
