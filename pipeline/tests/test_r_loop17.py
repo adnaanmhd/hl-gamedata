@@ -8,6 +8,10 @@ the mutation-proof pattern with the finders' EXACT mutants, per plan
 """
 from __future__ import annotations
 
+import json
+
+from pipeline.tests.test_r_loop8 import needs_ffmpeg
+
 
 # ------- r17 #1 (K1): the quarantined-path heal refuses cross-player
 # ------- identity claims (the review-r5 #41 guard, restored)
@@ -119,3 +123,98 @@ def test_byte_identical_cross_player_heal_still_proceeds(cfg, ledger):
     assert _PLAYER_B in row["drive_path"]
     assert any("quarantined path healed" in f for f in res.integrity_flags)
     assert _K1_SID in res.discovered
+
+
+# ------- r17 #2 (K2): fix_v1_to_v2 resolves the session's OWN keybind
+
+
+def _k2_custom_v1_work(tmp_path, *, keybind_at="root"):
+    """A v1 working copy whose player rebound interact to ';' — the
+    r15 #4 / r16 #5 rebind population arriving in v1 delivery format.
+    The session keybind sits at the work root (production shape: the
+    fix itself moves sidecars into raw/ only AFTER converting) or in
+    raw/ (the re-entrant shape)."""
+    import csv
+
+    from pipeline.tests.test_r_loop15 import _v1_work
+    work = _v1_work(tmp_path, "2026-08-10T15:34:03Z", "k2custom")
+    with (work / "frames.csv").open(newline="") as f:
+        rows = list(csv.reader(f))
+    header, body = rows[0], rows[1:]
+    ki = header.index("input_keys")
+    for r in body:
+        if r[ki] == "E":
+            r[ki] = ";"          # the v1 file carries the rebound literal
+    with (work / "frames.csv").open("w", newline="") as f:
+        w = csv.writer(f)
+        w.writerow(header)
+        w.writerows(body)
+    kb = {"interact": ";", "move_up": "w", "move_left": "a",
+          "move_down": "s"}
+    if keybind_at == "root":
+        (work / "keybind.json").write_text(json.dumps(kb))
+    else:
+        (work / "raw").mkdir(exist_ok=True)
+        (work / "raw" / "keybind.json").write_text(json.dumps(kb))
+    return work
+
+
+def _k2_assert_semis_survive(work):
+    import csv
+    with (work / "frames.csv").open(newline="") as f:
+        rows = list(csv.DictReader(f))
+    inter = [r for r in rows if "interact" in r["input_actions"]]
+    assert inter, "the interact rows must exist"
+    assert all(";" in r["input_keys"].split("|") for r in inter), \
+        "every v1-resolved interact must keep its rebound ';' press — " \
+        "an empty input_keys cell is the r17 #2 orphan-action corruption"
+    ups = [r for r in rows if "move_up" in r["input_actions"]]
+    assert ups and all("W" in r["input_keys"].split("|") for r in ups)
+
+
+@needs_ffmpeg
+def test_v1_conversion_keeps_custom_bound_presses(tmp_path):
+    """r17 #2 (K2): fix_v1_to_v2 judged `bound` against the built-ins
+    alone (the F4 defect class, fourth instance) — every press of a
+    custom-bound key was deleted from the converted frames.csv while
+    its v1-resolved action shipped on the same rows with an empty
+    input_keys cell, checker-GREEN (keys-have-actions is
+    one-directional). The session's own keybind.json — sitting at the
+    work root at that moment — is now authoritative, exactly as in
+    fix_key_hygiene / fix_actions_context / retranslate."""
+    from pipeline import fix as fixmod
+    work = _k2_custom_v1_work(tmp_path, keybind_at="root")
+    note = fixmod.fix_v1_to_v2(work, "kamla")
+    assert "converted v1 -> v2" in note
+    _k2_assert_semis_survive(work)
+
+
+@needs_ffmpeg
+def test_v1_conversion_resolves_raw_keybind_too(tmp_path):
+    """K2 re-entrant arm: a working copy whose sidecars already moved
+    to raw/ (a re-run after a partial conversion) resolves the same
+    keybind — deleting the raw/ fallback arm must fail here."""
+    from pipeline import fix as fixmod
+    work = _k2_custom_v1_work(tmp_path, keybind_at="raw")
+    fixmod.fix_v1_to_v2(work, "kamla")
+    _k2_assert_semis_survive(work)
+
+
+@needs_ffmpeg
+def test_v1_conversion_builtin_only_control_unchanged(tmp_path):
+    """K2 control (§2 rule 4, the proceed side): a session with NO
+    keybind.json converts against the built-ins exactly as before —
+    the built-in-bound E/W presses survive with their actions."""
+    import csv
+
+    from pipeline import fix as fixmod
+    from pipeline.tests.test_r_loop15 import _v1_work
+    work = _v1_work(tmp_path, "2026-08-10T15:34:03Z", "k2builtin")
+    note = fixmod.fix_v1_to_v2(work, "kamla")
+    assert "converted v1 -> v2" in note
+    with (work / "frames.csv").open(newline="") as f:
+        rows = list(csv.DictReader(f))
+    inter = [r for r in rows if "interact" in r["input_actions"]]
+    assert inter and all("E" in r["input_keys"].split("|") for r in inter)
+    ups = [r for r in rows if "move_up" in r["input_actions"]]
+    assert ups and all("W" in r["input_keys"].split("|") for r in ups)

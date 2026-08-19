@@ -1505,7 +1505,27 @@ def fix_v1_to_v2(work: Path, game: str) -> str:
     if not all(c in col for c in need):
         raise FixFailed("v1 frames.csv missing input columns")
     slug = game or game_key_from_name(canonical.get("game", "")) or ""
-    kb = dict(KEYBINDS.get(slug, {}))
+    # the session's own keybind.json is AUTHORITATIVE (the F4 doctrine's
+    # fourth instance — r17 #2): judging `bound` against the built-ins
+    # alone deleted every custom-bound key press from the converted rows
+    # while their v1-resolved actions shipped verbatim on the same rows
+    # with an empty input_keys cell — checker-GREEN, because the
+    # keys-have-actions test is one-directional (keys_no_action), so the
+    # corruption passed silently and no retranslate was ever planned. At
+    # this point the sidecars are still at the work ROOT (this function
+    # moves them into raw/ below); accept the raw/ location too so a
+    # re-entrant run resolves identically. The delivered key_binding.json
+    # is DELIBERATELY not a fallback (deviation recorded in plan §0): the
+    # inversion sniff is biased against flipping, and a mis-flip empties
+    # the keyboard column (the r-loop-4 catastrophic class).
+    kbp = work / "keybind.json"
+    if not kbp.exists():
+        kbp = work / "raw" / "keybind.json"
+    if kbp.exists():
+        kb = resolve_keybind(keybind_path=kbp, game_name=slug,
+                             exe_name=None)
+    else:
+        kb = dict(KEYBINDS.get(slug, {}))
     kb.update(KEYBIND_PATCHES.get(slug, {}))
     bound = bound_literals(kb) if kb else frozenset()
 
