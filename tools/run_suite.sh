@@ -15,7 +15,7 @@
 set -euo pipefail
 cd "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
-SUITE_FLOOR="${SUITE_FLOOR:-718}"
+SUITE_FLOOR="${SUITE_FLOOR:-745}"
 OUT="$(mktemp)"
 trap 'rm -f "$OUT"' EXIT
 
