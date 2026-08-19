@@ -45,20 +45,34 @@ scratchpads `r11-results.json` … `r15-results.json` (r15's is in the
   STOP and checkpoint with him BEFORE the e2e.
 
 **ACTIVE — resume from the first unchecked item:**
-- [ ] I1 qa-v2 exempts caseless key tokens (r15 #4, MAJOR) — §3
-- [ ] I2 writer strips action-less combo halves (r15 #5, MAJOR) — §3
-- [ ] I3 tests-only: H2 slug-half OW discriminator pins (r15 #6,
-  MAJOR) — §3
-- [ ] I4 fix_v1_to_v2 naive-timezone guard (r15 #7, minor) — §3
-- [ ] I5 safe_session_id length bound (r15 #8, minor) — §3
-- [ ] I6 tests-only: H6 composition tail-arm + chat-head pins
-  (r15 #9, minor) — §3
-- [ ] I7 H5 ruling: gone-is-gone + rename coaching line
-  (r15 #1≡#2≡#3≡#10, RULED) — §3
-- [ ] I8 fix_sync_from_v1 portable delivery copy (RULED) — §3
-- [ ] Post-I8: sweep results recorded per commit (§2); new SUITE_FLOOR
-  measured+pinned (passed − 4, run_suite.sh + FLIP_RUNBOOK §6b); full
-  gate green Mac AND VM; tree-verify
+- [x] I1 qa-v2 exempts caseless key tokens (r15 #4, MAJOR) — LANDED
+  `bfd96b7` (fail-first at ce26148; Mac gate 752 passed)
+- [x] I2 writer strips action-less combo halves (r15 #5, MAJOR) —
+  LANDED `348c93d` (fail-first at ce26148; hostile mutant killed; Mac
+  gate 755 passed)
+- [x] I3 tests-only: H2 slug-half OW discriminator pins (r15 #6,
+  MAJOR) — LANDED `843a2ec` (exact-mutant proof; Mac gate 757)
+- [x] I4 fix_v1_to_v2 naive-timezone guard (r15 #7, minor) — LANDED
+  `ee35d3f` (fail-first at ce26148, in-test TZ forcing; sweep FOUND +
+  fixed the unguarded retrim_v2_session sibling; Mac gate 759)
+- [x] I5 safe_session_id length bound (r15 #8, minor) — LANDED
+  `7169922` (fail-first at ce26148; Mac gate 761)
+- [x] I6 tests-only: H6 composition tail-arm + chat-head pins
+  (r15 #9, minor) — LANDED `a93847d` (exact mutant + head-arm mutant
+  both killed, split both ways; Mac gate 763)
+- [x] I7 H5 ruling: gone-is-gone + rename coaching line
+  (r15 #1≡#2≡#3≡#10, RULED) — LANDED `f3f131e` (coaching string
+  fail-first at ce26148; same-path ruling pin; rule-5 query sweep in
+  the commit; Mac gate 765)
+- [x] I8 fix_sync_from_v1 portable delivery copy (RULED) — LANDED
+  `fd3ea1f` (H9c twin unstubbed; fail-first = the on-record
+  pre-82c86da VM CalledProcessError; Mac gate 765)
+- [x] Post-I8: sweep results recorded per commit (§2); SUITE_FLOOR
+  761 pinned `35a0433` (765 passed − 4, run_suite.sh + FLIP_RUNBOOK
+  §6b); BOTH host gates green — Mac 765/761, VM 765/761 (509.5s,
+  2026-08-19; the unstubbed I8 twin passed on Linux, the I4 naive-tz
+  pin passed on the non-IST host); tree-verify clean (no MUTATION
+  markers, only plan-ledger edit + pre-existing junk)
 - [ ] Review iteration 16 (§4; headroom check with Adnaan BEFORE the
   launch; if not quiet: fix in-iteration per §4, then iteration 17)
 - [ ] Review iteration 17 (ONLY if 16 was not quiet; same rules)
