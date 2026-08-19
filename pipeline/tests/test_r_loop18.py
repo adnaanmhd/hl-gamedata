@@ -216,3 +216,44 @@ def test_retranslate_metadata_read_is_typed_belt_and_braces(tmp_path):
     with pytest.raises(fixmod.FixFailed) as ei:
         fixmod.retranslate_from_sidecars(work, ledger_game="kamla")
     assert "metadata.json unreadable" in str(ei.value)
+
+
+# ------- r18 #6 (L3, tests-only): K2's keybind-fallback anchor pinned
+# ------- where it is live
+
+
+@needs_ffmpeg
+def test_v1_unusable_keybind_falls_back_on_the_ledger_slug(tmp_path):
+    """r18 #6 (L3, tests-only): every fix_v1_to_v2 test used a USABLE
+    keybind or NO keybind file, and all used kamla — so K2's
+    game_name=slug anchor and resolve_keybind's parsed-but-unusable
+    fallback were no-ops across the whole cohort: mutating the anchor
+    to game_name=None passed the FULL arming gate at 793/789
+    (finder-proven, byte-identical summary) while every outer_wilds
+    v1 conversion with an unusable keybind (VK codes, nulls — the
+    r-loop-7 population) shipped ALL movement presses deleted with
+    their actions orphaned, checker-green. The I3 recipe applied at
+    this site: OW ledger slug + DEGRADED canonical metadata (kills the
+    metadata-anchored restatement too, the r14 H2 regression shape) +
+    a parsed-but-unusable keybind at the work root. KEYBIND_PATCHES
+    (outer_wilds) is live in this cohort for the first time.
+    Mutation-proofed with the finder's EXACT game_name=None mutant in
+    a fixed-tree scratch copy (session scratchpad): it fails this
+    pin."""
+    from pipeline import fix as fixmod
+    from pipeline.tests.test_r_loop15 import _v1_work
+    work = _v1_work(tmp_path, "2026-08-10T15:34:03Z", "l3owkb")
+    s = json.loads((work / "session.json").read_text())
+    s["canonical"]["game"] = 12345          # degraded, like r15 #6/I3
+    (work / "session.json").write_text(json.dumps(s))
+    (work / "keybind.json").write_text(json.dumps({"look_up": 12345}))
+    note = fixmod.fix_v1_to_v2(work, "outer_wilds")
+    assert "converted v1 -> v2" in note
+    rows = _v1_rows(work)
+    for key, action in (("W", "move_up"), ("A", "move_left"),
+                        ("S", "move_down")):
+        hit = [r for r in rows if action in r["input_actions"]]
+        assert hit, f"the {action} rows must exist"
+        assert all(key in r["input_keys"].split("|") for r in hit), \
+            f"an unusable keybind must fall back to the LEDGER slug's " \
+            f"built-in — {key} presses were deleted (orphan actions)"
