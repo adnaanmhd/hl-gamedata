@@ -88,67 +88,71 @@ findings docs are the durable record).
   (payment-surface); #12/#13 pre-existing degrade-doctrine crashers.
 
 **ACTIVE — resume from the first unchecked item:**
-- [ ] **M-set, VETTED (Adnaan ruled 2026-08-20 at the
-  pre-implementation ask: M4 fix now, M5 fix now); pre-fix ref for
-  all fail-first proofs = `06ecd72` (scratch copy in the session
-  scratchpad); implement in this order, full §2 discipline per item:**
-  - [ ] M2 (r19 #2): has_raw_sidecars ALSO requires a parseable
-    recording.started_at_utc (retranslate's own _utc test) — "usable"
-    becomes what the consumer actually needs. Lands FIRST (M1/M5
-    consume the gate). L2's usable-control tests may need a parseable
-    started_at_utc added — a cohort update, recorded.
-  - [ ] M1 (r19 #1 BLOCKER + #4≡#6 + #10): fix_v1_to_v2 stamp/trim
-    block. Sidecar-usable route NEVER fabricates the head-offset
-    contract: unusable trim → typed FixFailed naming the field;
-    unusable stamp + usable trim → created RECOVERED = started_at +
-    head_cut (ground truth, exact). No-sidecar route: junk trim
-    VALUE/shape keeps a parseable stamp at head 0.0 (nested parse,
-    r19 #10), unusable stamp keeps L1's omit-and-synthesize;
-    OverflowError joins the except tuple (r19 #4≡#6). STATED
-    DEVIATION: the finder's matching-based head recovery (the
-    _seed_shift_record machinery) NOT adopted — new machinery landing
-    effectively unreviewed; the typed refusal is the finder's own
-    unrecoverable fallback and the data-safe end state; recovery is a
-    post-checkpoint enhancement if Adnaan wants it.
-  - [ ] M3 (r19 #3): ragged v1 rows pad to header width in
-    fix_v1_to_v2 (a missing cell degrades to '', which every
-    downstream parse already handles).
-  - [ ] M4 (r19 #5, payment-surface, RULED fix-now): ledger.supersede
-    with falsy new_md5 over a real stored md5 PRESERVES
-    uploaded/accepted stamps + duration_raw_s + tree seal (every
-    other reset stays); the download-time deferral owns byte
-    adjudication (changed bytes still clear via the prev_md5
-    breadcrumb + ZIP_ADJ_CHANGED). Both committed r13 pins must stay
-    green; add the ordinary-path regression (settled sheet →
-    identical-bytes re-upload → download → next sheet counts nothing).
-  - [ ] M5 (r19 #11, RULED fix-now): validate aux['has_raw'] routes
-    through fix.has_raw_sidecars — the stored fixable field (and so
-    the reject labels) become truthful; unusable-sidecar unmapped
-    FAILs bin 3 directly.
-  - [ ] M6 (r19 #12): fix_sessionjson_recompute catches OverflowError
-    around the ended/astimezone arithmetic → the parsed_ok=False
-    degrade (synthesize from now).
-  - [ ] M7 (r19 #13): _QA_STR_MAP maps 'session.json unreadable' +
-    'session.json is not a JSON object' → STR_SJ_INVALID (entry-11
-    semantics preserved: STR_SJ_INVALID never routes to retranslate);
-    stale validate.py:104-113 rationale updated for these members.
+- **M-set, VETTED (Adnaan ruled 2026-08-20 at the pre-implementation
+  ask: M4 fix now, M5 fix now); pre-fix ref for all fail-first proofs
+  = `06ecd72`; every landed fix fail-first-proven there + per-commit
+  Mac gate; iteration 20 reviews the set:**
+  - [x] M2 (r19 #2, `a6af11d`, gate 805): has_raw_sidecars ALSO
+    requires a parseable recording.started_at_utc (shared module _utc
+    — the consumer's own parse); retranslate's non-dict-recording
+    AttributeError sibling fixed in the same commit; two usable-
+    control test cohorts updated (recorded in the commit).
+  - [x] M1 (r19 #1 BLOCKER + #4≡#6 + #10, `cb8cfd4`, gate 810):
+    fix_v1_to_v2 stamp/trim resolution runs BEFORE any write and
+    never fabricates the head-offset contract. Sidecar-usable route:
+    unusable trim → typed FixFailed naming canonical.trim; unusable
+    stamp + usable trim → created RECOVERED = started_at + head_cut
+    (fixlog note says so). No-sidecar route: junk trim VALUE/shape
+    keeps a parseable stamp at head 0.0 (r19 #10); unusable stamp
+    keeps omit-and-synthesize. OverflowError joins every guard
+    (r19 #4≡#6). Sidecar probe _v1_sidecar_started: M2 usability rule
+    at root AND raw/, each file located INDEPENDENTLY (the
+    crash-between-moves split). STATED DEVIATION: the finder's
+    matching-based head recovery (_seed_shift_record machinery) NOT
+    adopted — new machinery would land effectively unreviewed; the
+    typed refusal is the finder's own unrecoverable fallback;
+    a post-checkpoint enhancement if Adnaan wants it.
+  - [x] M3 (r19 #3, `cb42dae`, gate 811): ragged v1 rows pad to the
+    header width in fix_v1_to_v2; the other eight _read_csv consumers
+    verified shielded (verdicts in the commit).
+  - [x] M4 (r19 #5, payment-surface, RULED fix-now, `e9f913b`, gate
+    814): ledger.supersede with falsy new_md5 over a real stored md5
+    PRESERVES uploaded/accepted stamps + duration_raw_s + tree seal
+    (every other reset stays); the download-time deferral owns byte
+    adjudication (changed bytes still clear via breadcrumb +
+    ZIP_ADJ_CHANGED). Both r13 zip pins green; ordinary-path
+    regression + changed-bytes and real-md5 controls added.
+  - [x] M5 (r19 #11, RULED fix-now, `6129872`, gate 816): validate
+    aux['has_raw'] routes through fix.has_raw_sidecars — the stored
+    fixable field and the reject labels become truthful; validated
+    end-to-end through a real validate_session run.
+  - [x] M6+M7 (r19 #12 + #13, `78e384e`, gate 818): recompute
+    degrades on OverflowError (incl. the negative-offset astimezone
+    sibling the finder's line missed, guarded in the same try);
+    'session.json unreadable' + 'is not a JSON object' map to
+    STR_SJ_INVALID (entry-11 semantics preserved); stale rationale
+    comment updated.
   - [ ] M8 (r19 #7/#8/#9, tests-only): failing-side pins for L1's
     non-dict-canonical arm, L1's str() coercion, and L2's
     errors='replace' read (each deletion/revert mutant proven
-    gate-green at 802/802 by the finders — kill them).
+    gate-green at 802/802 by the finders — kill them, mutation-proof
+    in a fixed-tree scratch copy).
   - [ ] Then: floor re-pin (passed − 4) in run_suite.sh + FLIP_RUNBOOK
-    §6b, BOTH host gates, tree-verify.
+    §6b, BOTH host gates, tree-verify, §0 tick.
 - [ ] Review iteration 20 (headroom check with Adnaan BEFORE the
-  launch — if 19 was quiet, re-confirm at that ask that 20 still runs
-  as a CONFIRMATION pass per the ruling): reviews the M set (or
-  confirms quiet). If not quiet: fix its confirmed set (N-set), floor
-  re-pin, both host gates, tree-verify — those fixes land
-  landed-but-UNREVIEWED, honestly labelled.
-- [ ] **CHECKPOINT: STOP after iteration 20** (or after 19's fixes if
-  Adnaan aborts 20 at the headroom ask). Report verdict-first with
-  the full payment-surface list (§6). The independent e2e and THE
-  FLIP run ONLY on his explicit go, in a later session — do NOT
-  start them.
+  launch): reviews the M set. **AMENDED RULING (Adnaan, 2026-08-20,
+  mid-M-set — supersedes the fix-in-session arm for 20): if 20 is NOT
+  quiet, STOP — do NOT implement the N-set in this session.** Instead:
+  generate the findings doc + commit the snapshot as usual, SYNTHESIZE
+  the confirmed findings and their vetted fix specs (N-set) into this
+  plan (§0/§3, deviations and payment-surface flags stated), and write
+  a kickoff prompt for a NEW session to execute them (the
+  R19_EXEC_KICKOFF_PROMPT.md pattern).
+- [ ] **CHECKPOINT: STOP after iteration 20 either way** (or after
+  19's fixes if Adnaan aborts 20 at the headroom ask). Report
+  verdict-first with the full payment-surface list (§6). The
+  independent e2e and THE FLIP run ONLY on his explicit go, in a
+  later session — do NOT start them.
 
 ---
 
@@ -274,14 +278,16 @@ arise, deviations stated inline — the K/L pattern.
   per-launch headroom ask (below) is Adnaan's standing abort lever:
   if 19 was quiet, RESTATE at the 20 ask that it will be a
   confirmation pass, so he can redirect.
-- **Not-quiet handling (RULED, carried over): fix in-iteration** —
-  the executor vets fix specs from the findings (deviations stated),
-  implements with the full §2 discipline (fail-first, sweeps, gates),
-  and the NEXT iteration reviews those fixes. Payment-surface changes
-  and anything contradicting a standing ruling are surfaced to Adnaan
-  BEFORE implementing. If 20 is not quiet: fix its confirmed set,
-  then STOP and report the fixes as landed-but-unreviewed, honestly
-  labelled.
+- **Not-quiet handling: fix in-iteration for 19** — the executor vets
+  fix specs from the findings (deviations stated), implements with the
+  full §2 discipline (fail-first, sweeps, gates), and iteration 20
+  reviews those fixes. Payment-surface changes and anything
+  contradicting a standing ruling are surfaced to Adnaan BEFORE
+  implementing. **For 20 (AMENDED, Adnaan 2026-08-20 mid-M-set,
+  superseding the fix-its-confirmed-set arm): if not quiet, STOP —
+  no N-set implementation in this session. Synthesize the confirmed
+  findings + vetted N-set specs into this plan and write a
+  continuation kickoff prompt for a new session.**
 - Script per iteration: copy the PREVIOUS committed snapshot
   (`tools/review/flip-review-iter18.js` for iteration 19) to the
   session scratchpad as `flip-review-iter<N>.js`. Retarget the
