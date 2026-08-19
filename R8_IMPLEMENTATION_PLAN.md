@@ -66,9 +66,11 @@ results incl. refuter verdicts: session scratchpads
   (suite 721/721; both mutants proven caught vs HEAD scratch)
 - [ ] G9 tests-only: split probed-vs-claimed in the r12 #7 edge tests
   (r13 #12) — §3
-- [ ] Post-G9: sibling-site sweep results recorded (§2 discipline); new
-  SUITE_FLOOR measured+pinned (passed − 4, run_suite.sh + FLIP_RUNBOOK
-  §6b); full gate green Mac AND VM; tree-verify
+- [x] Post-G9: sibling-site sweep results recorded (§2 discipline — in
+  every G commit message); new SUITE_FLOOR 718 pinned (722 − 4,
+  `a5fc1a0`); full gate green Mac AND VM (both 722/722, floor 718;
+  VM run 2026-08-19, 442.9s); tree-verify clean (no MUTATION strings,
+  no stray edits; pre-existing junk untouched)
 - [ ] Review iteration 14 (fix-in-iteration per §4; regressions lane
   targets the G-commits; check usage-credit headroom with Adnaan BEFORE
   launching)
