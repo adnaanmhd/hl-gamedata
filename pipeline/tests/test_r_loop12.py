@@ -472,12 +472,14 @@ def test_rebuild_reset_holds_the_run_lock(cfg, monkeypatch):
     parachute.write_bytes(b"x" * 2048)
     monkeypatch.setenv("HL_PIPELINE_HOME", str(cfg.home))
     seen: dict = {}
-    real = reports.pending_daily_send
+    # G6 (r13 #9) moved the tools onto pending_daily_send_detail — the
+    # spy follows the interlock's real call site
+    real = reports.pending_daily_send_detail
 
     def spy(c):
         seen["lock_held"] = cfg.lock_dir.exists()
         return real(c)
-    monkeypatch.setattr(reports, "pending_daily_send", spy)
+    monkeypatch.setattr(reports, "pending_daily_send_detail", spy)
     monkeypatch.setattr(_sys, "argv", ["recal_rebuild_reset.py", "--yes",
                                        "--backup", str(parachute)])
     assert reset.main() == 0

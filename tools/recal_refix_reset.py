@@ -138,17 +138,19 @@ def _locked_main(cfg, args) -> int:
     # crediting deleted rows, and the re-run's deterministic same-id
     # children then get counted a second time. Same doctrine as the
     # run-lock check: refuse, loudly, before any Drive/DB action.
-    from pipeline.reports import pending_daily_send
-    pending_day = pending_daily_send(cfg)
-    if pending_day:
+    # Kind-specific diagnosis (r13 #9): same text as recal_rebuild_reset
+    # via the shared PENDING_SEND_GUIDANCE table — the old daily-only
+    # text prescribed a driver resume that refuses regen days and skips
+    # wedged days by design.
+    from pipeline.reports import (PENDING_SEND_GUIDANCE,
+                                  pending_daily_send_detail)
+    pending = pending_daily_send_detail(cfg)
+    if pending:
+        day, kind = pending
+        why, how = PENDING_SEND_GUIDANCE[kind]
         print(json.dumps({
-            "ABORT": "a daily send is pending resume",
-            "day": pending_day,
-            "why": ("reports/<day>/.daily-counted.json exists without its "
-                    "settled .sent+doc_sent markers — the resume would "
-                    "credit rows this tool is about to delete"),
-            "how": ("let the driver finish the resume (or reconcile the "
-                    "day by hand), then re-run"),
+            "ABORT": "a daily/regen send is pending resume",
+            "day": day, "kind": kind, "why": why, "how": how,
         }, indent=1))
         return 2
     ledger = Ledger(cfg.ledger_path)

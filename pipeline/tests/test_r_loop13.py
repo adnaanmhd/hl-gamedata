@@ -318,6 +318,79 @@ def test_edge_flags_judged_on_probed_not_claimed_duration():
         "2s before the REAL end is a fixable tail edge, not mid-clip"
 
 
+# ------- r13 #9 (G6): kind-specific pending-interlock diagnosis
+
+def test_pending_interlock_diagnoses_a_daily_record(cfg, monkeypatch,
+                                                    capsys):
+    """Control kind: the plain daily case keeps its original remedy."""
+    reset, parachute, _sys = _rebuild_tool(cfg, monkeypatch)
+    rd = cfg.reports_dir / "2026-08-16"
+    rd.mkdir(parents=True)
+    (rd / ".daily-counted.json").write_text(
+        '{"counted": [], "accepted": []}')
+    monkeypatch.setattr(_sys, "argv", ["recal_rebuild_reset.py", "--yes",
+                                       "--backup", str(parachute)])
+    assert reset.main() == 2
+    out = capsys.readouterr().out
+    assert '"kind": "daily"' in out
+    assert "let the driver finish the resume" in out
+
+
+def test_pending_interlock_diagnoses_a_wedged_day(cfg, monkeypatch,
+                                                  capsys):
+    """r13 #9: a wedged day is SKIPPED by the driver's scan by design —
+    'let the driver finish the resume' prescribed a resume that will
+    never run. The remedy is the human one."""
+    reset, parachute, _sys = _rebuild_tool(cfg, monkeypatch)
+    rd = cfg.reports_dir / "2026-08-16"
+    rd.mkdir(parents=True)
+    (rd / ".daily-counted.json").write_text(
+        '{"counted": [], "accepted": []}')
+    (rd / ".wedged").write_text('{"why": "x", "alerted": false}')
+    monkeypatch.setattr(_sys, "argv", ["recal_rebuild_reset.py", "--yes",
+                                       "--backup", str(parachute)])
+    assert reset.main() == 2
+    out = capsys.readouterr().out
+    assert '"kind": "wedged"' in out
+    assert "rm reports/<day>/.wedged" in out
+
+
+def test_pending_interlock_diagnoses_a_regen_record(cfg, monkeypatch,
+                                                    capsys):
+    """r13 #9 (proven by execution in the finding): with ONLY a
+    .regen-v2-counted.json present, the tools printed the daily-record
+    text — naming a file that does not exist and a resume the driver
+    REFUSES while the regen record stands. Driven through the OTHER
+    tool (recal_refix_reset) so both call sites are exercised."""
+    from pipeline.tests.test_r_loop9 import _refix_rc
+    rd = cfg.reports_dir / "2026-08-15"
+    rd.mkdir(parents=True)
+    (rd / ".regen-v2-counted.json").write_text(
+        '{"counted": [], "accepted": []}')
+    assert _refix_rc(cfg, monkeypatch) == 2
+    out = capsys.readouterr().out
+    assert '"kind": "regen"' in out
+    assert "recal_regen_sheets --send" in out
+    assert ".daily-counted.json" not in out, \
+        "must not name a file that does not exist"
+
+
+def test_pending_interlock_diagnoses_an_unreadable_dir(cfg, monkeypatch,
+                                                       capsys):
+    """r13 #9, fail-closed sentinel kind: the remedy is fixing the
+    reports dir, not waiting on any resume."""
+    from pipeline.tests.test_r_loop9 import _refix_rc
+    cfg.reports_dir.mkdir(parents=True, exist_ok=True)
+    cfg.reports_dir.chmod(0o000)
+    try:
+        assert _refix_rc(cfg, monkeypatch) == 2
+    finally:
+        cfg.reports_dir.chmod(0o755)
+    out = capsys.readouterr().out
+    assert '"kind": "unreadable"' in out
+    assert "fix the reports dir" in out
+
+
 # ------- r13 #8 (G5): rebuild-reset payment-evidence refusal + memory
 # ------- (ruling C extended to the rebuild tool — payment-surface)
 

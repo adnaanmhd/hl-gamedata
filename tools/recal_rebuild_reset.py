@@ -72,19 +72,20 @@ def _locked_main(cfg, args) -> int:
     if not bk.exists() or bk.stat().st_size < 1024:
         print(f"ABORT: backup {bk} missing/empty — take the parachute first")
         return 2
-    # PENDING-DAILY interlock (r-loop 9 #7) — same rationale and shape as
+    # PENDING-SEND interlock (r-loop 9 #7) — same rationale and shape as
     # recal_refix_reset: never tear rows down under a resumable send.
-    from pipeline.reports import pending_daily_send
-    pending_day = pending_daily_send(cfg)
-    if pending_day:
+    # Kind-specific diagnosis (r13 #9): the old daily-only text named a
+    # file that does not exist and a remedy the driver can never
+    # perform for regen-pending and wedged days.
+    from pipeline.reports import (PENDING_SEND_GUIDANCE,
+                                  pending_daily_send_detail)
+    pending = pending_daily_send_detail(cfg)
+    if pending:
+        day, kind = pending
+        why, how = PENDING_SEND_GUIDANCE[kind]
         print(json.dumps({
-            "ABORT": "a daily send is pending resume",
-            "day": pending_day,
-            "why": ("reports/<day>/.daily-counted.json exists without its "
-                    "settled .sent+doc_sent markers — the resume would "
-                    "credit rows this tool is about to reset/delete"),
-            "how": ("let the driver finish the resume (or reconcile the "
-                    "day by hand), then re-run"),
+            "ABORT": "a daily/regen send is pending resume",
+            "day": day, "kind": kind, "why": why, "how": how,
         }, indent=1))
         return 2
     ledger = Ledger(cfg.ledger_path)

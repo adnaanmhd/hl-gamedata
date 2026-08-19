@@ -472,8 +472,8 @@ def _parse_ts(v: str | None) -> datetime | None:
 # pull its root back onto every future sheet either.
 GAME_COL = {"kamla": "kamla", "outer_wilds": "ow"}
 
-def pending_daily_send(cfg) -> str | None:
-    """The day name of any send whose durable record has not fully
+def pending_daily_send_detail(cfg) -> tuple[str, str] | None:
+    """(day, kind) of any send whose durable record has not fully
     settled, else None. Two record kinds, same doctrine: the daily
     send's .daily-counted.json (pending = missing .sent marker, or .sent
     without doc_sent; r-loop 9 #7) and recal_regen_sheets --send's
@@ -487,24 +487,72 @@ def pending_daily_send(cfg) -> str | None:
     get counted a second time. Fails CLOSED (r-loop 12 #13): 'could not
     check' must never read as 'checked clean' in a teardown gate, so an
     unreadable reports dir returns the truthy UNKNOWN sentinel and the
-    callers refuse."""
+    callers refuse.
+
+    `kind` ∈ {"daily", "wedged", "regen", "unreadable"} (r13 #9): the
+    hardcoded daily-record diagnosis named a file that does not exist
+    and a resume the driver can never perform for regen-pending and
+    wedged days — the reset tools print PENDING_SEND_GUIDANCE[kind] so
+    the ABORT prescribes a remedy that can actually settle the state.
+    "wedged" = daily record present + .wedged present (skipped by the
+    driver's scan by design; only a human settles it)."""
     day_dirs = _report_day_dirs(cfg)
     if day_dirs is None:
-        return _UNREADABLE_SENTINEL
+        return _UNREADABLE_SENTINEL, "unreadable"
     for d in day_dirs:
         rec = d / ".daily-counted.json"
+        daily_kind = "wedged" if (d / ".wedged").exists() else "daily"
         if rec.is_file():
             if not (d / ".sent").exists():
-                return d.name
+                return d.name, daily_kind
             try:
                 if not json.loads(rec.read_text()).get("doc_sent"):
-                    return d.name
+                    return d.name, daily_kind
             except (OSError, json.JSONDecodeError):
-                return d.name
+                return d.name, daily_kind
         if (d / ".regen-v2-counted.json").is_file() and \
                 not (d / ".regen-v2-done").exists():
-            return d.name
+            return d.name, "regen"
     return None
+
+
+def pending_daily_send(cfg) -> str | None:
+    """Thin back-compat wrapper — the day name (or the truthy UNKNOWN
+    sentinel) of any pending send, else None. See
+    pending_daily_send_detail (r13 #9) for the doctrine and kinds."""
+    det = pending_daily_send_detail(cfg)
+    return det[0] if det else None
+
+
+# kind -> (why, how) for the reset tools' pending-send ABORT (r13 #9).
+# ONE source so both tools print the SAME text; each remedy is one the
+# named state can actually reach (the old daily-only text told the
+# operator to wait for a driver resume that refuses regen days and
+# skips wedged days by design).
+PENDING_SEND_GUIDANCE = {
+    "daily": (
+        "reports/<day>/.daily-counted.json exists without its settled "
+        ".sent+doc_sent markers — the resume would credit rows this "
+        "tool is about to reset/delete",
+        "let the driver finish the resume (or reconcile the day by "
+        "hand), then re-run"),
+    "wedged": (
+        "reports/<day> is WEDGED (.wedged beside its counted record) — "
+        "the driver's scan skips it by design; no resume will ever "
+        "settle it",
+        "reconcile the day by hand, then rm reports/<day>/.wedged and "
+        "re-run"),
+    "regen": (
+        "reports/<day>/.regen-v2-counted.json exists without its "
+        ".regen-v2-done marker — a recal_regen_sheets --send is "
+        "mid-flight and resumes verbatim from that record",
+        "finish `recal_regen_sheets --send` (the driver refuses "
+        "dailies while this record exists), then re-run"),
+    "unreadable": (
+        "the reports dir could not be listed — 'could not check' must "
+        "never read as 'checked clean' in a teardown gate",
+        "fix the reports dir (permissions/EMFILE class), then re-run"),
+}
 
 
 _UNREADABLE_SENTINEL = "UNKNOWN (reports dir unreadable — refusing to " \
