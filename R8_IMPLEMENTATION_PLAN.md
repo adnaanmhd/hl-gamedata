@@ -72,12 +72,72 @@ findings docs are the durable record).
   full §6 list, L1–L3 labelled landed-but-unreviewed). **Adnaan ruled
   2026-08-20: run TWO more iterations** — see §4.
 
+**DONE (cont.):**
+- Iteration 19 RAN 2026-08-20 (headroom OK'd; FIRST of the two RULED
+  extra passes) — **NOT QUIET: 13 raised → 13 confirmed (1 blocker /
+  8 major / 4 minor), 0 killed** (run `wf_215a5af0-f51`, 33 agents, 0
+  errors, ~3.81M tokens; `R19_FINDINGS.md` + snapshot committed
+  `b72984e`; machine results `r19-results.json` in the session
+  scratchpad). Clusters (doc numbering): #4≡#6 OverflowError past
+  L1's except net; #1 BLOCKER + #10 = L1's stamp/trim degrade arms
+  FABRICATE head-offset facts the sidecar verify/retranslate acts on
+  (silent delivered desync or wrongful reject); #2/#11/#9 = L2's gate
+  (semantic gap / aux drift / encoding-arm coverage); #3 ragged-row
+  IndexError; #7/#8/#9 = the r15 #6 arming-gate-invisible class
+  inside the L set; #5 PRE-EXISTING zip-supersede double-pay
+  (payment-surface); #12/#13 pre-existing degrade-doctrine crashers.
+
 **ACTIVE — resume from the first unchecked item:**
-- [ ] Review iteration 19 (headroom check with Adnaan BEFORE the
-  launch): reviews the UNREVIEWED L set as prime regression target.
-  If not quiet: vet + fix the confirmed set (M-set) with full §2
-  discipline, then floor re-pin (passed − 4), both host gates,
-  tree-verify.
+- [ ] **M-set, VETTED (Adnaan ruled 2026-08-20 at the
+  pre-implementation ask: M4 fix now, M5 fix now); pre-fix ref for
+  all fail-first proofs = `06ecd72` (scratch copy in the session
+  scratchpad); implement in this order, full §2 discipline per item:**
+  - [ ] M2 (r19 #2): has_raw_sidecars ALSO requires a parseable
+    recording.started_at_utc (retranslate's own _utc test) — "usable"
+    becomes what the consumer actually needs. Lands FIRST (M1/M5
+    consume the gate). L2's usable-control tests may need a parseable
+    started_at_utc added — a cohort update, recorded.
+  - [ ] M1 (r19 #1 BLOCKER + #4≡#6 + #10): fix_v1_to_v2 stamp/trim
+    block. Sidecar-usable route NEVER fabricates the head-offset
+    contract: unusable trim → typed FixFailed naming the field;
+    unusable stamp + usable trim → created RECOVERED = started_at +
+    head_cut (ground truth, exact). No-sidecar route: junk trim
+    VALUE/shape keeps a parseable stamp at head 0.0 (nested parse,
+    r19 #10), unusable stamp keeps L1's omit-and-synthesize;
+    OverflowError joins the except tuple (r19 #4≡#6). STATED
+    DEVIATION: the finder's matching-based head recovery (the
+    _seed_shift_record machinery) NOT adopted — new machinery landing
+    effectively unreviewed; the typed refusal is the finder's own
+    unrecoverable fallback and the data-safe end state; recovery is a
+    post-checkpoint enhancement if Adnaan wants it.
+  - [ ] M3 (r19 #3): ragged v1 rows pad to header width in
+    fix_v1_to_v2 (a missing cell degrades to '', which every
+    downstream parse already handles).
+  - [ ] M4 (r19 #5, payment-surface, RULED fix-now): ledger.supersede
+    with falsy new_md5 over a real stored md5 PRESERVES
+    uploaded/accepted stamps + duration_raw_s + tree seal (every
+    other reset stays); the download-time deferral owns byte
+    adjudication (changed bytes still clear via the prev_md5
+    breadcrumb + ZIP_ADJ_CHANGED). Both committed r13 pins must stay
+    green; add the ordinary-path regression (settled sheet →
+    identical-bytes re-upload → download → next sheet counts nothing).
+  - [ ] M5 (r19 #11, RULED fix-now): validate aux['has_raw'] routes
+    through fix.has_raw_sidecars — the stored fixable field (and so
+    the reject labels) become truthful; unusable-sidecar unmapped
+    FAILs bin 3 directly.
+  - [ ] M6 (r19 #12): fix_sessionjson_recompute catches OverflowError
+    around the ended/astimezone arithmetic → the parsed_ok=False
+    degrade (synthesize from now).
+  - [ ] M7 (r19 #13): _QA_STR_MAP maps 'session.json unreadable' +
+    'session.json is not a JSON object' → STR_SJ_INVALID (entry-11
+    semantics preserved: STR_SJ_INVALID never routes to retranslate);
+    stale validate.py:104-113 rationale updated for these members.
+  - [ ] M8 (r19 #7/#8/#9, tests-only): failing-side pins for L1's
+    non-dict-canonical arm, L1's str() coercion, and L2's
+    errors='replace' read (each deletion/revert mutant proven
+    gate-green at 802/802 by the finders — kill them).
+  - [ ] Then: floor re-pin (passed − 4) in run_suite.sh + FLIP_RUNBOOK
+    §6b, BOTH host gates, tree-verify.
 - [ ] Review iteration 20 (headroom check with Adnaan BEFORE the
   launch — if 19 was quiet, re-confirm at that ask that 20 still runs
   as a CONFIRMATION pass per the ruling): reviews the M set (or
