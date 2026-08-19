@@ -80,7 +80,7 @@ b. **Resize E2 → C2D.** Pre-flight was VERIFIED against the project's own API
    **Run the suite through the gate, never as a bare `pytest; echo $?`:**
 
    ```
-   SUITE_FLOOR=798 bash tools/run_suite.sh \
+   SUITE_FLOOR=817 bash tools/run_suite.sh \
        --with numpy==2.4.6 --with opencv-python-headless==5.0.0.93 \
        --with rerun-sdk==0.36.0
    ```
