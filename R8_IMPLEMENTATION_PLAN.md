@@ -220,12 +220,61 @@ findings docs are the durable record).
     alone (it reviews the git tree, not the VM); the VM gate runs the
     moment auth returns and MUST be green before any O-set fix lands
     or the checkpoint claims both-hosts green.**
-- [x] Iteration 21 LAUNCHED automatically (per the NEW RULING;
-  script: committed iter20 snapshot retargeted at N1-N5 + floor,
-  accepted entries 96-100 appended, 17/90/92/94 amended, suite
-  numbers 840/836; 7 lanes, 2-vote refute). Results processing, then
-  the ruled branch: not quiet → O-set fixed in-iteration → iteration
-  22 = THE CHECKPOINT; quiet → the independent e2e launches.
+- [x] Iteration 21 RAN 2026-08-20 (automatic per the NEW RULING) —
+  **NOT QUIET: 7 raised → 7 confirmed (0 blockers / 3 major / 4
+  minor), 0 killed** (run `wf_54f4e364-8b9`, 21 agents, 0 errors,
+  ~2.95M tokens; `R21_FINDINGS.md` + snapshot committed `25528f6`;
+  machine results `r21-results.json` in the session scratchpad).
+  gcloud auth RETURNED post-launch — the pending N-set VM gate was
+  launched immediately (before any O-set fix lands, honoring the
+  recorded deviation rule).
+- **O-set, vetted from R21_FINDINGS.md (pre-fix ref for all
+  fail-first proofs = `25528f6`, code HEAD `f66d3ed`; every fix
+  fail-first-proven there + per-commit Mac gate; iteration 22
+  reviews the set as THE CHECKPOINT pass):**
+  - [ ] O1 (r21 #1, payment-surface): reports._stamp guards the
+    ACCEPTED column on its three non-CAS arms (unconditional,
+    recorded-'', CAS-miss-now-'') — re-read the row and skip LOUDLY
+    when its current state is not DELIVERED/REJECTED (a '' writer
+    reset the generation mid-window; the mark would land on the next
+    generation and strand its delivered hours — the N3 class one
+    step downstream). uploaded_reported_at keeps today's behavior
+    (skipping it would re-open the r12 #1/#2 double-pay). Direction
+    derived from N3's ruled labels doctrine; FLAGGED for checkpoint.
+  - [ ] O2 (r21 #2): the synthesized stamp stays OUT of the live
+    head-offset contract — fix_sessionjson_recompute records a
+    created-synthesized marker (translation_report.json via the
+    _locked_report helpers, the file the verify already consults for
+    shift_us) whenever it synthesizes rather than
+    preserves/re-emits; _verify_against_raw warn-skips on the
+    marker; retranslate_from_sidecars raises its typed
+    cannot-derive refusal naming the synthesis. DIRECTION: the
+    deliver-not-reject arm (the M1 warn-skip precedent — the
+    sidecar-less twin delivers the same artifacts); the finder
+    offered refuse-typed as the alternative — checkpoint material,
+    stated.
+  - [ ] O3 (r21 #3 + #4≡#6): N1's head-cut gate completed — the
+    usability test gains the physical bound (finite AND >= 0; a
+    negative head is present-but-junk evidence), and the overflow
+    disambiguation gains the sane-head bound (366 days): the stamp
+    is blamed only when the head is representable AND sane;
+    a constructible-but-absurd head (the 2.5e11..8.64e13s band) is
+    the junk side — no-sidecar keeps the good stamp (r19 #10),
+    sidecar takes the truthful canonical.trim refusal.
+  - [ ] O4 (r21 #5): the quarantined-path heal's slot reset becomes
+    failure-atomic — a single-transaction Ledger.heal_quarantined_path
+    (update + reasons reset + state + event, ONE commit, the
+    supersede shape); ingest.scan's heal branch calls it; the K1
+    guard and all branch semantics stay in ingest.
+  - [ ] O5 (r21 #7, tests-only): failing-side pin for N1's
+    no-sidecar emit-overflow degrade arm (junk head + aware
+    near-max stamp, no sidecars → converts with a synthesized
+    conformant stamp); the finder's exact deletion mutant (proven
+    full-gate-green at 840) killed site-isolated.
+  - [ ] Then: floor re-pin (passed − 4), BOTH host gates,
+    tree-verify, §0 tick, launch iteration 22 automatically (THE
+    CHECKPOINT pass — findings shown to Adnaan, no fix
+    implementation for 22's findings without his go).
 
 ---
 
