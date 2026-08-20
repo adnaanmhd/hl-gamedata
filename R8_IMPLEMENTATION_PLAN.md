@@ -94,12 +94,14 @@ scratchpad (tmp — the findings docs are the durable record).
   `6541807`+`e27c266`): the
   independent REAL e2e, fresh executor, verdict relayed VERBATIM to
   Adnaan. A BLOCKED-with-error never becomes a pass. Does NOT flip.
-- [ ] **FLIP session** (new session, only after the e2e verdict and
-  Adnaan's explicit go; `FLIP_EXEC_KICKOFF_PROMPT.md` — carries the
-  clean-slate amendments): c2-56 resize → Drive I measured →
-  Drive II wiped (ruled) → fresh ledger → canary → flip →
-  Kamla-first processing to the 500-delivered-hours stop → OW →
-  fresh-era payment sheets → final report.
+- [x] **FLIP session** (DONE 2026-08-20, record `FLIP_RECORD_2026-08-20.md`,
+  commit `eb213ef`): `hl-continuous.service` LIVE 17:53:21 IST on a fresh
+  ledger; Drive II wiped (trash not emptiable by the SA); old home archived
+  aside; Kamla-first + 500 h stop gate deployed; **VM is c2d-highcpu-32**
+  (Intel c2-standard-56 does not exist in the zone; c2d-highcpu-56 blocked by
+  the GLOBAL `CPUS_ALL_REGIONS=32` quota — request `cpus-all-regions-64`
+  filed; re-resize is a follow-up step). Payment sheets restarted from the
+  08-20 (empty) first window. Processing runs unattended under systemd.
 - [ ] **SATELLITE session** (new session, AFTER the flip;
   `SATELLITE_KICKOFF_PROMPT.md`): implement the ruled
   `satellite_camera` context + action names → **adversarial review

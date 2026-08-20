@@ -15,6 +15,7 @@ import random
 import shutil
 import subprocess
 import sys
+import threading
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -28,6 +29,17 @@ from .ledger import Ledger
 
 SPEC_FILES = ("video.mp4", "frames.csv", "session.json")
 RRD_FILES = ("session.rrd", "rrd_creation.py")
+
+# §1.4 15%-floor decision lock (flip session, Adnaan 2026-08-20, relayed:
+# CONT_UPLOAD_WORKERS 1 -> 4). With several U lanes in one process the
+# read-then-decide below raced: every lane read the same DELIVERED count
+# minutes before any of them reached DELIVERED, so all forced an rrd (CPU
+# minutes each) or none did (a floor dip). The lock serializes
+# read -> decide -> RECORD across lanes, and the count includes in-flight
+# decisions (PACKAGED/UPLOADED rows, and READY rows already marked
+# sampled) so a lane sees what its siblings decided, not just what has
+# landed. Generation itself runs outside the lock.
+_FLOOR_LOCK = threading.Lock()
 
 
 class DeliverError(Exception):
@@ -172,17 +184,24 @@ def deliver_session(cfg: C.Config, ledger: Ledger, session_id: str, *,
     elif not sampled:
         # spec §1.4 floor: the deterministic 20% draw can undershoot on
         # small daily counts — force-sample when today's delivered set for
-        # this game would drop below 15% sampled
+        # this game would drop below 15% sampled. Under _FLOOR_LOCK, and
+        # counting in-flight sibling-lane decisions (see the lock's note).
         date = stage_dir.parent.parent.name
-        counts = ledger.db.execute(
-            "SELECT COUNT(*) n, COALESCE(SUM(rrd_sampled),0) s FROM "
-            "sessions WHERE state='DELIVERED' AND game=? AND "
-            "delivered_at LIKE ?", (game,
-                                    f"{datetime.now(timezone.utc):%Y-%m-%d}%")
-        ).fetchone()
-        need = -(-15 * (counts["n"] + 1) // 100)        # ceil(15%)
-        if counts["s"] < need:
-            sampled = True
+        with _FLOOR_LOCK:
+            counts = ledger.db.execute(
+                "SELECT COUNT(*) n, COALESCE(SUM(rrd_sampled),0) s FROM "
+                "sessions WHERE game=? AND ("
+                "(state='DELIVERED' AND delivered_at LIKE ?) "
+                "OR state IN ('PACKAGED', 'UPLOADED') "
+                "OR (state='READY' AND rrd_sampled=1))",
+                (game, f"{datetime.now(timezone.utc):%Y-%m-%d}%")
+            ).fetchone()
+            need = -(-15 * (counts["n"] + 1) // 100)    # ceil(15%)
+            if counts["s"] < need:
+                sampled = True
+            # record BEFORE the slow generation so sibling lanes count it
+            ledger.update(session_id, rrd_sampled=int(sampled))
+        if sampled:
             rrdmod.write_script(stage_dir)
             rrdmod.generate(stage_dir, timeout_s=1800)
     date = stage_dir.parent.parent.name

@@ -177,7 +177,11 @@ MAX_BATCHES_IN_FLIGHT = 3         # R5 amendment: <=3 batches (~30 sessions)
 # so re-arming hl-pipeline.timer can never produce two drivers on one ledger.
 PIPELINE_CONTINUOUS = True
 CONT_SCAN_INTERVAL_S = 300        # ruling 2: poll Drive I every 5 min
-CONT_MEDIA_CAP_SESSIONS = 40      # ruling 2: ~40 sessions local, ledger-counted
+CONT_MEDIA_CAP_SESSIONS = 80      # ruling 2 was ~40; 80 since the flip (Adnaan
+                                  # 2026-08-20, relayed): READY rows waiting for U
+                                  # hold media and filled the 40 cap within 70 min of
+                                  # go-live, choking intake; ~1.3 GB/session local vs
+                                  # 155 GB free + the 100 GB F7 low-water still binds
 CONT_HOLD_RETRY_MIN = 30          # ruling 6: HOLD_VLM one retry / 30 min, forever
 CONT_DIGEST_INTERVAL_H = 3.0      # ruling 4: Telegram digest cadence
 # Autoscale band (ruling 3): validation-runner concurrency, bounded below by
@@ -199,7 +203,12 @@ CONT_BACKPRESSURE_429_PER_MIN = 1.0
 CONT_RUNG_QUIET_RESET_MIN = 60
 CONT_ALERT_DEDUP_MIN = 60         # TTL dedup: recurring conditions re-alert
 CONT_DOWNLOAD_WORKERS = 1         # serial D preserves F3 ctime-order intake
-CONT_UPLOAD_WORKERS = 1           # serial U preserves the R17 15%-floor read
+CONT_UPLOAD_WORKERS = 4           # was 1 ("serial U preserves the R17 15%-floor
+                                  # read"); 4 since the flip (Adnaan 2026-08-20,
+                                  # relayed) — the single lane delivered ~40
+                                  # sessions/h against ~100 verdicts/h and parked
+                                  # 40+ READY rows; the floor read is now serialized
+                                  # + in-flight-aware (deliver._FLOOR_LOCK)
 CONT_STUCK_H = 6.0                # digest stuck-list threshold
 CONT_DOWNLOAD_RETRY_MIN = 5.0     # transient download failure cooldown
 CONT_UPLOAD_RETRY_MIN = 10.0      # upload failure cooldown

@@ -6,7 +6,7 @@
 > exist), **§6c's `CONT_DAILY_REPORTS = False` interlock is RETIRED** (True is the deploy
 > value; vm_setup.sh no longer asserts the regen markers), **§6d `recal_refix_reset.py` is
 > SKIPPED**, and **§7 (legacy payment endgame) + §8 (superseded-tree deletion) are
-> SUPERSEDED** — there is no old cohort to reconcile. Suite floor is now **856** (860 tests).
+> SUPERSEDED** — there is no old cohort to reconcile. Suite floor is now **860** (864 tests).
 > Rollback for the new era: stop the systemd unit.
 
 Companion to `PIPELINE_CONTINUOUS_DESIGN.md`; exact command sequences the
@@ -89,7 +89,7 @@ b. **Resize E2 → C2D.** Pre-flight was VERIFIED against the project's own API
    **Run the suite through the gate, never as a bare `pytest; echo $?`:**
 
    ```
-   SUITE_FLOOR=856 bash tools/run_suite.sh \
+   SUITE_FLOOR=860 bash tools/run_suite.sh \
        --with numpy==2.4.6 --with opencv-python-headless==5.0.0.93 \
        --with rerun-sdk==0.36.0
    ```
