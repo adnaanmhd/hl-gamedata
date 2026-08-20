@@ -271,6 +271,19 @@ class Ledger:
             if f.name != "history":
                 shutil.move(str(f), dst / f.name)
 
+    def latest_prev_md5(self, session_id: str) -> str:
+        """The newest prev_md5 breadcrumb for the sid ('' if none) —
+        the real md5 the '' sentinel replaced, in the shared
+        heal/supersede breadcrumb format the download-time deferral
+        parses. ZIP_ADJ_CHANGED markers deliberately avoid the literal
+        token (entry 55), so this can never pick one up."""
+        prev = self.db.execute(
+            "SELECT detail FROM events WHERE session_id=? AND detail"
+            " LIKE '%prev_md5=%' ORDER BY ts DESC, rowid DESC LIMIT 1",
+            (session_id,)).fetchone()
+        return prev["detail"].rsplit("prev_md5=", 1)[1].strip() \
+            if prev else ""
+
     def supersede(self, session_id: str, *, new_md5: str, new_bytes: int,
                   new_ctime: str, dossier_root: Path) -> None:
         """Same session-id re-uploaded with different video md5 after a
@@ -281,7 +294,27 @@ class Ledger:
         assert row is not None
         self.archive_dossier(session_id, dossier_root)
         now = _now()
-        zip_unknowable = (not new_md5) and bool(row["md5_video"])
+        # r20 #7 (N4): '' means unknowable REGARDLESS of the stored md5
+        # — requiring a real stored md5 made M4's guard self-defeat:
+        # the first '' supersede creates the very stamps+''-md5 row
+        # shape a second '' supersede (bad-archive quarantine, then the
+        # coached corrected re-zip) then full-cleared with zero byte
+        # evidence, re-opening the r19 #5 double-pay. The breadcrumb
+        # below is still written only over a REAL prior md5, so the
+        # deferral's newest-breadcrumb lookup keeps naming the bytes
+        # the sheets actually counted.
+        zip_unknowable = not new_md5
+        # r20 #3 (N4): a REAL md5 landing over a stored-'' slot is not
+        # automatically CHANGED bytes either — '' is the unknowable
+        # sentinel, and the newest prev_md5 breadcrumb names the bytes
+        # the sheets counted. Equal proves the bytes identical (the
+        # plain-file re-upload of the SAME footage after a corrupt zip,
+        # the scan's payload-switch): preserve the payment columns.
+        # Different — or no breadcrumb to consult — keeps the full
+        # clear (known-new bytes / nothing provable).
+        proven_identical = bool(new_md5) and not row["md5_video"] \
+            and new_md5 == self.latest_prev_md5(session_id)
+        preserve = zip_unknowable or proven_identical
         # uploaded_reported_at cleared below for a REAL new md5: the
         # stamp belonged to the OLD upload's sheet — inherited, it
         # blocked the corrected re-upload's hours from the late-arrival
@@ -323,7 +356,7 @@ class Ledger:
         # supersedes a DELIVERED row).
         pay_clears = (("" if row["state"] == "DELIVERED"
                        else " accepted_reported_at=NULL,")
-                      if zip_unknowable else
+                      if preserve else
                       " duration_raw_s=NULL, uploaded_reported_at=NULL,"
                       " accepted_reported_at=NULL, tree_sealed_at=NULL,")
         self.db.execute(
@@ -334,7 +367,7 @@ class Ledger:
             " WHERE session_id=?",
             (new_md5, new_bytes, new_ctime, now, session_id))
         detail = f"superseded: new md5 {new_md5}"
-        if zip_unknowable:
+        if zip_unknowable and row["md5_video"]:
             # zip-class supersede (ingest's re-upload branch passes ""):
             # the new bytes' md5 is UNKNOWABLE from the Drive listing, so
             # remember the pre-reset md5 in the SAME breadcrumb format the

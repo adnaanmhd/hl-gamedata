@@ -376,3 +376,140 @@ def test_heal_preserve_arm_clears_labels_mark(cfg, ledger):
         "identical bytes: the money marks stay preserved (entry 25)"
     assert row["accepted_reported_at"] is None, \
         "the labels-only mark is cleared (N3)"
+
+
+# ------- r20 #3 + #7 (N4, payment-surface): '' means unknowable
+# ------- regardless of the stored md5, and a real md5 over a ''-slot
+# ------- adjudicates against the breadcrumb
+
+
+def test_second_blank_supersede_still_preserves(cfg, ledger):
+    """r20 #7: M4's guard required a REAL stored md5
+    (zip_unknowable = not new_md5 AND bool(row md5)), so the very
+    stamps+''-md5 row the first '' supersede creates failed the guard
+    on the SECOND '' supersede (bad-archive quarantine, then the
+    coached corrected re-zip — the branch's own invited flow) and took
+    the full clear with zero byte evidence, silently re-opening the
+    r19 #5 double-pay across two sent sheets. Unknowable is now
+    unknowable regardless of the stored md5; the breadcrumb is written
+    only over a real prior md5, so the deferral still sees the counted
+    bytes."""
+    from pipeline.tests.test_payment_split_r6 import (UNFIXABLE, W1,
+                                                      _put, _sheet)
+    sid = "2026-08-14T09-00-00Z_kamla_c_00000000000000f4"
+    _put(ledger, sid, state="REJECTED", raw=1800.0, reasons=UNFIXABLE,
+         player="n4@x.com")
+    ledger.update(sid, md5_video="a1" * 16)
+    _sheet(ledger, W1)
+    assert ledger.get(sid)["uploaded_reported_at"]
+    ledger.supersede(sid, new_md5="", new_bytes=22,
+                     new_ctime="2026-08-15T00:00:00.000Z",
+                     dossier_root=cfg.dossiers)
+    row = ledger.get(sid)
+    assert row["uploaded_reported_at"] and row["duration_raw_s"] == 1800.0
+    ledger.set_state(sid, "QUARANTINED", "bad archive")
+    ledger.supersede(sid, new_md5="", new_bytes=23,
+                     new_ctime="2026-08-16T00:00:00.000Z",
+                     dossier_root=cfg.dossiers)
+    row = ledger.get(sid)
+    assert row["uploaded_reported_at"] and row["duration_raw_s"] == 1800.0, \
+        "unknowable is unknowable — the second '' supersede preserves too"
+    evs = ledger.db.execute(
+        "SELECT detail FROM events WHERE session_id=? AND detail LIKE"
+        " '%prev_md5=%'", (sid,)).fetchall()
+    assert len(evs) == 1, "no breadcrumb is written over a ''-md5 row"
+    assert ledger.latest_prev_md5(sid) == "a1" * 16, \
+        "the deferral still sees the bytes the sheet counted"
+
+
+def test_real_md5_over_blank_adjudicates_breadcrumb(cfg, ledger):
+    """r20 #3: any real-md5 write over a stored-'' slot read
+    'unknowable' as 'changed' and full-cleared the M4-preserved stamps
+    even when the breadcrumb PROVED the bytes identical (the coached
+    plain-file re-upload of the original footage after a corrupt zip)
+    — and with a real md5 restored, the download deferral is skipped
+    entirely, so nothing self-healed: the same hours re-entered a
+    second sent sheet. The supersede now adjudicates against the
+    newest prev_md5 breadcrumb; a DIFFERENT real md5 keeps the full
+    clear (proceed-side control, §2 rule 4)."""
+    from pipeline.tests.test_payment_split_r6 import (UNFIXABLE, W1,
+                                                      _put, _sheet)
+    sid = "2026-08-14T09-00-00Z_kamla_c_00000000000000f5"
+    _put(ledger, sid, state="REJECTED", raw=1800.0, reasons=UNFIXABLE,
+         player="n4b@x.com")
+    ledger.update(sid, md5_video="a1" * 16)
+    _sheet(ledger, W1)
+    ledger.supersede(sid, new_md5="", new_bytes=22,
+                     new_ctime="2026-08-15T00:00:00.000Z",
+                     dossier_root=cfg.dossiers)
+    ledger.set_state(sid, "QUARANTINED", "bad archive")
+    ledger.supersede(sid, new_md5="a1" * 16, new_bytes=24,
+                     new_ctime="2026-08-16T00:00:00.000Z",
+                     dossier_root=cfg.dossiers)
+    row = ledger.get(sid)
+    assert row["md5_video"] == "a1" * 16
+    assert row["uploaded_reported_at"] and row["duration_raw_s"] == 1800.0, \
+        "breadcrumb-equal bytes are provably identical — preserve"
+    # control: a DIFFERENT real md5 over '' is known-new bytes
+    sid2 = "2026-08-14T09-00-00Z_kamla_c_00000000000000f6"
+    _put(ledger, sid2, state="REJECTED", raw=1800.0, reasons=UNFIXABLE,
+         player="n4c@x.com")
+    ledger.update(sid2, md5_video="b2" * 16)
+    _sheet(ledger, W1)
+    ledger.supersede(sid2, new_md5="", new_bytes=22,
+                     new_ctime="2026-08-15T00:00:00.000Z",
+                     dossier_root=cfg.dossiers)
+    ledger.set_state(sid2, "QUARANTINED", "bad archive")
+    ledger.supersede(sid2, new_md5="c3" * 16, new_bytes=24,
+                     new_ctime="2026-08-16T00:00:00.000Z",
+                     dossier_root=cfg.dossiers)
+    row2 = ledger.get(sid2)
+    assert row2["uploaded_reported_at"] is None \
+        and row2["duration_raw_s"] is None, \
+        "a different real md5 over '' is known-new bytes — full clear"
+
+
+def test_heal_real_md5_over_blank_adjudicates_breadcrumb(cfg, ledger):
+    """r20 #3 heal sibling: the heal's clears fired on
+    vmd5 != stored-'' — an operator typo-fix rename (or payload-switch
+    re-upload at a new path) whose listing md5 EQUALS the breadcrumb
+    cleared the preserved stamps for provably identical bytes. The
+    heal now runs the same breadcrumb adjudication; a different real
+    md5 still clears (known-new bytes)."""
+    from pipeline import ingest
+    from pipeline.tests.conftest import make_session_entries
+    sid = "2026-08-14T10-00-00Z_kamla_c_00000000000000f7"
+    ingest.scan(cfg, ledger, entries=make_session_entries(
+        sid=sid, md5="d4" * 16))
+    ingest.scan(cfg, ledger, entries=make_session_entries(
+        sid="2026-08-14T11-00-00Z_kamla_c_00000000000000zz", md5="zz"))
+    assert ledger.get(sid)["state"] == "QUARANTINED"
+    # a zip-class '' writer left the sentinel + breadcrumb + preserved
+    # money marks (the r13 #2 seeding idiom)
+    ledger.update(sid, md5_video="", duration_raw_s=3600.0,
+                  uploaded_reported_at="2026-08-15T00:00:00+00:00")
+    ledger.db.execute(
+        "INSERT INTO events(session_id, ts, from_state, to_state,"
+        " detail) VALUES(?,?,?,?,?)",
+        (sid, "2026-08-15T00:00:00+00:00", "QUARANTINED", "DISCOVERED",
+         f"superseded: new md5 ; prev_md5={'d4' * 16}"))
+    ledger.db.commit()
+    res = ingest.scan(cfg, ledger, entries=make_session_entries(
+        sid=sid, op="op2@x.com", md5="d4" * 16,
+        ctime="2026-08-14T11:00:00.000Z"))
+    assert any("quarantined path healed" in f for f in res.integrity_flags)
+    row = ledger.get(sid)
+    assert row["duration_raw_s"] == 3600.0 and row["uploaded_reported_at"], \
+        "breadcrumb-equal bytes: the heal preserves the money marks"
+    # control: a different real md5 at yet another path clears
+    ledger.set_state(sid, "QUARANTINED", "re-quarantined for the control")
+    ledger.update(sid, md5_video="")
+    res2 = ingest.scan(cfg, ledger, entries=make_session_entries(
+        sid=sid, op="op3@x.com", md5="e5" * 16,
+        ctime="2026-08-14T12:00:00.000Z"))
+    assert any("quarantined path healed" in f
+               for f in res2.integrity_flags)
+    row = ledger.get(sid)
+    assert row["uploaded_reported_at"] is None \
+        and row["duration_raw_s"] is None, \
+        "a different real md5 over '' is known-new bytes — full clear"

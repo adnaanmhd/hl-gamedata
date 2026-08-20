@@ -354,11 +354,22 @@ def scan(cfg: C.Config, ledger: Ledger,
                     # supersede decision to the download-time backfill,
                     # which compares the recomputed local hash against
                     # the pre-heal md5 remembered in the heal event.
+                    byte_change = bool(vmd5) and \
+                        vmd5 != existing["md5_video"]
+                    if byte_change and not existing["md5_video"]:
+                        # r20 #3 (N4) sibling: a real listing md5 over
+                        # a stored-'' slot is not automatically CHANGED
+                        # bytes — adjudicate against the newest
+                        # prev_md5 breadcrumb (equal = provably
+                        # identical, preserve; different or no
+                        # breadcrumb keeps the clear).
+                        prev = ledger.latest_prev_md5(ds.session_id)
+                        byte_change = not prev or vmd5 != prev
                     clears = dict(duration_raw_s=None,
                                   uploaded_reported_at=None,
                                   accepted_reported_at=None,
                                   tree_sealed_at=None) \
-                        if vmd5 and vmd5 != existing["md5_video"] else {}
+                        if byte_change else {}
                     if not clears and existing["accepted_reported_at"] \
                             and existing["state"] != "DELIVERED":
                         # r20 #2≡#6 (N3) sibling: this branch's
