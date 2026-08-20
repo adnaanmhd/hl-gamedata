@@ -1,0 +1,221 @@
+"""r-loop 20 fixes (N-set, R8_IMPLEMENTATION_PLAN §0) — pipeline side.
+
+Each test cites the iteration-20 finding it pins (r20 #N, findings of
+record in R20_FINDINGS.md). Fail-first proofs run in a scratch copy of
+the pre-fix tree at 5524563 (session scratchpad); pin-only tests use
+the mutation-proof pattern with the finders' EXACT mutants, per plan
+§0/§1. Iteration 21 reviews this set (the 2026-08-20 NEW RULING).
+"""
+from __future__ import annotations
+
+import json
+
+from pipeline.tests.test_r_loop8 import needs_ffmpeg  # noqa: F401
+
+# ------- r20 #1 / #5 / #10 / #11 (N1): fix_v1_to_v2's stamp/trim
+# ------- resolution completed — falsiness is not absence, destroyed
+# ------- evidence never reads as head 0, the emit is resolved
+# ------- pre-write, and an overflow blames the junk side
+
+
+@needs_ffmpeg
+def test_v1_sidecar_route_refuses_falsy_junk_trim(tmp_path):
+    """r20 #1: float(x or 0.0) short-circuited every falsy junk
+    head_cut_s ("", null, false, [], {}) into a fabricated head 0.0 —
+    and bool True into a fabricated 1.0s cut — bypassing the refusal
+    gate M1 added for exactly this evidence, so the r19 #1 blocker
+    chain (created == started shipped beside a >=5s-binned CSV,
+    checker-green delivered desync) survived for the falsy family
+    while 'abc' correctly refused. PRESENT-but-junk now refuses typed
+    on the live-sidecar route, before any write."""
+    import csv as _csv
+
+    import pytest
+
+    from pipeline import fix as fixmod
+    from pipeline.tests.test_r_loop19 import _v1_with_sidecars
+    for i, junk in enumerate(("", None, False, [], {}, True)):
+        work = _v1_with_sidecars(tmp_path, "not-a-date", f"n1falsy{i}",
+                                 "2026-08-10T15:33:55Z",
+                                 {"head_cut_s": junk}, at_root=True)
+        with pytest.raises(fixmod.FixFailed) as e:
+            fixmod.fix_v1_to_v2(work, "kamla")
+        assert "canonical.trim" in str(e.value), repr(junk)
+        with (work / "frames.csv").open(newline="") as f:
+            header = next(_csv.reader(f))
+        assert len(header) == 7, \
+            f"the refusal precedes every write ({junk!r})"
+
+
+@needs_ffmpeg
+def test_v1_good_stamp_falsy_trim_refuses_on_live_route(tmp_path):
+    """r20 #1 (the silent half): a GOOD stamp beside a falsy-junk
+    head_cut_s converted SILENTLY at head 0.0 on the live-contract
+    route — no recovery note, no refusal — shipping created_at
+    verbatim while the CSV was binned at the real head cut. Junk trim
+    evidence beside usable sidecars refuses regardless of the stamp."""
+    import pytest
+
+    from pipeline import fix as fixmod
+    from pipeline.tests.test_r_loop19 import _v1_with_sidecars
+    work = _v1_with_sidecars(tmp_path, "2026-08-10T15:34:03Z", "n1gs",
+                             "2026-08-10T15:33:55Z",
+                             {"head_cut_s": ""}, at_root=True)
+    with pytest.raises(fixmod.FixFailed) as e:
+        fixmod.fix_v1_to_v2(work, "kamla")
+    assert "canonical.trim" in str(e.value)
+
+
+@needs_ffmpeg
+def test_v1_no_sidecar_falsy_trim_keeps_stamp(tmp_path):
+    """N1 proceed-side control (§2 rule 4, the r19 #10 semantics
+    preserved): with NO sidecars nothing downstream consumes
+    created − started, so a falsy-junk head cut degrades to 0.0 and
+    the parseable stamp ships — same disposition as 'abc'/'5,0'."""
+    from pipeline import fix as fixmod
+    from pipeline.tests.test_r_loop15 import _v1_work
+    for i, junk in enumerate(("", None, False, [], {}, True)):
+        work = _v1_work(tmp_path, "2026-08-10T15:34:03Z", f"n1nsf{i}")
+        s = json.loads((work / "session.json").read_text())
+        s["canonical"]["trim"] = {"head_cut_s": junk}
+        (work / "session.json").write_text(json.dumps(s))
+        note = fixmod.fix_v1_to_v2(work, "kamla")
+        assert "converted v1 -> v2" in note, repr(junk)
+        out = json.loads((work / "session.json").read_text())
+        assert out["created_at_utc"] == "2026-08-10T15:34:03.000000Z", \
+            repr(junk)
+
+
+@needs_ffmpeg
+def test_v1_destroyed_sessionjson_refuses_on_live_route(tmp_path):
+    """r20 #5: a torn/unreadable session.json (or a non-dict canonical)
+    degraded to canonical={} whose ABSENT trim read as the v1-optional
+    head 0.0 — on the live-sidecar route the conversion then RECOVERED
+    created = started + 0, a fabricated head offset for footage whose
+    genuine v1 head cut is >=5s by construction (the r19 #1 desync
+    chain through the destroyed-evidence door). Destroyed canonical
+    evidence now refuses typed on the live route, before any write."""
+    import csv as _csv
+
+    import pytest
+
+    from pipeline import fix as fixmod
+    from pipeline.tests.test_r_loop19 import _v1_with_sidecars
+    for i, torn in enumerate(('{"canonical": {"created_at',
+                              '{"canonical": null}')):
+        work = _v1_with_sidecars(tmp_path, "2026-08-10T15:34:03Z",
+                                 f"n1torn{i}", "2026-08-10T15:33:55Z",
+                                 ..., at_root=True)
+        (work / "session.json").write_text(torn)
+        with pytest.raises(fixmod.FixFailed) as e:
+            fixmod.fix_v1_to_v2(work, "kamla")
+        assert "session.json" in str(e.value), torn
+        with (work / "frames.csv").open(newline="") as f:
+            header = next(_csv.reader(f))
+        assert len(header) == 7, torn
+
+
+@needs_ffmpeg
+def test_v1_absent_trim_on_readable_canonical_is_head0(tmp_path):
+    """N1 proceed-side control (§2 rule 4): a READABLE well-formed
+    canonical with NO trim key is the documented v1-optional shape — a
+    payload that never recorded a cut — and head 0.0 is TRUE there,
+    sidecars or not. The destroyed-evidence refusal must not fire."""
+    from pipeline import fix as fixmod
+    from pipeline.tests.test_r_loop19 import _v1_with_sidecars
+    work = _v1_with_sidecars(tmp_path, "2026-08-10T15:33:55Z", "n1abs",
+                             "2026-08-10T15:33:55Z", ..., at_root=True)
+    note = fixmod.fix_v1_to_v2(work, "kamla")
+    assert "converted v1 -> v2" in note
+    s = json.loads((work / "session.json").read_text())
+    assert s["created_at_utc"] == "2026-08-10T15:33:55.000000Z"
+
+
+@needs_ffmpeg
+def test_v1_nearmax_stamp_sane_trim_recovers(tmp_path):
+    """r20 #11: created + head_cut overflows for two DIFFERENT junk
+    sides, and M1 blamed the head for both — a parseable near-max
+    STAMP beside a sane trim skipped the designed recovery arm and
+    refused with a false 'repair canonical.trim' diagnosis. The junk
+    side is now disambiguated: the head's own timedelta constructs, so
+    the stamp is treated unusable and ground-truth recovery proceeds
+    (the committed unusable-stamp disposition)."""
+    from pipeline import fix as fixmod
+    from pipeline.tests.test_r_loop19 import _v1_with_sidecars
+    work = _v1_with_sidecars(tmp_path, "9999-12-31T23:59:59Z", "n1nm",
+                             "2026-08-10T15:33:55Z",
+                             {"head_cut_s": 8.0}, at_root=True)
+    note = fixmod.fix_v1_to_v2(work, "kamla")
+    assert "recovered" in note
+    s = json.loads((work / "session.json").read_text())
+    assert s["created_at_utc"] == "2026-08-10T15:34:03.000000Z"
+
+
+@needs_ffmpeg
+def test_v1_huge_head_cut_still_refuses_on_live_route(tmp_path):
+    """N1 refuse-side control for the #11 disambiguation (§2 rule 4):
+    a sane stamp beside a large-but-finite head cut whose OWN timedelta
+    overflows is genuinely head-side junk — the canonical.trim refusal
+    stands on the live route."""
+    import pytest
+
+    from pipeline import fix as fixmod
+    from pipeline.tests.test_r_loop19 import _v1_with_sidecars
+    work = _v1_with_sidecars(tmp_path, "2026-08-10T15:34:03Z", "n1hh",
+                             "2026-08-10T15:33:55Z",
+                             {"head_cut_s": 1e18}, at_root=True)
+    with pytest.raises(fixmod.FixFailed) as e:
+        fixmod.fix_v1_to_v2(work, "kamla")
+    assert "canonical.trim" in str(e.value)
+
+
+@needs_ffmpeg
+def test_v1_nearmax_aware_stamp_emit_overflow_degrades(tmp_path):
+    """r20 #10: the created_at emit (astimezone → strftime) ran at the
+    session.json write, AFTER frames.csv was rewritten, with no guard —
+    an aware negative-offset stamp near datetime.max survives the
+    addition in naive fields yet overflows the UTC conversion, so the
+    route crashed mid-write on both attempts (a junk shape that still
+    crashed, entry 90's defect clause). The emit is now resolved
+    inside the pre-write resolution block: no-sidecar → the stamp is
+    unusable, omit-and-synthesize; sidecar → ground-truth recovery."""
+    from translator.v2 import _TS_RE
+
+    from pipeline import fix as fixmod
+    from pipeline.tests.test_r_loop15 import _v1_work
+    from pipeline.tests.test_r_loop19 import _v1_with_sidecars
+    work = _v1_work(tmp_path, "9999-12-31T20:00:00-05:00", "n1emit")
+    s = json.loads((work / "session.json").read_text())
+    s["canonical"]["trim"] = {"head_cut_s": 5.0}
+    (work / "session.json").write_text(json.dumps(s))
+    note = fixmod.fix_v1_to_v2(work, "kamla")
+    assert "converted v1 -> v2" in note
+    out = json.loads((work / "session.json").read_text())
+    assert _TS_RE.match(out["created_at_utc"]) and \
+        not out["created_at_utc"].startswith("9999"), \
+        "the unusable stamp is synthesized, never shipped or crashed"
+    work2 = _v1_with_sidecars(tmp_path, "9999-12-31T20:00:00-05:00",
+                              "n1emit2", "2026-08-10T15:33:55Z",
+                              {"head_cut_s": 8.0}, at_root=True)
+    note2 = fixmod.fix_v1_to_v2(work2, "kamla")
+    assert "recovered" in note2
+    s2 = json.loads((work2 / "session.json").read_text())
+    assert s2["created_at_utc"] == "2026-08-10T15:34:03.000000Z"
+
+
+@needs_ffmpeg
+def test_v1_nearmax_started_at_refuses_recovery(tmp_path):
+    """r20 #10 (recovery-side twin): when ground truth ITSELF cannot
+    produce a representable stamp (a near-max parseable started_at —
+    the M2 gate only requires parseability), the recovery refuses
+    typed instead of crashing past the frames.csv write."""
+    import pytest
+
+    from pipeline import fix as fixmod
+    from pipeline.tests.test_r_loop19 import _v1_with_sidecars
+    work = _v1_with_sidecars(tmp_path, "not-a-date", "n1nmst",
+                             "9999-12-31T23:59:59Z",
+                             {"head_cut_s": 8.0}, at_root=True)
+    with pytest.raises(fixmod.FixFailed) as e:
+        fixmod.fix_v1_to_v2(work, "kamla")
+    assert "cannot recover" in str(e.value)

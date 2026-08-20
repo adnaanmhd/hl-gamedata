@@ -1663,29 +1663,67 @@ def fix_v1_to_v2(work: Path, game: str) -> str:
     head_cut, head_usable = 0.0, True
     if trim_meta is not None and not isinstance(trim_meta, dict):
         head_usable = False
-    elif isinstance(trim_meta, dict):
-        try:
-            head_cut = float(trim_meta.get("head_cut_s") or 0.0)
-            head_usable = math.isfinite(head_cut)
-        except (TypeError, ValueError, OverflowError):
+    elif isinstance(trim_meta, dict) and "head_cut_s" in trim_meta:
+        hv = trim_meta["head_cut_s"]
+        # r20 #1: falsiness is not absence — float(x or 0.0)
+        # short-circuited every falsy junk shape ("", null, false, [],
+        # {}) into a fabricated head 0.0 and bool True into 1.0,
+        # bypassing the refusal gate M1 added for exactly this
+        # evidence; only a genuinely ABSENT key is the documented
+        # v1-optional head-0 shape. bool is an int subclass, so it
+        # must be refused before float().
+        if hv is None or isinstance(hv, bool):
             head_usable = False
-    created_out, recovered = None, False
+        else:
+            try:
+                head_cut = float(hv)
+                head_usable = math.isfinite(head_cut)
+            except (TypeError, ValueError, OverflowError):
+                head_usable = False
+    # r20 #5: the trim evidence lives only inside a readable dict
+    # canonical — an unreadable/non-object session.json or a non-dict
+    # canonical DESTROYED it, so head 0.0 there is a fabrication, not
+    # the v1-optional default (a readable well-formed canonical with
+    # no trim key genuinely never recorded a cut)
+    trim_evidence_ok = isinstance(s.get("canonical"), dict)
+
+    def _emit_utc(dt: datetime) -> str:
+        # r20 #10: the astimezone conversion is stamp arithmetic too —
+        # an aware near-max stamp survives the addition in naive
+        # fields yet overflows HERE; pre-N1 that crashed at the
+        # session.json write, AFTER frames.csv was already rewritten
+        return dt.astimezone(timezone.utc).strftime(
+            "%Y-%m-%dT%H:%M:%S.%f") + "Z"
+
+    created_str, recovered = None, False
     if stamp is not None and head_usable:
         try:
-            created_out = stamp + timedelta(seconds=head_cut)
+            created_str = _emit_utc(stamp + timedelta(seconds=head_cut))
         except OverflowError:
-            head_usable = False
-    if created_out is None:
+            # r20 #11: this arithmetic overflows for two DIFFERENT junk
+            # sides — blame the one that is actually junk. A head whose
+            # own timedelta constructs is representable, so the STAMP
+            # is the junk side (omit / recover below — the designed
+            # unusable-stamp disposition); only a head that cannot even
+            # build a timedelta keeps the canonical.trim refusal.
+            try:
+                timedelta(seconds=head_cut)
+                stamp = None
+            except OverflowError:
+                head_usable = False
+    if created_str is None:
         started = _v1_sidecar_started(work)
         if started is not None:
             # the contract is LIVE: recover from ground truth or refuse
             # typed — never fabricate (r19 #1)
-            if head_usable:
-                try:
-                    created_out = started + timedelta(seconds=head_cut)
-                    recovered = True
-                except OverflowError:
-                    head_usable = False
+            if not trim_evidence_ok:
+                raise FixFailed(
+                    "session.json canonical block unreadable while "
+                    "usable raw sidecars are attached — the head-cut "
+                    "evidence is destroyed and a fabricated head offset "
+                    "would silently desync or wrongly reject the "
+                    "raw-sidecar verify/retranslate (r20 #5); repair "
+                    "session.json before converting")
             if not head_usable:
                 raise FixFailed(
                     "canonical.trim head_cut_s unusable while usable raw "
@@ -1693,12 +1731,28 @@ def fix_v1_to_v2(work: Path, game: str) -> str:
                     "would silently desync or wrongly reject the "
                     "raw-sidecar verify/retranslate (r19 #1); repair "
                     "session.json's canonical.trim before converting")
+            try:
+                created_str = _emit_utc(started + timedelta(
+                    seconds=head_cut))
+                recovered = True
+            except OverflowError:
+                raise FixFailed(
+                    "raw started_at_utc + head_cut overflows a "
+                    "representable stamp — cannot recover a truthful "
+                    "created_at_utc from ground truth (r20 #10); repair "
+                    "raw/metadata.json or session.json before "
+                    "converting")
         elif stamp is not None:
             # junk head cut with no live contract: keep the good stamp
             # (head 0.0) rather than discarding it for a bad neighbor
             # (r19 #10); an unusable stamp stays omitted for
             # fix_sessionjson_recompute to synthesize
-            created_out = stamp
+            try:
+                created_str = _emit_utc(stamp)
+            except OverflowError:
+                # a stamp that cannot even emit is unusable (r20 #10) —
+                # omit; recompute synthesizes from ground truth
+                created_str = None
 
     # the session's own keybind.json is AUTHORITATIVE (the F4 doctrine's
     # fourth instance — r17 #2): judging `bound` against the built-ins
@@ -1782,13 +1836,13 @@ def fix_v1_to_v2(work: Path, game: str) -> str:
     _write_csv(work, V2_FRAME_COLS, out)
 
     new_s = {"session_id": canonical.get("session_id", work.name)}
-    # created_out was resolved (or refused) BEFORE any write above —
-    # r19 #1/#4≡#6/#10 (M1); None = omitted, fix_sessionjson_recompute
+    # created_str was fully resolved — INCLUDING its emitted string
+    # form (r20 #10) — or refused BEFORE any write above (r19
+    # #1/#4≡#6/#10, M1); None = omitted, fix_sessionjson_recompute
     # below synthesizes a canonical stamp from ground truth (its
     # designed r-loop 7/8 job)
-    if created_out is not None:
-        new_s["created_at_utc"] = created_out.astimezone(
-            timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%f") + "Z"
+    if created_str is not None:
+        new_s["created_at_utc"] = created_str
     (work / "session.json").write_text(json.dumps(new_s, indent=2))
     fix_sessionjson_recompute(work, slug)
     (work / "key_binding.json").unlink(missing_ok=True)
