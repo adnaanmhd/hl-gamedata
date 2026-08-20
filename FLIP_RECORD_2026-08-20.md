@@ -4,7 +4,7 @@
 
 Preconditions held: e2e verdict GREEN-WITH-FINDINGS accepted (`E2E_VERDICT.md`);
 Adnaan's explicit go in this session ("I give my go for the flip").
-Code deployed: **`eb213ef`** (HEAD `d7c35d7` + this session's one commit). Both host
+Code deployed: **`2a26abc`** (HEAD `d7c35d7` + this session's two commits: `eb213ef` gate + `2a26abc` U lanes). Both host
 gates green on it: **Mac 860/856**, **VM 860/856** (399 s on the new shape vs 697 s
 on the old e2). Nothing pushed.
 
@@ -30,9 +30,30 @@ on the old e2). Nothing pushed.
 8. **Processing order** — deployed gate: `INTAKE_GAME_PRIORITY="kamla"`, `INTAKE_GAME_STOP_HOURS={"kamla": 500.0}` (`pipeline/config.py`), `ingest.closed_games / priority_game / next_batch`. Stop measure = `Ledger.delivered_hours("kamla")` (SUM over DELIVERED rows, split children included — the digest's "Kamla X/500"). **Binds at new intake only:** DOWNLOADING kill-resume and the media-cap carve-out re-pick rows already holding bytes (in-flight → finishes, overshoot accepted; excluding them would re-open the r-loop 6 intake stall). Worst-case overshoot ≈ the media cap's in-flight set (~40 sessions × ~0.35 h ≈ 14 h, ~3%). After the stop the S lane still registers new Kamla folders as DISCOVERED (they stay raw by ruling) — the digest's undownloaded count will include them. Tests: `pipeline/tests/test_flip_kamla_gate.py` (10; all red on the unfixed tree; three hostile mutants of the fixed tree each caught by ≥3 tests). **OW pre-mapping record:** `~/hl-pipeline/NEW_ERA_README.md` pins the events-table query and cutoff rule; a snapshot `ow-pre-satellite-<date>.tsv` is written at each report.
 9. **Payment sheets** — start fresh from this ledger (first send above). Runbook §7 legacy endgame (anchor `2026-08-16T05:32:50+00:00`, regen), §6d `recal_refix_reset`, §8 superseded-tree deletion: **SKIPPED — superseded by the clean slate, as instructed.**
 
-## Throughput — measured vs projection
+## Hour-one findings and the relayed instruction set (Adnaan via the sibling session `hl-gamedata-ab`, ~13:35Z)
 
-_(filled from production's first hour — see "Measured" below)_
+Measured independently before the relay arrived: the **single serial U lane** (`CONT_UPLOAD_WORKERS=1`) delivered ~40 sessions/h (upload itself 26–119 s; packaging + queueing behind the lane up to ~30 min) against ~100 verdicts/h; READY grew to 40+, and because READY rows hold local media they filled the 40-session cap and **choked intake** (INGESTED fell to 1–4). CPU was saturated (load 40–71 on 32 vCPU; autoscale bouncing 10↔18 on the 95 % ceiling), but U was the binding wall. Three relayed items, each executed and labelled as relayed:
+
+1. **`CONT_UPLOAD_WORKERS` 1→4, `CONT_MEDIA_CAP_SESSIONS` 40→80, floor lock** — commit **`2a26abc`**. Finding while implementing: the §1.4 15 %-floor race is a *stale-count* problem, not only a lock problem (parallel lanes decide minutes before any reaches DELIVERED, so all read the same count); the fix counts in-flight decisions (PACKAGED/UPLOADED rows, READY rows already marked sampled) under `deliver._FLOOR_LOCK` and records the decision before generation. 4 tests (2 proven red pre-fix; lock-removed and count-reverted mutants both caught). Gates: **Mac 864/860, VM 864/860**. Deployed (tree hash `06110bbd…` = tarball), `systemctl restart hl-continuous` 13:56:28Z → clean drain 2 m 16 s, no in-flight row lost, cap 80 live. Result within 8 min: 4 PACKAGED at once, deliveries 9 per 5 min (was 3–4), READY 39→26 and draining, intake resumed, rrd share 20.6 % (floor ≥ 15 % holds).
+2. **Quota requests** — `cpus-all-regions-64` raised to preferred **128** (granted 32, reconciling); new `c2d-cpus-asia-south1-128` — **GRANTED 128** already. Target when the global lands: `c2d-highcpu-112` (interim 56 as soon as ≥ 56 is granted).
+3. **5 orphaned canary spawn workers killed** (env-verified `HL_PIPELINE_HOME=~/hl-pipeline-test`, ppid 1; leftovers of the kill-9 leg — spawn children outlive a SIGKILLed parent); production driver untouched.
+
+## Throughput — measured (1.67 h since arming, 12:23:21Z → 14:03:31Z, includes ramp + one restart)
+
+| measure | value |
+|---|---|
+| DELIVERED | 63 sessions, **8.26 Kamla h** (all Kamla, as ruled) |
+| roots fully settled | 34 → 8.51 raw h in, 8.04 delivered h out — **delivered/raw 0.945** |
+| roots judged (first verdict) | 44 → 11.48 raw h (≈ 6.9 raw fh/h at the validation stage, CPU-bound) |
+| split tax | 2.81 nodes per judged root; depth up to 3; 38 mid-cuts all ≥ 6 s (loading/cutscene), 7 edge trims |
+| rejects | 4, all genuine: short children where the cut left no ≥ 70 s segment (`split produced no >=70s segment`) |
+| VLM pressure | 0 × 429, 4 × 503 absorbed by backoff; ladder never stepped |
+| crashes | 0 `runner crashed`, 0 alerts (the journal's `Traceback` lines are CPython finalizer warnings on autoscale step-downs — cosmetic) |
+| disk | 152 GB free; `work/` 15 GB |
+
+**Projection (labelled):** on the c2d-32 the validation stage judges ≈ 6.9 raw fh/h ≈ **165 raw fh/day** `[measured over 1.67 h of ramp]`; with the U lane unblocked, delivered hours should approach that × 0.945 ≈ 155 h/day `[projection]`. Kamla needs ≈ 530 raw h for 500 delivered → **≈ 3.3 days from now ≈ Aug 24 morning** on this box `[projection — re-measure after a full unattended day]`; the 56/112-CPU resize is the lever once the global quota lands (CPU is the ceiling; Gemini is not — 0 × 429 at 12–18 workers). Pre-flip band for c2d-56 was 120–180 fh/day conservative.
+
+**Kamla stop projection:** 500 h at 0.945 → the gate closes intake after ≈ 530 raw h judged; overshoot ≤ the in-flight set (≈ 80 sessions × ~0.2 h ≈ 15 h worst case with cap 80).
 
 ## Payment-surface list of record (plan §6) — honest labels
 
@@ -45,6 +66,7 @@ RULED 08-20 — implemented AFTER the flip in its own session with its own adver
 ## Open items / watch list
 
 - **Re-resize to `c2d-highcpu-56`** once `gcloud beta quotas preferences describe cpus-all-regions-64` shows `grantedValue: 64`: stop unit → stop VM → `set-machine-type c2d-highcpu-56` → start → `config-ssh` → `systemctl start hl-continuous` (pool ceiling is import-time; 44 workers). Note the canary saturated 32 vCPU (load 44) at 8–10 concurrent validations — CPU, not Gemini, was the first ceiling; 56 vCPU should lift it, watch `CONT_CPU_HIGH`.
+- **Reject-label surface to glance at:** the 4 rejects carry `fixable:true` stored reasons with an unfixable OUTCOME (`split produced no >=70s segment`) — check how tomorrow's sheet labels them (M5 filters on the stored fixable field).
 - **F2 reject signature** (v1-sniffed payload, `QA_FAIL_UNMAPPED missing delivery file: session.rrd/rrd_creation.py`): none seen yet; grep the ledger's `reasons_json` daily.
 - Drive II trash (287 GiB) — auto-purge 30 d, or a Manager empties it.
 - Mac `rclone` remote `drive-collect` is configured with `scope = drive` (the VM's is `drive.readonly`) — hardening candidate, not touched.
