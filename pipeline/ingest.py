@@ -800,9 +800,36 @@ def lagging_game(ledger: Ledger) -> str | None:
     return None
 
 
+def closed_games(ledger: Ledger) -> frozenset[str]:
+    """Games whose NEW intake is closed because their DELIVERED hours
+    reached the ruled stop bar (Adnaan 2026-08-20: Kamla stops at 500
+    delivered hours; config.INTAKE_GAME_STOP_HOURS). Measured exactly as
+    the digest prints it — Ledger.delivered_hours, SUM(duration_delivered_s)
+    over DELIVERED rows of that game. Evaluated at every pick, so the stop
+    engages on the pick after the bar is crossed; rows already downloading
+    or holding local bytes are in flight and finish (overshoot accepted)."""
+    return frozenset(g for g, bar in C.INTAKE_GAME_STOP_HOURS.items()
+                     if ledger.delivered_hours(g) >= bar)
+
+
+def priority_game(ledger: Ledger,
+                  closed: frozenset[str] | None = None) -> str | None:
+    """The game that sorts to the head of intake: the ruled forced
+    priority (config.INTAKE_GAME_PRIORITY) while it is set and still
+    open; otherwise F4's lagging-game balance."""
+    if closed is None:
+        closed = closed_games(ledger)
+    forced = C.INTAKE_GAME_PRIORITY
+    if forced and forced not in closed:
+        return forced
+    return lagging_game(ledger)
+
+
 def next_batch(ledger: Ledger, size: int | None = None,
                exclude: set[str] | frozenset[str] = frozenset()) -> list[str]:
-    """FIFO by Drive createdTime, lagging game first (§9.4). `exclude`
+    """FIFO by Drive createdTime, priority game first (§9.4 F4 balance,
+    overridden by the ruled INTAKE_GAME_PRIORITY while that game is open),
+    games past their INTAKE_GAME_STOP_HOURS bar excluded. `exclude`
     (the run's attempted set) is filtered BEFORE the slice: slicing first
     let a head-of-queue clique of persistent download failures starve the
     entire intake — every run re-batched only them, emptied the list at
@@ -810,9 +837,10 @@ def next_batch(ledger: Ledger, size: int | None = None,
     `size` binds at call time, not import time."""
     if size is None:
         size = C.BATCH_SIZE
+    closed = closed_games(ledger)
     rows = [r for r in ledger.by_state("DISCOVERED")
-            if r["session_id"] not in exclude]
-    prio = lagging_game(ledger)
+            if r["session_id"] not in exclude and r["game"] not in closed]
+    prio = priority_game(ledger, closed)
     rows.sort(key=lambda r: ((0 if r["game"] == prio else 1),
                              r["drive_ctime"] or "9", r["session_id"]))
     return [r["session_id"] for r in rows[:size]]

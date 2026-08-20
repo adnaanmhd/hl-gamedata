@@ -117,6 +117,26 @@ INCOMPLETE_ESCALATE_H = 48        # F8
 PACE_ALARM_FACTOR = 1.15          # §11.3
 LAGGING_GAME_PRIORITY_GAP = 0.10  # F4: >10% pace gap -> priority
 TARGET_HOURS_PER_GAME = 500.0     # R10 — delivered post-trim clip hours
+# Intake game plan (Adnaan 2026-08-20 ruling, executed by the flip
+# session): Kamla first, oldest-first, until the delivery drive holds 500
+# DELIVERED Kamla hours — the ledger SUM of duration_delivered_s over
+# DELIVERED kamla rows, the same figure the digest prints as "Kamla
+# X/500" — then Kamla INTAKE STOPS: in-flight sessions finish (slight
+# overshoot accepted), the remaining Kamla raw hours stay unprocessed in
+# Drive I, and OW continues. Mechanism: INTAKE_GAME_PRIORITY forces that
+# game to the head of ingest.next_batch's createdTime FIFO — while it is
+# set and still open it REPLACES the F4 lagging-game balancing, which on
+# its own would interleave toward 50/50 and push OW ahead the moment
+# Kamla led by >10% — and INTAKE_GAME_STOP_HOURS closes a game's NEW
+# intake once its delivered hours reach the bar. The stop binds at
+# next_batch (new intake) ONLY: the DOWNLOADING kill-resume and the
+# media-cap carve-out in continuous._pick_download re-pick rows that
+# already hold local bytes, which is in-flight work the ruling lets
+# finish; excluding it there would re-open the r-loop 6 intake stall
+# (rows holding the cap must stay re-pickable). Set INTAKE_GAME_PRIORITY
+# = None to restore pure F4 balancing; an empty dict disables every stop.
+INTAKE_GAME_PRIORITY: str | None = "kamla"
+INTAKE_GAME_STOP_HOURS: dict[str, float] = {"kamla": 500.0}
 COLLECT_TARGET_HOURS = 600.0      # R16 — collection buffer target
 LEDGER_BACKUP_KEEP = 14           # §8
 
@@ -184,11 +204,15 @@ CONT_STUCK_H = 6.0                # digest stuck-list threshold
 CONT_DOWNLOAD_RETRY_MIN = 5.0     # transient download failure cooldown
 CONT_UPLOAD_RETRY_MIN = 10.0      # upload failure cooldown
 CONT_RUNNER_CRASH_RETRY_MIN = 5.0  # session-runner crash cooldown
-# Payment-endgame interlock: while False the driver sends NO daily payment
-# or folder-issues reports (digest/alerts unaffected). The flip deploys
-# False so a 14:00 IST send can never stamp the unstamped rebuild cohort
-# before recal_regen_sheets.py regenerates the 08-15/08-16 sheets; set
-# True (+ redeploy + restart) right after the regen --send completes.
+# Payment-report switch: while False the driver sends NO daily payment
+# or folder-issues reports (digest/alerts unaffected). Its original role
+# as the payment-endgame interlock (deploy False until the 08-15/08-16
+# regen had re-sent the old ledger's sheets) is RETIRED by the clean-slate
+# ruling (Adnaan 2026-08-20): no payment ever went out, the old ledger is
+# archived, and the new era's sheets start fresh from the new ledger's
+# first daily send — so the flip deploys True. A canary still sets False
+# in its own checkout (FLIP_RUNBOOK §5.1: a canary never touches payment
+# surfaces).
 CONT_DAILY_REPORTS = True
 CONT_DISPATCH_IDLE_S = 2.0        # dispatcher poll when nothing eligible
 CONT_DRAIN_GRACE_S = 600          # SIGTERM: wait this long for runners

@@ -120,7 +120,12 @@ def test_scan_no_supersede_while_in_flight(cfg, ledger):
     assert ledger.get(SID1)["md5_video"] == "old"
 
 
-def test_next_batch_fifo_and_priority(cfg, ledger):
+def test_next_batch_fifo_and_priority(cfg, ledger, monkeypatch):
+    """F4 lagging-game balancing — the FALLBACK order. Since the 08-20
+    ruling the default is forced Kamla-first (INTAKE_GAME_PRIORITY), so
+    this pin runs with the forced priority unset; the ruled order itself
+    is pinned in test_flip_kamla_gate.py."""
+    monkeypatch.setattr(C, "INTAKE_GAME_PRIORITY", None)
     entries = (make_session_entries(md5="m1",
                                     ctime="2026-08-14T10:00:00.000Z")
                + make_session_entries(sid=SID2, md5="m2",
