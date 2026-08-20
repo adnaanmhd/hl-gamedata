@@ -219,3 +219,63 @@ def test_v1_nearmax_started_at_refuses_recovery(tmp_path):
     with pytest.raises(fixmod.FixFailed) as e:
         fixmod.fix_v1_to_v2(work, "kamla")
     assert "cannot recover" in str(e.value)
+
+
+# ------- r20 #4 / #9 (N2): fix_sessionjson_recompute's overflow
+# ------- degrade completed — the except arm cannot re-overflow and
+# ------- the ended emit joins the guard
+
+
+@needs_ffmpeg
+def test_recompute_survives_huge_container_duration(tmp_path,
+                                                    monkeypatch):
+    """r20 #4: M6's except arm reset `created` to now and re-ran the
+    IDENTICAL `ended = created + timedelta(duration)` — when the
+    DURATION itself is the overflowing side (a crafted/corrupt
+    container duration; player-supplied bytes are never bounded), the
+    re-run addition raised OverflowError a second time, uncaught,
+    inside the degrade arm — re-crashing the repair chain M6 was built
+    to save, on every plan (recompute rides every fix chain). The
+    inner addition now degrades to ended = created (zero-length; the
+    checker's duration compare owns the junk duration, G4)."""
+    import dataclasses
+
+    from translator.v2 import _TS_RE
+
+    from pipeline import fix as fixmod
+    from pipeline.tests.test_fix_cut_gate import _make_session
+    work = _make_session(tmp_path, seconds=80, name="n2dur")
+    real = fixmod.V.probe(work / "video.mp4")
+    monkeypatch.setattr(
+        fixmod.V, "probe",
+        lambda p: dataclasses.replace(real, duration_s=1e12))
+    note = fixmod.fix_sessionjson_recompute(work, "kamla")
+    assert "recomputed" in note
+    s = json.loads((work / "session.json").read_text())
+    assert _TS_RE.match(s["created_at_utc"]) and \
+        _TS_RE.match(s["ended_at_utc"])
+
+
+@needs_ffmpeg
+def test_recompute_nearmax_negoffset_ended_emit_degrades(tmp_path):
+    """r20 #9: the ended_at_utc emit astimezone sat OUTSIDE M6's guard
+    — a regex-conformant, parseable '9999-12-31T20:00:00-05:00'
+    survives the addition in naive fields (20:00 + clip stays inside
+    year 9999) and overflows only at the UTC conversion in s.update,
+    crashing the rewrite on both attempts with nothing written. The
+    emit now lives inside the guard and the shape degrades to the
+    designed synthesized stamp."""
+    from translator.v2 import _TS_RE
+
+    from pipeline import fix as fixmod
+    from pipeline.tests.test_fix_cut_gate import _make_session
+    work = _make_session(tmp_path, seconds=80, name="n2emit")
+    s = json.loads((work / "session.json").read_text())
+    s["created_at_utc"] = "9999-12-31T20:00:00-05:00"
+    (work / "session.json").write_text(json.dumps(s))
+    note = fixmod.fix_sessionjson_recompute(work, "kamla")
+    assert "recomputed" in note
+    out = json.loads((work / "session.json").read_text())
+    assert not out["created_at_utc"].startswith("9999"), \
+        "the unusable stamp is synthesized from now"
+    assert _TS_RE.match(out["ended_at_utc"])

@@ -1505,6 +1505,12 @@ def fix_sessionjson_recompute(work: Path, game: str) -> str:
             s["created_at_utc"] = created.astimezone(timezone.utc).strftime(
                 "%Y-%m-%dT%H:%M:%S.%f") + "Z"
         ended = created + timedelta(seconds=info.duration_s)
+        # r20 #9: the ended emit is stamp arithmetic too — a
+        # checker-conformant aware near-max stamp survives the
+        # addition in naive fields yet overflows the UTC conversion,
+        # so the emit lives INSIDE this guard, never at the s.update
+        ended_str = ended.astimezone(timezone.utc).strftime(
+            "%Y-%m-%dT%H:%M:%S.%f") + "Z"
     except OverflowError:
         # r19 #12 (M6): a PARSEABLE stamp within clip-duration of
         # datetime.max overflowed the ended addition (and an aware
@@ -1517,7 +1523,20 @@ def fix_sessionjson_recompute(work: Path, game: str) -> str:
         created = datetime.now(timezone.utc)
         s["created_at_utc"] = created.astimezone(timezone.utc).strftime(
             "%Y-%m-%dT%H:%M:%S.%f") + "Z"
-        ended = created + timedelta(seconds=info.duration_s)
+        try:
+            ended = created + timedelta(seconds=info.duration_s)
+        except OverflowError:
+            # r20 #4: the DURATION itself can be the overflowing side
+            # (a crafted/corrupt container duration — player-supplied
+            # bytes are md5-verified, never bounded), and this very
+            # addition re-raised uncaught INSIDE the degrade arm,
+            # re-crashing the repair chain it exists to save. The
+            # checker's duration compare degrades on the same input
+            # (G4); a stamp pair the junk duration cannot even span
+            # degrades to zero-length.
+            ended = created
+        ended_str = ended.astimezone(timezone.utc).strftime(
+            "%Y-%m-%dT%H:%M:%S.%f") + "Z"
     slug = game if game in C.GAMES else \
         (game_key_from_name(s.get("game_title", "")) or game)
     plat = s.get("platform")
@@ -1529,8 +1548,7 @@ def fix_sessionjson_recompute(work: Path, game: str) -> str:
     s.update(
         vendor_name=C.VENDOR,
         game_title=GAME_TITLES.get(slug, s.get("game_title", slug)),
-        ended_at_utc=ended.astimezone(timezone.utc).strftime(
-            "%Y-%m-%dT%H:%M:%S.%f") + "Z",
+        ended_at_utc=ended_str,
         duration_ms=round(info.duration_s * 1000.0),
         duration_seconds=round(info.duration_s, 3),
         fps=info.fps, frame_count=info.frame_count,
