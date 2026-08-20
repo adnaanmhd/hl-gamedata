@@ -48,6 +48,26 @@ scratchpad (tmp — the findings docs are the durable record).
   upgrades the VM to a **c2 instance, 56 CPUs, increased workers**
   (supersedes the 08-16 "permanent e2-standard-32" ruling; only the
   e2 exists as of 08-20 — the resize is a flip-session step).
+- **CLEAN-SLATE RULING (Adnaan, 2026-08-20, Q&A on record in the
+  executor session):** driver = distrust of pre-hardening
+  deliveries. **Drive II is wiped clean FIRST** (all ours, no client
+  files, no live client access, parachute EXPLICITLY WAIVED — "wipe
+  it"; content re-derivable from Drive I). **No payments have ever
+  gone out** → the old ledger, its payment stamps, sheet records and
+  the per-piece memory are VOID history: the flip starts a FRESH
+  HL_PIPELINE_HOME/ledger with no payment memory carried (the
+  payment MECHANISMS in code are unchanged and fully tested — only
+  the history resets). The 29-batch-rows "never touch" rule is
+  RELEASED; the vanished-folder/duplicate dead rows die with the old
+  ledger (whatever is physically in Drive I re-registers fresh).
+  Scope = ALL of Drive I, nothing excluded (~1285 fh at the 08-19
+  snapshot: 1175 Kamla + 110 OW, 3644 sessions, 209 players, growing
+  ~290 h/day — the flip session re-measures). Sequence stands: e2e
+  session → flip session. **Aug 24 still BINDS** and the full drive
+  cannot clear by then at any projected rate → the flip session
+  confirms the priority order (default recommendation: Kamla first,
+  oldest-first, OW behind). OW satellite-camera mapping decision
+  PENDING Adnaan (asked 08-20 after the plain-language explainer).
 - Post-O: floor 846 pinned; BOTH host gates at 850/846 — see the
   verdict report for the recorded numbers; tree-verify clean.
 
@@ -172,23 +192,30 @@ drive-collect:/drive-deliver:; `~/.config/hl-gamedata/secrets.env`
 has GEMINI+TELEGRAM vars (never print it).
 
 **FLIP (after the e2e verdict + Adnaan's go; full brief in
-`FLIP_EXEC_KICKOFF_PROMPT.md`):** c2-56 resize, then
-`FLIP_RUNBOOK.md` end to end (§5 canary → §6 flip → §7 payment
-endgame with the final invariant anchor `2026-08-16T05:32:50+00:00` →
-§8 tree verify + LAST destructive act → reject-reason table → final
-independent live verifier → final report per
-`FLIP_SESSION_KICKOFF_PROMPT.md` §6 steps 7–9), destructive gates
-intact (parachute before reset-class actions, preview before
-`--send`, `recal_verify_tree.py` CLEAN before any deletion). Then
-Drive I processing starts (~600+ fh backlog; conservative c2-56
-projection 8–12 min/fh ≈ 120–180 fh/day — MEASURE in the canary's
-first hours and re-project; the Gemini quota ladder is the likeliest
-ceiling, watch 429-pressure).
+`FLIP_EXEC_KICKOFF_PROMPT.md`, which carries the CLEAN-SLATE
+amendments):** c2-56 resize → Drive I measured → **Drive II wiped
+(ruled, parachute waived)** → fresh HL_PIPELINE_HOME/ledger →
+FLIP_RUNBOOK §5 canary (measure real min/fh in the first hours and
+re-project) → §6 flip → full-drive processing in the confirmed
+priority order → fresh-era payment sheets → final report per
+`FLIP_SESSION_KICKOFF_PROMPT.md` §6 steps 7–9. The runbook's §7
+legacy payment endgame (the `2026-08-16T05:32:50+00:00` anchor) and
+§8 legacy-reconciliation acts are SUPERSEDED by the clean slate —
+skip and say so. Timeline arithmetic at the 08-19 snapshot (1285 fh):
+conservative 8–12 min/fh → ~7–11 days for the full drive; optimistic
+6–8 → ~5.5–7 days; **Aug 24 covers roughly 350–550 fh at conservative
+rates from an Aug-21 start** — hence the priority order. The Gemini
+quota ladder is the likeliest ceiling at 44 workers; watch
+429-pressure.
 
 ## 6. Reporting — the payment-surface list of record
 
-Verdict-first, per phase. Every observable payment-surface change of
-this stream (surface at every checkpoint/final report):
+Verdict-first, per phase. **CLEAN-SLATE NOTE (08-20): no payments
+ever went out, and the flip retires the old ledger — the list below
+is the record of payment-CODE behavior (all of it ships unchanged
+into the new era and stays reportable); the old sheets/stamps/memory
+are void history.** Every observable payment-surface change of this
+stream (surface at every checkpoint/final report):
 - F6 (NULL-duration roots' accepted hours paid), F7 + r12 #1/#2 +
   G1 + H1 (compare-and-set stamps and the '' adjudication chain incl.
   the pre-build counted_at anchor), G5 + H3/H9a (rebuild-reset under
