@@ -63,11 +63,19 @@ scratchpad (tmp — the findings docs are the durable record).
   Scope = ALL of Drive I, nothing excluded (~1285 fh at the 08-19
   snapshot: 1175 Kamla + 110 OW, 3644 sessions, 209 players, growing
   ~290 h/day — the flip session re-measures). Sequence stands: e2e
-  session → flip session. **Aug 24 still BINDS** and the full drive
-  cannot clear by then at any projected rate → the flip session
-  confirms the priority order (default recommendation: Kamla first,
-  oldest-first, OW behind). OW satellite-camera mapping decision
-  PENDING Adnaan (asked 08-20 after the plain-language explainer).
+  session → flip session. **Aug 24 still BINDS.** **Processing order
+  RULED (Adnaan, 08-20 follow-up): Kamla first, oldest-first, until
+  the delivery drive holds 500 DELIVERED Kamla hours (ledger SUM of
+  duration_delivered_s over DELIVERED kamla nodes) — then Kamla
+  processing STOPS** (in-flight finishes, slight overshoot accepted,
+  the rest of Kamla stays raw in Drive I); OW continues after the
+  stop. OW satellite-camera mapping: mechanism + naming PROPOSED
+  08-20 (a `satellite_camera` HUD-template context in
+  translator/context.py — the existing template-matching recipe —
+  with `satellite_`-prefixed snake_case action names pinned during
+  frame verification; strip-to-blank is the fallback if the client's
+  action vocabulary is closed); AWAITING Adnaan's + client-vocabulary
+  confirmation, lands as its own ruled task.
 - Post-O: floor 846 pinned; BOTH host gates at 850/846 — see the
   verdict report for the recorded numbers; tree-verify clean.
 

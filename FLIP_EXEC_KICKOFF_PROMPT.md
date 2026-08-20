@@ -72,16 +72,23 @@ the pre-wipe era); the new home starts empty.
    CPU.
 7. **FLIP_RUNBOOK §6 — the flip itself** (systemd deploy; the
    continuous driver goes live against Drive I).
-8. **Full-drive processing, priority order (Aug 24 BINDS and the
-   full drive cannot clear by then — see the arithmetic in the plan
-   §5):** confirm the order with Adnaan at this step in one
-   question — the default recommendation is Kamla first (the 500h
-   phase-1 target side with 1175h collected), oldest-first within a
-   game, OW behind it. OW's input-action mapping
-   (`satellite_camera`) may still be pending a ruling — check plan
-   §6's QUEUED item status before delivering OW; if unbuilt and
-   Adnaan ruled process-now, deliver OW as-is and record which OW
-   sessions need the later action-column re-map.
+8. **Processing order (RULED, Adnaan 2026-08-20):** Kamla first,
+   oldest-first, **until the delivery drive holds 500 DELIVERED
+   Kamla hours** — measured as SUM(duration_delivered_s) over
+   DELIVERED kamla nodes in the new ledger — **then STOP Kamla
+   processing** (in-flight sessions finish; slight overshoot past
+   500 is accepted; the remaining Kamla raw hours stay unprocessed
+   in Drive I). Expect to process meaningfully MORE than 500 raw
+   Kamla hours to net 500 delivered (head/tail trims, rejects,
+   cuts) — measure the live delivered/raw ratio in the first day
+   and project the stop point. Mechanism: if no intake game-filter
+   knob exists, implement a minimal ruled Kamla-stop gate with the
+   full §2 discipline (fail-first test, both host gates) — do not
+   improvise an ungated hack. OW processing continues after the
+   Kamla stop. OW's `satellite_camera` action mapping: check plan
+   §6's QUEUED item status before delivering OW — if it is not yet
+   landed and Adnaan ruled process-now, deliver OW as-is and record
+   which OW sessions need the later action-column re-map.
 9. **Daily payment sheets start fresh** from the new ledger (first
    send is the new era's first counted window; the folder-issues
    report follows its marker rule).
