@@ -709,3 +709,103 @@ def test_v1_absurd_finite_head_refuses_on_live_route(tmp_path):
     with pytest.raises(fixmod.FixFailed) as e:
         fixmod.fix_v1_to_v2(work, "kamla")
     assert "canonical.trim" in str(e.value)
+
+
+# ------- r21 #2 (O2): the synthesized stamp stays OUT of the live
+# ------- head-offset contract
+
+
+def _o2_bundle(tmp_path, name):
+    """A real session whose raw sidecars carry mouse_raw events and
+    whose CSV is made provably consistent with them by a REAL
+    retranslate at the true stamp — the fixture the raw verify then
+    judges."""
+    from datetime import timedelta
+
+    from pipeline.tests.test_fix_cut_gate import _make_session
+    from pipeline.tests.test_r_loop8 import _created_at, _sidecars
+    work = _make_session(tmp_path, seconds=100, name=name)
+    created = _created_at(work)
+    started = created - timedelta(seconds=0.0)
+    evs = [{"t": int(t0 * 1e6), "type": "mouse_raw", "dx": 7, "dy": -3}
+           for t0 in (10.0, 30.0, 50.0)]
+    _sidecars(work, started, evs)
+    return work
+
+
+@needs_ffmpeg
+def test_recompute_synthesized_stamp_is_marked_and_shielded(tmp_path):
+    """r21 #2 (O2): fix_sessionjson_recompute synthesized created=now
+    with NO marker, and on a session with USABLE raw sidecars that
+    stamp entered the live head-offset contract — the raw verify
+    re-binned at head = now − started, falsely condemned the correct
+    CSV (SYN_TS_NOT_PTS), and the planned retranslate refused
+    deterministically on both attempts: a wrongful terminal reject of
+    deliverable footage whose sidecar-less twin DELIVERS. The
+    synthesize arms now record created_synthesized in the shift_us
+    report (merged, pre-write) and the verify warn-skips on it — the
+    M1 warn-skip precedent, extended to the direct-v2 repair route."""
+    from translator.v2 import check_session_v2
+
+    from pipeline import fix as fixmod
+    work = _o2_bundle(tmp_path, "o2main")
+    note = fixmod.retranslate_from_sidecars(work, ledger_game="kamla")
+    assert "re-translated" in note
+    ctl = check_session_v2(work, raw_bundle=work / "raw")
+    assert not [i for i in ctl.issues
+                if "raw recomputation" in i and i.startswith("FAIL")], \
+        "control: the true stamp verifies clean"
+    s = json.loads((work / "session.json").read_text())
+    s["created_at_utc"] = "31/07/2026 10am"
+    (work / "session.json").write_text(json.dumps(s))
+    fixmod.fix_sessionjson_recompute(work, "kamla")
+    rep = json.loads(
+        (work.parent / "translation_report.json").read_text())
+    assert rep[work.name]["created_synthesized"] is True, \
+        "the synthesize arm must record the fact"
+    r = check_session_v2(work, raw_bundle=work / "raw")
+    assert not [i for i in r.issues
+                if "raw recomputation" in i and i.startswith("FAIL")], \
+        "the raw verify must never act on a synthesized stamp"
+    assert any("synthesized" in i for i in r.issues), \
+        "…and must say why it skipped"
+
+
+@needs_ffmpeg
+def test_retranslate_refuses_synthesized_stamp(tmp_path):
+    """O2 second consumer: retranslate_from_sidecars derives head_s
+    from created − started — against a synthesized stamp that is a
+    fabricated offset (silent desync, or the zero-events refusal
+    burning both attempts with a misleading message). It now refuses
+    typed, NAMING the synthesis."""
+    import pytest
+
+    from pipeline import fix as fixmod
+    work = _o2_bundle(tmp_path, "o2ret")
+    s = json.loads((work / "session.json").read_text())
+    s["created_at_utc"] = "31/07/2026 10am"
+    (work / "session.json").write_text(json.dumps(s))
+    fixmod.fix_sessionjson_recompute(work, "kamla")
+    with pytest.raises(fixmod.FixFailed) as e:
+        fixmod.retranslate_from_sidecars(work, ledger_game="kamla")
+    assert "SYNTHESIZED" in str(e.value)
+
+
+@needs_ffmpeg
+def test_recompute_preserved_stamp_writes_no_marker(tmp_path):
+    """O2 proceed-side control (§2 rule 4): a parseable stamp is
+    PRESERVED (or canonically re-emitted) — no marker is written, and
+    the raw verify still runs."""
+    from translator.v2 import check_session_v2
+
+    from pipeline import fix as fixmod
+    work = _o2_bundle(tmp_path, "o2ctl")
+    fixmod.fix_sessionjson_recompute(work, "kamla")
+    p = work.parent / "translation_report.json"
+    if p.exists():
+        entry = json.loads(p.read_text()).get(work.name) or {}
+        assert not entry.get("created_synthesized"), \
+            "a preserved stamp must not be marked synthesized"
+    r = check_session_v2(work, raw_bundle=work / "raw")
+    assert not any("synthesized" in i for i in r.issues), \
+        "no spurious skip on a preserved stamp"

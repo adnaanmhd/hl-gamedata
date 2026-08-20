@@ -992,6 +992,28 @@ def check_session_v2(session_dir: Path, raw_bundle: Path | None = None) -> V2Res
     return r
 
 
+def _created_synthesized(session_dir: Path) -> bool:
+    """Was this session's created_at_utc SYNTHESIZED (not preserved or
+    re-emitted) by a session.json repair? Recorded in
+    translation_report.json by pipeline.fix.fix_sessionjson_recompute
+    (r21 #2). A synthesized stamp carries NO head-offset information,
+    so the raw verify (created − started == binning head) and any
+    retranslate must never act on it — acting on one falsely condemned
+    a correct CSV and drove a deterministic wrongful terminal reject.
+    Same location walk as _applied_shift_us below."""
+    d = Path(session_dir).resolve()
+    for parent in list(d.parents)[:4]:
+        p = parent / "translation_report.json"
+        if p.is_file():
+            try:
+                entry = json.loads(p.read_text()).get(d.name) or {}
+                return bool(entry.get("created_synthesized"))
+            except (json.JSONDecodeError, ValueError, TypeError,
+                    AttributeError, OSError):
+                return False
+    return False
+
+
 def _applied_shift_us(session_dir: Path) -> int:
     """Read the sync shift applied at translate time, if any.
 
@@ -1034,6 +1056,15 @@ def _verify_against_raw(session_dir: Path, raw_bundle: Path, s: dict,
     applies the same shift so an intentional correction isn't reported as
     misattribution."""
     from bisect import bisect_right
+    if _created_synthesized(session_dir):
+        # r21 #2: the stamp was synthesized by a session.json repair —
+        # created − started is NOT the binning head here, and re-binning
+        # by it falsely condemned a provably-correct CSV (SYN_TS_NOT_PTS
+        # → a retranslate that deterministically refuses → wrongful
+        # terminal reject). Same disposition as unreadable timestamps.
+        r.warn("raw verification skipped: created_at_utc was synthesized "
+               "by a session.json repair (no head-offset ground truth)")
+        return
     # DEGRADE, never crash. Every value read here comes from unvalidated,
     # player-supplied files: ingest moves metadata.json into raw/ without
     # ever parsing it, and `created_at_utc` is absent precisely when

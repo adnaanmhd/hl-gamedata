@@ -980,6 +980,18 @@ def retranslate_from_sidecars(work: Path, *,
             f"({'ok' if started else 'unusable'}) / session.json "
             f"created_at_utc ({'ok' if created else 'unusable'}) — "
             "session.json must be repaired before a re-translate")
+    from translator.v2 import _created_synthesized
+    if _created_synthesized(work):
+        # r21 #2 (O2): the stamp parses but was SYNTHESIZED by
+        # fix_sessionjson_recompute — created − started is a
+        # fabrication, and re-binning by it silently desyncs every
+        # event (or refuses on the zero-events guard, burning both
+        # attempts). Typed refusal, the M2-sibling disposition.
+        raise FixFailed(
+            "cannot derive the head offset: session.json created_at_utc "
+            "was SYNTHESIZED by a session.json repair — no head-offset "
+            "ground truth survives, and re-binning against a fabricated "
+            "offset would silently desync every event (r21 #2)")
     head_s = max((created - started).total_seconds(), 0.0)
 
     info = V.probe(work / "video.mp4")
@@ -1491,6 +1503,7 @@ def fix_sessionjson_recompute(work: Path, game: str) -> str:
     except (AttributeError, ValueError):
         created = datetime.now(timezone.utc)
         parsed_ok = False
+    synthesized = not parsed_ok
     # re-emit canonically whenever the ORIGINAL string is not
     # checker-conformant: covers the naive case (already handled above)
     # AND the aware-nonconforming ones — '+0000' offsets and space
@@ -1521,6 +1534,7 @@ def fix_sessionjson_recompute(work: Path, game: str) -> str:
         # 52/57). Fall back to the designed unusable-stamp degrade:
         # synthesize from now.
         created = datetime.now(timezone.utc)
+        synthesized = True
         s["created_at_utc"] = created.astimezone(timezone.utc).strftime(
             "%Y-%m-%dT%H:%M:%S.%f") + "Z"
         try:
@@ -1560,6 +1574,25 @@ def fix_sessionjson_recompute(work: Path, game: str) -> str:
     s.setdefault("screen_height_px", info.height)
     if not _conv_valid(s.get("input_mouse_convention")):
         s["input_mouse_convention"] = dict(MOUSE_CONVENTION)
+    if synthesized:
+        # r21 #2 (O2): a synthesized stamp carries NO head-offset
+        # information — created − started is the LIVE binning-head
+        # contract wherever usable raw sidecars exist, and feeding it
+        # a now-UTC fabrication poisoned the raw verify into
+        # condemning a correct CSV and the retranslate into a
+        # deterministic wrongful terminal reject (the M1/N1 doctrine,
+        # extended to the direct-v2 repair route). Record the fact
+        # where the verify and retranslate already look (the shift_us
+        # report; merge — never clobber a shift entry), BEFORE the
+        # session.json write so a crash between the two can never
+        # leave an unmarked synthesized stamp. The marker rides the
+        # report entry's lifecycle: supersede/heal remove the entry
+        # with the stale shift record, and a fresh translate starts
+        # clean.
+        from .validate import _locked_report_update
+        _locked_report_update(work.parent / "translation_report.json",
+                              work.name,
+                              {"created_synthesized": True}, merge=True)
     tmp = work / "session.json.tmp"
     tmp.write_text(json.dumps(s, indent=2))
     tmp.replace(work / "session.json")

@@ -1133,9 +1133,15 @@ def _seed_shift_record(work_dir: Path) -> None:
 
 
 def _locked_report_update(report_path: Path, name: str,
-                          record: dict | None) -> None:
+                          record: dict | None,
+                          merge: bool = False) -> None:
     """Merge one entry into the SHARED work-root translation_report.json
-    (record=None DELETES the entry — see _locked_report_remove).
+    (record=None DELETES the entry — see _locked_report_remove;
+    merge=True folds `record`'s keys into the EXISTING entry under the
+    lock instead of replacing it wholesale — r21 #2's
+    created_synthesized marker must not clobber a shift_us entry, and
+    a read-merge-write outside the lock would re-open the r1 #8 lost
+    update this lock exists to prevent).
     Up to 8 validation workers race this file; a bare read-modify-write
     loses entries and the lost shift makes qa-v2 spuriously FAIL sync on
     revalidation (review-r1 #8). mkdir is the portable atomic lock; on
@@ -1223,6 +1229,10 @@ def _locked_report_update(report_path: Path, name: str,
                 return          # nothing to drop — don't create the file
             del existing[name]
         else:
+            if merge:
+                prev = existing.get(name)
+                record = {**(prev if isinstance(prev, dict) else {}),
+                          **record}
             existing[name] = record
         # atomic replace: qa's unlocked readers must never see a torn
         # file (review-r2 #42); pid-unique tmp so two writers that ever
