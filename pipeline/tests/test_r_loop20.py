@@ -562,3 +562,58 @@ def test_v1_sidecar_probe_degrades_on_truncated_metadata(tmp_path):
     out = json.loads((work / "session.json").read_text())
     assert _TS_RE.match(out["created_at_utc"]), \
         "unusable stamp + unreadable sidecars: omit-and-synthesize"
+
+
+# ------- r21 #1 (O1, payment-surface): _stamp's non-CAS arms never
+# ------- re-land the labels mark on a reset generation
+
+
+def test_midwindow_blank_supersede_does_not_reland_labels_mark(
+        cfg, ledger, capsys):
+    """r21 #1 (O1): N3 clears the LABELS-only accepted mark at the ''
+    writers, but reports._stamp re-landed the same mark when the ''
+    supersede fired BETWEEN the sheet's row read and the accepted
+    stamp — the CAS missed (row now ''), and the CAS-miss-'' arm (or
+    the unconditional/recorded-'' arms) stamped the fresh DISCOVERED
+    generation. The identical-bytes re-run that then DELIVERED carried
+    a mark no sheet ever counted hours under: footage shipped, hours
+    reached no sheet, forever, silently. _stamp now skips the ACCEPTED
+    column LOUDLY when the row's state is no longer
+    DELIVERED/REJECTED; uploaded keeps every arm unchanged."""
+    from datetime import datetime
+
+    import pipeline.config as C
+    from pipeline import reports
+    from pipeline.tests.test_payment_split_r6 import (UNFIXABLE, W1, W2,
+                                                      W3, _put, _sheet)
+    sid = "2026-08-14T09-00-00Z_kamla_c_00000000000000o1"
+    _put(ledger, sid, state="REJECTED", raw=1800.0, reasons=UNFIXABLE,
+         player="o1@x.com")
+    ledger.update(sid, md5_video="a1" * 16)
+    counted, accepted, md5s = [], [], {}
+    reports.build_sheet_rows(ledger, datetime.now(C.IST), bounds=W1,
+                             counted_out=counted, accepted_out=accepted,
+                             md5_out=md5s)
+    assert sid in counted and sid in accepted
+    ledger.supersede(sid, new_md5="", new_bytes=22,
+                     new_ctime="2026-08-15T00:00:00.000Z",
+                     dossier_root=cfg.dossiers)
+    reports.mark_uploads_reported(ledger, *W1, sids=counted, md5s=md5s)
+    capsys.readouterr()
+    reports.mark_accepted_reported(ledger, accepted, md5s=md5s)
+    row = ledger.get(sid)
+    assert row["uploaded_reported_at"], \
+        "uploaded keeps today's behavior on every arm"
+    assert row["accepted_reported_at"] is None, \
+        "the labels mark must not land on the reset generation"
+    assert "SKIPPED" in capsys.readouterr().err, "…and must say so"
+    ledger.update(sid, duration_delivered_s=1700.0,
+                  delivered_at="2026-08-15T10:00:00+00:00")
+    ledger.set_state(sid, "DELIVERED")
+    rows2 = _sheet(ledger, W2)
+    mine = [r for r in rows2 if r["player_email"] == "o1@x.com"]
+    assert mine and mine[0]["kamla_accepted_hrs"] == 0.47, \
+        "the delivered re-run's hours reach the next sheet"
+    rows3 = _sheet(ledger, W3)
+    assert not [r for r in rows3 if r["player_email"] == "o1@x.com"], \
+        "…and exactly once"

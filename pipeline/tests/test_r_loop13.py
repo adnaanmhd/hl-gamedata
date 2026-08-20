@@ -89,10 +89,15 @@ def test_zip_supersede_mid_send_self_heals_at_download(cfg, ledger,
                         supersede_mid_send)
     assert runmod.send_daily_report_if_due(cfg, ledger, send) is True
     row = ledger.get(sid)
-    # arm 4 stamps the ''-holding row (unchanged r12 #1/#2 behavior —
-    # the #3 refuter's own recommendation): the false stamp is accepted
-    # here BECAUSE the breadcrumb makes it deferral-covered below
-    assert row["uploaded_reported_at"] and row["accepted_reported_at"]
+    # arm 4 stamps the ''-holding row's UPLOADED mark (unchanged r12
+    # #1/#2 behavior — the #3 refuter's own recommendation): the false
+    # stamp is accepted here BECAUSE the breadcrumb makes it
+    # deferral-covered below. The ACCEPTED mark is r21 #1 (O1): the
+    # supersede reset the generation (state DISCOVERED), so _stamp's
+    # guard SKIPS it — landing it stranded a delivered re-run's hours
+    # (the N3 labels class one step downstream).
+    assert row["uploaded_reported_at"]
+    assert row["accepted_reported_at"] is None
     ev = ledger.db.execute(
         "SELECT detail FROM events WHERE session_id=? AND "
         "detail LIKE 'superseded: new md5 %'", (sid,)).fetchone()
@@ -199,8 +204,13 @@ def test_identical_rezip_supersede_stamp_stands(cfg, ledger, monkeypatch):
     assert ledger.get(sid)["uploaded_reported_at"]
     _download_with_bytes(cfg, ledger, monkeypatch, sid, payload)
     row = ledger.get(sid)
-    assert row["uploaded_reported_at"] and row["accepted_reported_at"], \
-        "identical bytes: the stamp correctly stands"
+    # the UPLOADED stamp correctly stands for identical bytes; the
+    # ACCEPTED mark is skipped at stamp time since r21 #1 (O1) — the
+    # supersede reset the generation, and the mark would strand a
+    # delivered re-run's hours (state-guard in _stamp)
+    assert row["uploaded_reported_at"], \
+        "identical bytes: the uploaded stamp correctly stands"
+    assert row["accepted_reported_at"] is None
     assert not _adj_events(ledger, sid), \
         "no adjudication marker for unchanged bytes"
     assert runmod.send_daily_report_if_due(

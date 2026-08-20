@@ -338,6 +338,32 @@ def _stamp(ledger: Ledger, sid: str, column: str, now: str,
     production paths (fresh send + resume) always pass it; None
     (tools/legacy callers without a count record) keeps the
     unconditional recorded-'' stamp."""
+    if column == "accepted_reported_at":
+        row = ledger.get(sid)
+        if row is not None and row["state"] not in ("DELIVERED",
+                                                    "REJECTED"):
+            # r21 #1 (O1): the accepted mark means "THIS generation's
+            # accepted hours / reject labels counted" — a row no
+            # longer DELIVERED/REJECTED was reset by a '' writer
+            # inside the send window (supersede/heal; both callers
+            # are gated on REJECTED/QUARANTINED slots, so the mark
+            # being landed here is always N3's LABELS-only mark).
+            # Landing it on the fresh generation stranded a
+            # later-DELIVERED re-run's hours off every sheet,
+            # silently — the r20 #2≡#6 class one step downstream of
+            # the writers N3 fixed, re-entering through the three
+            # non-CAS arms below (unconditional, recorded-'',
+            # CAS-miss-now-''). Skip LOUDLY: a re-run that re-rejects
+            # re-prints its label once (the ruled N3 cost — no money
+            # moves through a label); one that delivers reaches the
+            # next sheet exactly once. uploaded_reported_at keeps
+            # every arm unchanged (skipping it on identical bytes
+            # would re-open the r12 #1/#2 uploaded double-pay).
+            print(f"[sheet-stamp] {sid}: row was reset mid-window "
+                  f"(state={row['state']}) — {column} SKIPPED; the "
+                  f"next generation's hours/labels stay countable",
+                  file=sys.stderr)
+            return False
     if md5s is None or sid not in md5s:
         # caller without a snapshot (tools, pre-r9 resume records, or a
         # sid the map never recorded): the pre-r11 unconditional stamp
