@@ -513,3 +513,52 @@ def test_heal_real_md5_over_blank_adjudicates_breadcrumb(cfg, ledger):
     assert row["uploaded_reported_at"] is None \
         and row["duration_raw_s"] is None, \
         "a different real md5 over '' is known-new bytes — full clear"
+
+
+# ------- r20 #8 (N5, tests-only): _v1_sidecar_started's degrade
+# ------- envelope gets failing-side pins — the finders' exact
+# ------- mutants killed
+
+
+@needs_ffmpeg
+def test_v1_sidecar_probe_tolerates_non_utf8_metadata(tmp_path):
+    """r20 #8 pin (a): the M1 probe's metadata read carries
+    errors='replace' — player-typed latin-1 inside a string value must
+    not cost the recovery (UnicodeDecodeError is a ValueError but NOT
+    JSONDecodeError, so the probe's except tuple cannot catch a bare
+    read). The finder's exact drop-errors mutant was FULL-gate-green
+    at 821; it fails only this pin."""
+    from pipeline import fix as fixmod
+    from pipeline.tests.test_r_loop19 import _v1_with_sidecars
+    work = _v1_with_sidecars(tmp_path, "not-a-date", "n5lat",
+                             "2026-08-10T15:33:55Z",
+                             {"head_cut_s": 8.0}, at_root=True)
+    (work / "metadata.json").write_bytes(
+        b'{"recording": {"started_at_utc": "2026-08-10T15:33:55Z"},'
+        b' "player": "Jos\xe9"}')
+    note = fixmod.fix_v1_to_v2(work, "kamla")
+    assert "recovered" in note
+    s = json.loads((work / "session.json").read_text())
+    assert s["created_at_utc"] == "2026-08-10T15:34:03.000000Z"
+
+
+@needs_ffmpeg
+def test_v1_sidecar_probe_degrades_on_truncated_metadata(tmp_path):
+    """r20 #8 pin (b): a PRESENT-but-truncated metadata.json must read
+    as no-sidecars (the probe's OSError/JSONDecodeError arm) so the
+    no-sidecar degrade applies — omit the junk stamp and synthesize.
+    The finder's exact delete-the-try/except mutant was
+    FULL-gate-green at 821; it fails only this pin."""
+    from translator.v2 import _TS_RE
+
+    from pipeline import fix as fixmod
+    from pipeline.tests.test_r_loop19 import _v1_with_sidecars
+    work = _v1_with_sidecars(tmp_path, "not-a-date", "n5trunc",
+                             "2026-08-10T15:33:55Z",
+                             {"head_cut_s": 8.0}, at_root=True)
+    (work / "metadata.json").write_text('{"recording": {"started_at')
+    note = fixmod.fix_v1_to_v2(work, "kamla")
+    assert "converted v1 -> v2" in note and "recovered" not in note
+    out = json.loads((work / "session.json").read_text())
+    assert _TS_RE.match(out["created_at_utc"]), \
+        "unusable stamp + unreadable sidecars: omit-and-synthesize"
