@@ -69,13 +69,21 @@ scratchpad (tmp — the findings docs are the durable record).
   duration_delivered_s over DELIVERED kamla nodes) — then Kamla
   processing STOPS** (in-flight finishes, slight overshoot accepted,
   the rest of Kamla stays raw in Drive I); OW continues after the
-  stop. OW satellite-camera mapping: mechanism + naming PROPOSED
-  08-20 (a `satellite_camera` HUD-template context in
+  stop. **OW satellite-camera mapping RULED (Adnaan, 08-20): schema
+  APPROVED** (a `satellite_camera` HUD-template context in
   translator/context.py — the existing template-matching recipe —
-  with `satellite_`-prefixed snake_case action names pinned during
-  frame verification; strip-to-blank is the fallback if the client's
-  action vocabulary is closed); AWAITING Adnaan's + client-vocabulary
-  confirmation, lands as its own ruled task.
+  with `satellite_`-prefixed snake_case action names pinned to the
+  frame-verified terminal prompts (RMB → satellite_forward_snapshot,
+  R → satellite_rearview_snapshot, Q → satellite_exit, mouse-look →
+  blank — the camera is frozen; strip-to-blank fallback for ALL of
+  them if the client's action vocabulary proves closed — check
+  first). **It is implemented AFTER the flip, in its OWN session
+  ("can no longer hold Kamla hrs hostage" — nothing waits on it),
+  and the implementation gets its own ADVERSARIAL REVIEW pass
+  before deploying** — kickoff: `SATELLITE_KICKOFF_PROMPT.md`. OW
+  sessions delivered before the mapping lands are RECORDED by the
+  flip session and get their action columns re-mapped +
+  re-delivered once it ships.
 - Post-O: floor 846 pinned; BOTH host gates at 850/846 — see the
   verdict report for the recorded numbers; tree-verify clean.
 
@@ -85,11 +93,17 @@ scratchpad (tmp — the findings docs are the durable record).
   independent REAL e2e, fresh executor, verdict relayed VERBATIM to
   Adnaan. A BLOCKED-with-error never becomes a pass. Does NOT flip.
 - [ ] **FLIP session** (new session, only after the e2e verdict and
-  Adnaan's explicit go; `FLIP_EXEC_KICKOFF_PROMPT.md`): c2-56
-  resize → FLIP_RUNBOOK end to end (§5 canary → §6 flip → §7
-  payment endgame → §8 verify) → continuous processing of the
-  Drive I backlog (~600+ fh) begins → throughput measured and
-  re-projected → final report.
+  Adnaan's explicit go; `FLIP_EXEC_KICKOFF_PROMPT.md` — carries the
+  clean-slate amendments): c2-56 resize → Drive I measured →
+  Drive II wiped (ruled) → fresh ledger → canary → flip →
+  Kamla-first processing to the 500-delivered-hours stop → OW →
+  fresh-era payment sheets → final report.
+- [ ] **SATELLITE session** (new session, AFTER the flip;
+  `SATELLITE_KICKOFF_PROMPT.md`): implement the ruled
+  `satellite_camera` context + action names → **adversarial review
+  pass over the implementation (RULED)** → fix confirmed findings →
+  deploy the updated translator → re-map + re-deliver the recorded
+  pre-mapping OW sessions.
 
 ---
 
@@ -251,13 +265,10 @@ stream (surface at every checkpoint/final report):
   downstream), direction derived from N3's doctrine, **UNREVIEWED by
   a loop pass — verified by the e2e**.
 
-Also report the QUEUED new-scope item: the OW Observatory
-satellite-camera terminal is an unmodelled context (memory
-`ow-satellite-camera-context-gap`) — spec'd as a `satellite_camera`
-template + label in translator/context.py + frame-verification; the
-delivery-vocabulary choice is Adnaan's/the client's; it lands as its
-own ruled task. **Flip-session decision (Adnaan): process OW now and
-reprocess the action columns when that task lands (recommended;
-~1–3 min/fh on OW sessions only), or hold OW until it lands.**
-Label every mixed-methodology comparison as such. Relay verifier
-verdicts verbatim.
+Also report the OW satellite-camera item's status: **RULED 08-20 —
+schema approved, implemented AFTER the flip in its own session with
+its own adversarial review (`SATELLITE_KICKOFF_PROMPT.md`); OW
+processes in queue order regardless; pre-mapping OW deliveries are
+recorded for the post-landing re-map + re-delivery.** Label every
+mixed-methodology comparison as such. Relay verifier verdicts
+verbatim.

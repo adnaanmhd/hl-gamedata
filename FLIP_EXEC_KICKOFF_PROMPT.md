@@ -85,10 +85,13 @@ the pre-wipe era); the new home starts empty.
    knob exists, implement a minimal ruled Kamla-stop gate with the
    full §2 discipline (fail-first test, both host gates) — do not
    improvise an ungated hack. OW processing continues after the
-   Kamla stop. OW's `satellite_camera` action mapping: check plan
-   §6's QUEUED item status before delivering OW — if it is not yet
-   landed and Adnaan ruled process-now, deliver OW as-is and record
-   which OW sessions need the later action-column re-map.
+   Kamla stop. OW's `satellite_camera` action mapping is RULED to
+   land AFTER the flip in its own session
+   (`SATELLITE_KICKOFF_PROMPT.md`) — OW processes in queue order
+   regardless; **RECORD the session ids of every OW session
+   delivered before the mapping lands** (a durable list in the new
+   pipeline home) so the satellite session can re-map their action
+   columns and re-deliver exactly those.
 9. **Daily payment sheets start fresh** from the new ledger (first
    send is the new era's first counted window; the folder-issues
    report follows its marker rule).
