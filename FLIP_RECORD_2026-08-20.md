@@ -65,6 +65,7 @@ RULED 08-20 — implemented AFTER the flip in its own session with its own adver
 
 ## Open items / watch list
 
+- **RULED (Adnaan 2026-08-20 20:15 IST): at the resize, also raise `CONT_UPLOAD_WORKERS` 4 → 8** in the same deploy (knob + update the pin in `test_flip_upload_lanes.py`; the floor decision is already lane-safe).
 - **Re-resize to `c2d-highcpu-56`** once `gcloud beta quotas preferences describe cpus-all-regions-64` shows `grantedValue: 64`: stop unit → stop VM → `set-machine-type c2d-highcpu-56` → start → `config-ssh` → `systemctl start hl-continuous` (pool ceiling is import-time; 44 workers). Note the canary saturated 32 vCPU (load 44) at 8–10 concurrent validations — CPU, not Gemini, was the first ceiling; 56 vCPU should lift it, watch `CONT_CPU_HIGH`.
 - **Reject-label surface to glance at:** the 4 rejects carry `fixable:true` stored reasons with an unfixable OUTCOME (`split produced no >=70s segment`) — check how tomorrow's sheet labels them (M5 filters on the stored fixable field).
 - **F2 reject signature** (v1-sniffed payload, `QA_FAIL_UNMAPPED missing delivery file: session.rrd/rrd_creation.py`): none seen yet; grep the ledger's `reasons_json` daily.
