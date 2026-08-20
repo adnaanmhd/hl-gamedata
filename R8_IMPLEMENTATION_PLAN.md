@@ -89,7 +89,9 @@ scratchpad (tmp — the findings docs are the durable record).
 
 **ACTIVE — the remaining sequence:**
 - [x] O-set landed + floor + gates + verdict delivered (this session).
-- [ ] **E2E session** (new session; `E2E_KICKOFF_PROMPT.md`): the
+- [x] **E2E session** (DONE 2026-08-20; verdict **GREEN-WITH-FINDINGS**,
+  Adnaan accepted + gave the go — full report `E2E_VERDICT.md`, commits
+  `6541807`+`e27c266`): the
   independent REAL e2e, fresh executor, verdict relayed VERBATIM to
   Adnaan. A BLOCKED-with-error never becomes a pass. Does NOT flip.
 - [ ] **FLIP session** (new session, only after the e2e verdict and

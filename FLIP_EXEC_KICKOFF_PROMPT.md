@@ -5,6 +5,24 @@ verdict (GREEN or GREEN-WITH-FINDINGS that Adnaan explicitly accepted)
 and (2) **Adnaan's explicit go in THIS session.** If either is
 missing, stop and ask.
 
+**E2E VERDICT (2026-08-20): GREEN-WITH-FINDINGS — Adnaan accepted and
+gave the go.** Full report: `E2E_VERDICT.md` (both host gates 850/846
+independently re-verified; kill matrix, sheets/O1, HOLD_VLM, multipart,
+dup/heal/supersede, batch rollback all exercised). Carry these into the
+flip: (1) **TEST-mode Telegram has NO test channel** — canary sends are
+TEST-prefixed but land in the REAL chat; confirm with Adnaan before the
+first canary send or run the canary with sends captured. (2) **§6a of
+FLIP_RUNBOOK is stale** — `hl-recal-watch`/`hl-recal-rebuild` unit files
+no longer exist on the VM; the stop step is a no-op, don't stall on it.
+(3) **Unfixed known defect (accepted for the flip):** fix_v1_to_v2's
+already-v2 early-exit skips rrd scaffolding → a v1-sniffed payload
+(stray key_binding.json, v2-shaped session.json, no rrd files, unusable
+sidecars) terminally rejects QA_FAIL_UNMAPPED "missing delivery file:
+session.rrd/rrd_creation.py"; watch Drive I processing for that reject
+signature and surface any hits rather than accepting them silently.
+(4) Autoscale movement + 429 step-down were unobservable Mac-local
+(pool floor); verify both during the VM canary's first hour.
+
 You are executing the production flip for the continuous pipeline in
 `/Users/adnaan/Documents/hl-projects/hl-gamedata`, under the
 **CLEAN-SLATE RULING (Adnaan, 2026-08-20, his answers on record in
