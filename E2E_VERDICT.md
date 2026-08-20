@@ -150,3 +150,71 @@ evidence, sheet generations gen-1..3, remote listing pre-purge, O1 pre-mutation
 row), `logs/` (driver-1..4, daily-gen2-fail/resume, gen-3), `tg-capture.jsonl`
 (all 12 intercepted sends), the scratch home (ledger.db with the full 60+-event
 audit trail), staging tree, and the wrapper `e2e_driver.py`.
+
+---
+
+# Phase 2 (Adnaan 08-20: "do exercise these") — VERDICT UNCHANGED: GREEN-WITH-FINDINGS
+
+Same session, same scratch home; every previously-not-run surface exercised except
+the split cutter (below, with why). All prior oracles re-PASS on the extended
+ledger (11 sessions: 7 DELIVERED / 1 DUPLICATE / 3 REJECTED; delivered-once,
+hours-once, all-terminal, event-chain, batches=0 in home1).
+
+- **VM gate + systemd**: HEAD synced to `~/hl-gamedata-continuous-test`; VM gate
+  **`850 passed in 697.64s — ARMING GATE OK (floor 846)`** → BOTH host gates now
+  independently re-verified. Read-only systemd inventory: only `hl-backup.*`
+  installed (timer enabled/active); `hl-continuous.service` NOT installed;
+  `hl-pipeline.timer` disabled; **`hl-recal-rebuild`/`hl-recal-watch` unit files
+  no longer exist** → FLIP_RUNBOOK §6a's stop-the-units step is now a no-op
+  (runbook drift, flag for the flip session). Balloon net 0.0 GiB. Nothing armed,
+  nothing deployed.
+- **Batch driver (rollback path)**: run in a fully local sandbox (both rclone
+  remotes aliased to local dirs; its fixed `humynlabs/` prefix could only land in
+  the sandbox), `PIPELINE_CONTINUOUS=False` set at the process boundary. Batch #1
+  started/finished with summary `{"delivered": 1}` (the `batches` table the
+  continuous driver never touches), seed DELIVERED (70.8s, force-rrd-sampled,
+  real 171MB rrd), batch topline + its own TEST daily sheet + a folder-issues
+  message WITH content captured (also covers the folder-issues surface).
+- **HOLD_VLM**: broken-key leg → verbatim `VLM sweep unfinished — never pass
+  unlooked-at (F5)`; after hold-timer rewind + real key, the expired hold was
+  re-picked and the session DELIVERED. Full park→recover cycle proven. The same
+  leg proved ladder exhaustion (invalid key, prev-key rung unarmed) never
+  silently passes.
+- **Multipart-zip**: parts .001/.002 staged → `zip payload incomplete/unreadable —
+  retrying` + incomplete row `["zip parts incomplete"]` (ZIP_PARTS_MARKER); .003
+  staged → byte-reassembly → INGESTED → DELIVERED; marker resolved.
+- **Dup/heal/supersede arms** (all verbatim ledger events):
+  same-player dup → `DUPLICATE same-player duplicate of <S1>`; cross-identity dup
+  vs a shipped copy → `REJECTED cross-identity duplicate (kept earlier upload …)`;
+  depth-3 bait → `QUARANTINED path depth 3 != 4`; clean re-upload →
+  `re-registered: quarantined path healed to kamla/e2e_canary_op/canary-h…` →
+  processed (genuine CNT_SHORT 50.0s reject). Supersede of REJECTED S4 (zip class,
+  '' md5): `superseded: new md5 ; prev_md5=94df6b8a…` → download adjudication
+  `zip-backfill: bytes CHANGED (94df… -> 9449…)` → **both payment stamps cleared**
+  (accepted was stamped pre-supersede), fix_attempts reset, new generation
+  re-judged on its own merits. Live N3/N4/M4 confirmation. Bonus F2 cross-check:
+  the v2-sniffed replacement got rrd scaffolding at download → no QA_FAIL_UNMAPPED.
+- **Sheets gen-4**: counted-once still holds (∅ counted overlap with gen-2); the
+  O1-skipped S5 re-entered via accepted_due and stamped; S4's cleared slot sits in
+  the pending cohort until a window whose hi passes its new ctime (F4 mechanics).
+  (S5's accepted hours re-listed because this harness manually restored the same
+  row; in production a reset slot is a genuinely new generation.)
+- **429 storm**: 18 synthetic status-429 lines (tagged `e2e-injected-429-storm`,
+  ~4/min ≫ the 1.0/min threshold) injected into the live pressure channel; no
+  autoscale/rung reaction possible at the Mac pool floor (F3) and no
+  destabilization. Real-quota behavior seen this session: one genuine 503 absorbed
+  by backoff. The 429 step-down remains VM-only observable.
+- **Split/cutter: NOT live-exercised — with evidence why.** A 45 s zero-input
+  window (1351 rows AFK-blanked mid-clip) did NOT cut: the scanner timeline on
+  this capture-tool footage is SYNTHETIC (packet-count disagreement), so static/
+  AFK spans are deliberately not acted on (`bounds are not real PTS` advisory),
+  and cuts key on VLM-detected NON-GAMEPLAY footage — the video itself was genuine
+  gameplay. Constructing a real mid-clip pause requires a re-encode that desyncs
+  frames.csv↔PTS (instant integrity rejects). The construct instead live-exercised
+  FIX_ACTIONS_CONTEXT (1873 frames context-gated), FIX_LAGSHIFT_CSV and
+  FIX_GATE_WINDOW, then delivered. Split machinery remains covered by the
+  850-green suite (mid-split crash recovery tests) only.
+
+Teardown re-verified: `_pipeline_test` purged (lsf rc=3), real `~/hl-pipeline`
+byte-identical, repo tree clean, VM untouched beyond the side checkout.
+Phase-2 VLM spend: ~35 additional gemini-3.7-flash calls (bounded).
