@@ -1695,7 +1695,12 @@ def fix_v1_to_v2(work: Path, game: str) -> str:
         else:
             try:
                 head_cut = float(hv)
-                head_usable = math.isfinite(head_cut)
+                # r21 #3 (O3): a trim length is >= 0 by construction —
+                # a negative finite value is present-but-junk evidence
+                # (sign flip, inverted-operand producer bug) and used
+                # to sail through the isfinite-only test into a
+                # fabricated created BEFORE the recording started
+                head_usable = math.isfinite(head_cut) and head_cut >= 0.0
             except (TypeError, ValueError, OverflowError):
                 head_usable = False
     # r20 #5: the trim evidence lives only inside a readable dict
@@ -1718,17 +1723,30 @@ def fix_v1_to_v2(work: Path, game: str) -> str:
         try:
             created_str = _emit_utc(stamp + timedelta(seconds=head_cut))
         except OverflowError:
-            # r20 #11: this arithmetic overflows for two DIFFERENT junk
-            # sides — blame the one that is actually junk. A head whose
-            # own timedelta constructs is representable, so the STAMP
-            # is the junk side (omit / recover below — the designed
-            # unusable-stamp disposition); only a head that cannot even
-            # build a timedelta keeps the canonical.trim refusal.
+            # r20 #11 + r21 #4≡#6 (O3): this arithmetic overflows for
+            # two DIFFERENT junk sides — blame the one that is
+            # actually junk. timedelta's range (~8.64e13s) is ~340x
+            # wider than any present-day stamp can absorb, so
+            # "constructs a timedelta" alone let an absurd-but-
+            # representable head (the ~2.5e11..8.64e13s band — an
+            # epoch-milliseconds value in the seconds field) steal the
+            # blame from itself and cost a GOOD stamp. The head is the
+            # sane side only when its own timedelta constructs AND it
+            # is a physically plausible cut (no capture recording
+            # approaches a year); then the STAMP is the junk side
+            # (omit / recover below — the designed unusable-stamp
+            # disposition). Anything else keeps the canonical.trim
+            # refusal / keep-stamp dispositions.
+            head_side_junk = True
             try:
                 timedelta(seconds=head_cut)
-                stamp = None
+                head_side_junk = head_cut > 366 * 86400.0
             except OverflowError:
+                pass
+            if head_side_junk:
                 head_usable = False
+            else:
+                stamp = None
     if created_str is None:
         started = _v1_sidecar_started(work)
         if started is not None:

@@ -617,3 +617,95 @@ def test_midwindow_blank_supersede_does_not_reland_labels_mark(
     rows3 = _sheet(ledger, W3)
     assert not [r for r in rows3 if r["player_email"] == "o1@x.com"], \
         "…and exactly once"
+
+
+# ------- r21 #3 + #4≡#6 (O3): the head-cut gate completed — negative
+# ------- junk refused, and the overflow disambiguation stops blaming
+# ------- a good stamp for absurd-but-representable junk heads
+
+
+@needs_ffmpeg
+def test_v1_negative_head_cut_refuses_on_live_route(tmp_path):
+    """r21 #3 (O3): a trim length is >= 0 by construction, but the
+    isfinite-only usability test admitted negative finite junk — with
+    a usable stamp the conversion shipped created BEFORE the recording
+    started (verify falsely condemns the correct CSV, the retranslate
+    re-bins at the clamped head 0 and disagrees with the verify
+    forever → terminal reject), and with an unusable stamp the
+    recovery emitted started − 30s under a false ground-truth
+    attestation. Negative junk now takes the committed junk
+    dispositions: typed canonical.trim refusal on the live route."""
+    import pytest
+
+    from pipeline import fix as fixmod
+    from pipeline.tests.test_r_loop19 import _v1_with_sidecars
+    for i, (created, name) in enumerate(
+            (("2026-08-10T15:34:03Z", "o3neg0"),
+             ("not-a-date", "o3neg1"))):
+        work = _v1_with_sidecars(tmp_path, created, name,
+                                 "2026-08-10T15:33:55Z",
+                                 {"head_cut_s": -30.0}, at_root=True)
+        with pytest.raises(fixmod.FixFailed) as e:
+            fixmod.fix_v1_to_v2(work, "kamla")
+        assert "canonical.trim" in str(e.value), created
+
+
+@needs_ffmpeg
+def test_v1_negative_head_cut_no_sidecar_keeps_stamp(tmp_path):
+    """O3 no-sidecar arm (r19 #10 semantics): negative junk degrades
+    like every other junk head VALUE — the parseable stamp ships at
+    head 0.0, never shifted backwards."""
+    from pipeline import fix as fixmod
+    from pipeline.tests.test_r_loop15 import _v1_work
+    work = _v1_work(tmp_path, "2026-08-10T15:34:03Z", "o3negns")
+    s = json.loads((work / "session.json").read_text())
+    s["canonical"]["trim"] = {"head_cut_s": -30.0}
+    (work / "session.json").write_text(json.dumps(s))
+    note = fixmod.fix_v1_to_v2(work, "kamla")
+    assert "converted v1 -> v2" in note
+    out = json.loads((work / "session.json").read_text())
+    assert out["created_at_utc"] == "2026-08-10T15:34:03.000000Z", \
+        "a negative junk trim must not shift the valid stamp backwards"
+
+
+@needs_ffmpeg
+def test_v1_absurd_finite_head_keeps_stamp_no_sidecar(tmp_path):
+    """r21 #4≡#6 (O3): the overflow disambiguation blamed the STAMP
+    whenever timedelta(head_cut) constructed — but timedelta's range
+    is ~340x wider than any present-day stamp can absorb, so an
+    absurd-but-representable head (an epoch-milliseconds value ~1e12
+    in the seconds field) discarded a GOOD stamp and the delivery
+    shipped created_at = processing wall-clock, silently. The head is
+    now the junk side unless it is also physically plausible: the
+    good stamp survives at head 0.0 (r19 #10)."""
+    from pipeline import fix as fixmod
+    from pipeline.tests.test_r_loop15 import _v1_work
+    for i, junk in enumerate((1e12, 3e11, 1.7e12)):
+        work = _v1_work(tmp_path, "2026-08-10T15:34:03Z", f"o3band{i}")
+        s = json.loads((work / "session.json").read_text())
+        s["canonical"]["trim"] = {"head_cut_s": junk}
+        (work / "session.json").write_text(json.dumps(s))
+        note = fixmod.fix_v1_to_v2(work, "kamla")
+        assert "converted v1 -> v2" in note, repr(junk)
+        out = json.loads((work / "session.json").read_text())
+        assert out["created_at_utc"] == "2026-08-10T15:34:03.000000Z", \
+            f"an absurd junk head must not cost the valid stamp ({junk})"
+
+
+@needs_ffmpeg
+def test_v1_absurd_finite_head_refuses_on_live_route(tmp_path):
+    """O3 live-route twin: the same absurd-band head beside a good
+    stamp and usable sidecars takes the TRUTHFUL canonical.trim
+    refusal — pre-O3 it misdirected to the 'cannot recover …
+    raw/metadata.json' diagnosis (blaming a file nothing can repair
+    for a defect that lives in session.json's trim)."""
+    import pytest
+
+    from pipeline import fix as fixmod
+    from pipeline.tests.test_r_loop19 import _v1_with_sidecars
+    work = _v1_with_sidecars(tmp_path, "2026-08-10T15:34:03Z", "o3bandl",
+                             "2026-08-10T15:33:55Z",
+                             {"head_cut_s": 1e12}, at_root=True)
+    with pytest.raises(fixmod.FixFailed) as e:
+        fixmod.fix_v1_to_v2(work, "kamla")
+    assert "canonical.trim" in str(e.value)
