@@ -210,6 +210,39 @@ class Ledger:
         self.db.commit()
         return cur.rowcount
 
+    def heal_quarantined_path(self, session_id: str, detail: str,
+                              **fields) -> None:
+        """The quarantined-path heal's slot reset in ONE transaction
+        (r21 #5): the scan-side heal used three separate auto-commit
+        calls (update / set_reasons / set_state+event), and a fault
+        between them — an OperationalError on the second or third
+        commit, or a kill in the window — left a row QUARANTINED with
+        the healed path/md5/ctime ALREADY WRITTEN: permanently
+        unreachable by every recovery arm (the heal branch needs a
+        path mismatch, now equal; the re-upload arm needs changed
+        bytes or a newer ctime, both already overwritten to the
+        listing's values), invisible on every ops surface, with the
+        scan lane's transient-looking alert as the only trace. One
+        commit, the supersede shape: a fault now leaves the row wholly
+        unhealed and the next clean scan converges. Field semantics
+        are exactly update() + set_reasons(sid, [], None) +
+        set_state(sid, 'DISCOVERED', detail)."""
+        row = self.get(session_id)
+        assert row is not None
+        bad = set(fields) - self._UPDATE_ALLOWED
+        assert not bad, f"unknown ledger fields: {bad}"
+        now = _now()
+        sets = ", ".join(f"{k}=?" for k in fields)
+        self.db.execute(
+            f"UPDATE sessions SET {sets}, reasons_json='[]', bin=NULL,"
+            f" state='DISCOVERED', updated_at=? WHERE session_id=?",
+            list(fields.values()) + [now, session_id])
+        self.db.execute(
+            "INSERT INTO events(session_id, ts, from_state, to_state,"
+            " detail) VALUES(?,?,?,?,?)",
+            (session_id, now, row["state"], "DISCOVERED", detail))
+        self.db.commit()
+
     def set_reasons(self, session_id: str, reasons: list[dict],
                     bin_: int | None) -> None:
         self.db.execute(

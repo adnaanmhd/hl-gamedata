@@ -385,27 +385,27 @@ def scan(cfg: C.Config, ledger: Ledger,
                     prev_note = ""
                     if not vmd5 and existing["md5_video"]:
                         prev_note = f"; prev_md5={existing['md5_video']}"
-                    ledger.update(ds.session_id,
-                                  drive_path=ds.drive_path,
-                                  drive_ctime=ds.ctime, md5_video=vmd5,
-                                  bytes=total_bytes,
-                                  operator_email=ds.operator_email,
-                                  player_email=ds.player_email,
-                                  game=ds.game, fix_attempts=0,
-                                  duration_delivered_s=None,
-                                  rrd_sampled=0, delivered_at=None,
-                                  **clears)
-                    # the INT_PATH reasons died with the bad path — left
-                    # in place, a LATER re-quarantine (download/validation
-                    # crash) put this session on the folder-issues bad_path
-                    # list with evidence about a name that is already
-                    # fixed; supersede resets reasons the same way
-                    # (folder-issues review #3)
-                    ledger.set_reasons(ds.session_id, [], None)
-                    ledger.set_state(
-                        ds.session_id, "DISCOVERED",
+                    # the whole slot reset (path/attribution/clears +
+                    # reasons reset + DISCOVERED + event) is ONE ledger
+                    # transaction (r21 #5): three separate commits let a
+                    # fault in between strand the row QUARANTINED with
+                    # the healed path already written — unreachable by
+                    # every recovery arm forever. The INT_PATH reasons
+                    # die with the bad path (folder-issues review #3),
+                    # exactly as before.
+                    ledger.heal_quarantined_path(
+                        ds.session_id,
                         f"re-registered: quarantined path healed to "
-                        f"{ds.drive_path}{prev_note}")
+                        f"{ds.drive_path}{prev_note}",
+                        drive_path=ds.drive_path,
+                        drive_ctime=ds.ctime, md5_video=vmd5,
+                        bytes=total_bytes,
+                        operator_email=ds.operator_email,
+                        player_email=ds.player_email,
+                        game=ds.game, fix_attempts=0,
+                        duration_delivered_s=None,
+                        rrd_sampled=0, delivered_at=None,
+                        **clears)
                     # post-download quarantines (download/validation crash,
                     # md5 mismatch, garbage payload) keep a populated work
                     # dir; the fresh download would merge stale payload

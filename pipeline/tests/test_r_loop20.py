@@ -809,3 +809,80 @@ def test_recompute_preserved_stamp_writes_no_marker(tmp_path):
     r = check_session_v2(work, raw_bundle=work / "raw")
     assert not any("synthesized" in i for i in r.issues), \
         "no spurious skip on a preserved stamp"
+
+
+# ------- r21 #5 (O4): the quarantined-path heal is failure-atomic
+
+
+def test_heal_slot_reset_is_failure_atomic(cfg, ledger, monkeypatch):
+    """r21 #5 (O4): the heal's slot reset was three separate
+    auto-commit calls (update / set_reasons / set_state+event) — a
+    fault between them (OperationalError on the second commit, kill
+    in the window) left the row QUARANTINED with the healed
+    path/md5/ctime already written: permanently unreachable by every
+    recovery arm, invisible on every ops surface. The reset is now
+    ONE ledger transaction (heal_quarantined_path, the supersede
+    shape); the old helpers are never called on the heal path, so the
+    injected fault that used to tear it cannot touch it."""
+    import sqlite3
+
+    from pipeline import ingest
+    from pipeline.tests.conftest import make_session_entries
+    sid = "2026-08-14T10-00-00Z_kamla_c_00000000000000a4"
+    ingest.scan(cfg, ledger, entries=make_session_entries(
+        sid=sid, md5="f6" * 16))
+    ingest.scan(cfg, ledger, entries=make_session_entries(
+        sid="2026-08-14T11-00-00Z_kamla_c_00000000000000bb", md5="bb"))
+    assert ledger.get(sid)["state"] == "QUARANTINED"
+
+    def boom(*a, **k):
+        raise sqlite3.OperationalError("database is locked")
+    monkeypatch.setattr(ledger, "set_reasons", boom)
+    monkeypatch.setattr(ledger, "set_state", boom)
+    # the bb row stays listed so the vanish arm (which legitimately
+    # uses set_state) never fires in the monkeypatched scan — only the
+    # heal branch runs, proving it no longer touches the old helpers
+    res = ingest.scan(cfg, ledger, entries=make_session_entries(
+        sid=sid, op="op2@x.com", md5="f6" * 16,
+        ctime="2026-08-14T11:00:00.000Z") + make_session_entries(
+        sid="2026-08-14T11-00-00Z_kamla_c_00000000000000bb", md5="bb"))
+    row = ledger.get(sid)
+    assert row["state"] == "DISCOVERED" and "op2@x.com" in row["drive_path"]
+    assert row["fix_attempts"] == 0 and row["reasons_json"] == "[]"
+    assert any("quarantined path healed" in f for f in res.integrity_flags)
+    ev = ledger.db.execute(
+        "SELECT detail FROM events WHERE session_id=? ORDER BY ts DESC,"
+        " rowid DESC LIMIT 1", (sid,)).fetchone()
+    assert "quarantined path healed to" in ev["detail"]
+
+
+# ------- r21 #7 (O5, tests-only): N1's no-sidecar emit-overflow
+# ------- degrade arm gets its failing-side pin
+
+
+@needs_ffmpeg
+def test_v1_junk_head_nearmax_stamp_no_sidecar_synthesizes(tmp_path):
+    """r21 #7 (O5): the no-sidecar keep-stamp arm's emit guard
+    (_emit_utc under except OverflowError → omit) had no failing-side
+    test — its exact deletion mutant passed the FULL arming gate at
+    840/836. The combination that reaches it: a junk head_cut_s (so
+    head_usable is False and the FIRST resolution arm never runs)
+    beside an aware near-max stamp whose emit overflows, with no
+    sidecars. The arm must degrade to omit-and-synthesize, never
+    crash past the frames.csv write."""
+    from translator.v2 import _TS_RE
+
+    from pipeline import fix as fixmod
+    from pipeline.tests.test_r_loop15 import _v1_work
+    for i, junk in enumerate(("abc", "bogus-trim")):
+        work = _v1_work(tmp_path, "9999-12-31T20:00:00-05:00",
+                        f"o5emit{i}")
+        s = json.loads((work / "session.json").read_text())
+        s["canonical"]["trim"] = {"head_cut_s": junk} if i == 0 \
+            else junk
+        (work / "session.json").write_text(json.dumps(s))
+        note = fixmod.fix_v1_to_v2(work, "kamla")
+        assert "converted v1 -> v2" in note, repr(junk)
+        out = json.loads((work / "session.json").read_text())
+        assert _TS_RE.match(out["created_at_utc"]) and \
+            not out["created_at_utc"].startswith("9999"), repr(junk)
