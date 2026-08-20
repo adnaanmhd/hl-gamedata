@@ -179,47 +179,53 @@ findings docs are the durable record).
   fail-first proofs = `5524563`, code HEAD `a239fad`; every fix
   fail-first-proven there + per-commit Mac gate; iteration 21
   reviews the set):**
-  - [ ] N1 (r20 #1 + #5 + #10 + #11): fix_v1_to_v2's stamp/trim
-    resolution COMPLETED — falsy/bool head_cut_s is junk (parse the
-    raw value, no `or 0.0`; only a genuinely ABSENT key is the
+  - [x] N1 (r20 #1 + #5 + #10 + #11, `f6fa524`, gate 830): fix_v1_to_v2's
+    stamp/trim resolution COMPLETED — falsy/bool head_cut_s is junk
+    (raw-value parse, no `or 0.0`; only a genuinely ABSENT key is the
     v1-optional head-0 shape); destroyed trim evidence (unreadable/
     non-dict session.json or canonical) REFUSES typed on the
-    live-sidecar route instead of recovering at head 0 (genuine
-    absent-trim on a readable well-formed canonical keeps head 0);
-    the created_at emit string is resolved INSIDE the resolution
-    block under an OverflowError guard on both routes (no write
-    precedes a crash); a stamp+head_cut overflow is disambiguated —
-    if timedelta(head_cut) constructs, the STAMP is the junk side
-    (recover/omit), only a head whose own timedelta overflows keeps
-    the canonical.trim refusal.
-  - [ ] N2 (r20 #4 + #9): fix_sessionjson_recompute's overflow
-    degrade completed — the ended_at_utc emit joins the guard, and
-    the except arm cannot re-overflow (recompute ended defensively
-    from the synthesized created; a still-overflowing duration falls
-    back to ended = created).
-  - [ ] N3 (r20 #2≡#6, payment-surface): ledger.supersede's ''
-    preserve arm clears accepted_reported_at when the row is not
-    DELIVERED — on the '' population (REJECTED/QUARANTINED slots)
-    that mark is the refix tool's ruled LABELS-only mark; preserving
-    it strands later-delivered hours (proven), clearing it costs at
-    most one re-printed label (no money). uploaded_reported_at +
-    duration_raw_s + tree_sealed_at stay preserved. Heal's ''
-    preserve arm swept for the same labels rule.
-  - [ ] N4 (r20 #3 + #7, payment-surface): '' means unknowable
-    regardless of the stored md5 — zip_unknowable = not new_md5
-    (''-over-'' preserves; breadcrumb written only over a real prior
-    md5), and a REAL md5 over a stored-'' slot adjudicates against
-    the newest prev_md5 breadcrumb (equal → bytes proven identical →
-    preserve; different → full clear; no breadcrumb → clear as
-    today). The heal's real-over-'' arm gets the same breadcrumb
-    compare.
-  - [ ] N5 (r20 #8, tests-only): failing-side pins for
-    _v1_sidecar_started's errors='replace' read and its
-    OSError/JSONDecodeError degrade (the finders' exact mutants,
-    both proven full-gate-green at 821, killed site-isolated).
-  - [ ] Then: floor re-pin (passed − 4) in run_suite.sh +
-    FLIP_RUNBOOK §6b, BOTH host gates, tree-verify, §0 tick, launch
-    iteration 21 automatically.
+    live-sidecar route (genuine absent-trim on a readable well-formed
+    canonical keeps head 0); the created_at emit resolves INSIDE the
+    pre-write resolution block under an OverflowError guard on both
+    routes; a stamp+head_cut overflow is disambiguated (head's own
+    timedelta constructs → the STAMP is junk → recover/omit; else the
+    canonical.trim refusal stands).
+  - [x] N2 (r20 #4 + #9, `002004f`, gate 832): recompute's ended emit
+    joins the guard on both arms; the except arm's re-addition is
+    guarded (still-overflowing duration → ended = created).
+  - [x] N3 (r20 #2≡#6, payment-surface, `dde54ab`, gate 835): BOTH ''
+    preserve arms (supersede + heal) clear accepted_reported_at when
+    the row is not DELIVERED (labels-only mark; money marks stay
+    preserved); r9's heal pin re-modeled with intent preserved
+    (cohort update recorded in the commit). Direction derived from
+    standing rulings; FLAGGED for checkpoint review.
+  - [x] N4 (r20 #3 + #7, payment-surface, `44e72b3`, gate 838):
+    zip_unknowable = not new_md5 (''-over-'' preserves; breadcrumb
+    only over a real prior md5); real-over-'' adjudicates against the
+    newest prev_md5 breadcrumb via the new shared
+    ledger.latest_prev_md5 (equal → preserve; different/none → full
+    clear); the heal's clears computation runs the same adjudication.
+    Direction derived from standing rulings; FLAGGED for checkpoint
+    review.
+  - [x] N5 (r20 #8, tests-only, `1d82472`, gate 840): failing-side
+    pins for _v1_sidecar_started's errors='replace' read and its
+    OSError/JSONDecodeError degrade — the finders' exact mutants
+    killed site-isolated in a fixed-tree scratch copy.
+  - [x] Post-N: floor 836 pinned `f66d3ed` (840 − 4) in run_suite.sh
+    + FLIP_RUNBOOK §6b; Mac gate 840/836 GREEN (2026-08-20);
+    tree-verify clean. **STATED DEVIATION: the VM gate is PENDING —
+    gcloud auth expired mid-session and cannot reauth
+    non-interactively (the known condition; Adnaan asked to run
+    `! gcloud auth login`). Iteration 21 launches on the Mac gate
+    alone (it reviews the git tree, not the VM); the VM gate runs the
+    moment auth returns and MUST be green before any O-set fix lands
+    or the checkpoint claims both-hosts green.**
+- [x] Iteration 21 LAUNCHED automatically (per the NEW RULING;
+  script: committed iter20 snapshot retargeted at N1-N5 + floor,
+  accepted entries 96-100 appended, 17/90/92/94 amended, suite
+  numbers 840/836; 7 lanes, 2-vote refute). Results processing, then
+  the ruled branch: not quiet → O-set fixed in-iteration → iteration
+  22 = THE CHECKPOINT; quiet → the independent e2e launches.
 
 ---
 
