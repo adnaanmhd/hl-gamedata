@@ -314,7 +314,13 @@ def test_identical_md5_heal_preserves_payment_stamps(cfg, ledger,
     assert row["state"] == "DISCOVERED"          # the heal itself happened
     assert row["drive_path"] != "kamla/BADPATH"
     assert row["uploaded_reported_at"], "same bytes — stamp must survive"
-    assert row["accepted_reported_at"]
+    # r20 #2≡#6 (N3): the accepted mark on this population (the heal
+    # only fires on QUARANTINED rows) is the refix doctrine's
+    # LABELS-only mark — the preserve arm now CLEARS it so a re-run
+    # that delivers gets its hours paid; the money marks above/below
+    # still survive, and the conservation assert at the end still
+    # pins counted-once.
+    assert row["accepted_reported_at"] is None
     assert row["duration_raw_s"] == 3600.0, \
         "same bytes — hours must not be re-countable on re-probe"
     # conservation: the next payment sheet must NOT count this root again

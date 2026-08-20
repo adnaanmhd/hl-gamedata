@@ -359,6 +359,18 @@ def scan(cfg: C.Config, ledger: Ledger,
                                   accepted_reported_at=None,
                                   tree_sealed_at=None) \
                         if vmd5 and vmd5 != existing["md5_video"] else {}
+                    if not clears and existing["accepted_reported_at"] \
+                            and existing["state"] != "DELIVERED":
+                        # r20 #2≡#6 (N3) sibling: this branch's
+                        # population is QUARANTINED rows, where an
+                        # accepted mark is the refix doctrine's
+                        # LABELS-only mark — preserved through the
+                        # heal, it stranded a later-DELIVERED re-run's
+                        # hours off every sheet; cleared, it costs at
+                        # most a re-printed label. The money marks
+                        # (uploaded/duration/seal) stay preserved
+                        # exactly as ruled (entries 25/32).
+                        clears = dict(accepted_reported_at=None)
                     prev_note = ""
                     if not vmd5 and existing["md5_video"]:
                         prev_note = f"; prev_md5={existing['md5_video']}"

@@ -279,3 +279,100 @@ def test_recompute_nearmax_negoffset_ended_emit_degrades(tmp_path):
     assert not out["created_at_utc"].startswith("9999"), \
         "the unusable stamp is synthesized from now"
     assert _TS_RE.match(out["ended_at_utc"])
+
+
+# ------- r20 #2≡#6 (N3, payment-surface): the '' preserve arms clear
+# ------- the LABELS-only accepted mark — shipped hours stay payable
+
+
+def test_rejected_counted_rezip_then_delivered_hours_reach_sheet(
+        cfg, ledger):
+    """r20 #2≡#6 (N3): M4 preserved accepted_reported_at through the
+    '' supersede — but on the writer's whole population (REJECTED/
+    QUARANTINED slots) that mark means 'reject LABELS counted, zero
+    hours paid' (the refix doctrine). When the identical-bytes re-run
+    then DELIVERED (fresh fix budget, nondeterministic VLM — the
+    routine recovery premise), build_sheet_rows skipped the
+    accepted-marked node forever: shipped footage, player never paid,
+    zero loud lines. The '' supersede now clears the labels-only mark
+    (money marks stay preserved) so the delivered hours reach exactly
+    one later sheet — the finder's day-2 assertion inverted."""
+    from pipeline.tests.test_payment_split_r6 import (UNFIXABLE, W1, W2,
+                                                      W3, _put, _sheet)
+    sid = "2026-08-14T09-00-00Z_kamla_c_00000000000000d3"
+    _put(ledger, sid, state="REJECTED", raw=1800.0, reasons=UNFIXABLE,
+         player="n3@x.com")
+    ledger.update(sid, md5_video="a1" * 16)
+    _sheet(ledger, W1)
+    row = ledger.get(sid)
+    assert row["uploaded_reported_at"] and row["accepted_reported_at"], \
+        "seed control: the reject was counted (labels mark landed)"
+    ledger.supersede(sid, new_md5="", new_bytes=22,
+                     new_ctime="2026-08-15T00:00:00.000Z",
+                     dossier_root=cfg.dossiers)
+    row = ledger.get(sid)
+    assert row["uploaded_reported_at"] and row["duration_raw_s"] == 1800.0, \
+        "the money marks stay preserved (M4)"
+    assert row["accepted_reported_at"] is None, \
+        "the labels-only mark is cleared (N3)"
+    ledger.update(sid, duration_delivered_s=1700.0,
+                  delivered_at="2026-08-15T10:00:00+00:00")
+    ledger.set_state(sid, "DELIVERED")
+    rows2 = _sheet(ledger, W2)
+    mine = [r for r in rows2 if r["player_email"] == "n3@x.com"]
+    assert mine and mine[0]["kamla_accepted_hrs"] == 0.47 \
+        and mine[0]["kamla_hrs_uploaded"] == 0.0, \
+        "the delivered re-run's hours must reach the next sheet " \
+        "(accepted side only — uploaded stays counted-once)"
+    rows3 = _sheet(ledger, W3)
+    assert not [r for r in rows3 if r["player_email"] == "n3@x.com"], \
+        "…and exactly once"
+
+
+def test_delivered_row_blank_supersede_keeps_hours_mark(cfg, ledger):
+    """N3 refuse-side control (§2 rule 4): on a DELIVERED row the
+    accepted mark IS an hours mark — the '' preserve arm keeps it (no
+    production caller supersedes a DELIVERED row; the guard is
+    belt-and-braces and this pins it)."""
+    from pipeline.tests.test_payment_split_r6 import W1, _put, _sheet
+    sid = "2026-08-14T09-00-00Z_kamla_c_00000000000000d4"
+    _put(ledger, sid, state="DELIVERED", raw=1800.0, delivered=1700.0,
+         player="n3d@x.com")
+    ledger.update(sid, md5_video="b2" * 16)
+    _sheet(ledger, W1)
+    assert ledger.get(sid)["accepted_reported_at"]
+    ledger.supersede(sid, new_md5="", new_bytes=22,
+                     new_ctime="2026-08-15T00:00:00.000Z",
+                     dossier_root=cfg.dossiers)
+    row = ledger.get(sid)
+    assert row["accepted_reported_at"] and row["uploaded_reported_at"], \
+        "an hours mark on a DELIVERED row survives the '' preserve arm"
+
+
+def test_heal_preserve_arm_clears_labels_mark(cfg, ledger):
+    """r20 #2≡#6 (N3) heal sibling: the quarantined-path heal's
+    preserve arms (identical md5, or '' vmd5) carried the same
+    LABELS-only accepted mark onto the healed slot — same stranding
+    when the re-run delivers. The preserve arms now clear it; the
+    money marks stay preserved exactly as ruled (entries 25/32)."""
+    from pipeline import ingest
+    from pipeline.tests.conftest import make_session_entries
+    sid = "2026-08-14T10-00-00Z_kamla_c_00000000000000e3"
+    ingest.scan(cfg, ledger, entries=make_session_entries(
+        sid=sid, md5="c3" * 16))
+    ingest.scan(cfg, ledger, entries=make_session_entries(
+        sid="2026-08-14T11-00-00Z_kamla_c_00000000000000zz", md5="zz"))
+    assert ledger.get(sid)["state"] == "QUARANTINED"
+    ledger.update(sid, duration_raw_s=3600.0,
+                  uploaded_reported_at="2026-08-15T00:00:00+00:00",
+                  accepted_reported_at="2026-08-15T00:00:00+00:00")
+    res = ingest.scan(cfg, ledger, entries=make_session_entries(
+        sid=sid, op="op2@x.com", md5="c3" * 16,
+        ctime="2026-08-14T11:00:00.000Z"))
+    assert any("quarantined path healed" in f for f in res.integrity_flags)
+    row = ledger.get(sid)
+    assert row["state"] == "DISCOVERED"
+    assert row["duration_raw_s"] == 3600.0 and row["uploaded_reported_at"], \
+        "identical bytes: the money marks stay preserved (entry 25)"
+    assert row["accepted_reported_at"] is None, \
+        "the labels-only mark is cleared (N3)"

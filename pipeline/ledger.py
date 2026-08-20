@@ -306,7 +306,24 @@ class Ledger:
         # durable ZIP_ADJ_CHANGED marker at ingest.download). The
         # never-downloads case is money-safe too: preserved stamps mean
         # the root cannot re-count.
-        pay_clears = ("" if zip_unknowable else
+        #
+        # ONE exception rides the preserve arm (r20 #2≡#6, N3): on this
+        # writer's production population the row is REJECTED/QUARANTINED
+        # (supersede applies after a reject/quarantine only), where an
+        # accepted mark is the refix doctrine's LABELS-only mark — "a
+        # REJECTED node carrying an accepted mark had its LABELS
+        # counted, not hours" (recal_refix_reset, which clears it on its
+        # own re-runs). Preserved, it stranded a later-DELIVERED
+        # identical-bytes re-run's hours off every sheet silently and
+        # forever (build_sheet_rows skips any accepted-marked node and
+        # no re-entry arm fires); cleared, it costs at most one
+        # re-printed reject label if the re-run re-rejects — no money
+        # moves through a label. On a DELIVERED row the mark IS an
+        # hours mark and stays preserved (belt-and-braces: no caller
+        # supersedes a DELIVERED row).
+        pay_clears = (("" if row["state"] == "DELIVERED"
+                       else " accepted_reported_at=NULL,")
+                      if zip_unknowable else
                       " duration_raw_s=NULL, uploaded_reported_at=NULL,"
                       " accepted_reported_at=NULL, tree_sealed_at=NULL,")
         self.db.execute(
