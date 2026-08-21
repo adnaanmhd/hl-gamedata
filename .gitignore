@@ -12,3 +12,21 @@ __pycache__/
 samples/
 Game Samples/
 out/
+
+# Secrets — must never enter the repo (live in ~/.config/hl-gamedata/)
+hl-gamedata-pipeline-*.json
+sa.json
+secrets.env
+
+# analyze_sample.py dry-run outputs (regenerable)
+*-analysis/
+analysis_batch_report.*
+
+# Ops exports with player PII — never public (kept local only)
+drive1-raw-hours-*.csv
+drive1-issues-*.md
+payment-*.csv
+rebuild-sessions-*.csv
+
+# Raw/delivery sample session folders (local only)
+2026-*/

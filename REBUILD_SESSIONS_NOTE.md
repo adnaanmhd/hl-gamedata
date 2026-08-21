@@ -282,7 +282,7 @@ Reasons: INT_PATH×8
 - `2026-08-16T09-51-57Z_kamla_c_acec8cc9050dfb82` att=0 INT_PATH
 - `delete~24471dbd` att=0 INT_PATH
 - `exerising kamla` att=0 -
-- `shivam8055v4@gmail.com` att=0 INT_PATH
+- `<player-email redacted>` att=0 INT_PATH
 - `．~7c2ad7ea` att=0 -
 
 ### DISCOVERED — 6

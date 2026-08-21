@@ -4,6 +4,20 @@ How to analyze any new HumynCapture sample end-to-end and reach a deliverable /
 fix-in-post / re-record verdict. Written from the June→August 2026 sample
 history; every check here exists because something once failed it.
 
+**Automated:** `tools/analyze_sample.py` runs §0–§8 of this playbook on
+**delivered v2 sessions** in one command (structural QA, inventory, lag,
+audio, a Gemini VLM sweep for the §5 video-content checks, review artifacts,
+confidence-tiered verdict, per-session + batch reports, verdict-coded exit):
+
+```bash
+GEMINI_API_KEY=… uv run --with numpy --with opencv-python-headless \
+    python tools/analyze_sample.py <session-dir> […] [--raw-root <dir>]
+```
+
+HIGH-confidence detections gate the verdict; LOW-confidence ones are advisory
+with filmstrips/crops rendered for a human eyeball. Raw bundles / v1
+deliveries / zips still follow the manual steps below (§0 tells them apart).
+
 Run everything from the repo root. `$S` = path to one session directory.
 
 ```bash

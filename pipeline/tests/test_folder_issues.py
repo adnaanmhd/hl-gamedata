@@ -27,16 +27,16 @@ def _arm_the_batch_driver(monkeypatch):
 def _seed_issue_rows(ledger):
     # the two live acceptance cases (d3, 08-15)
     ledger.incomplete_seen(
-        "kamla/Rukaiya+Tanzeela/giveusheirloom@gmail.com/"
+        "kamla/Rukaiya+Tanzeela/player-one@example.com/"
         "2026-08-15T11-06-45Z_kamla_c_e6e9d0031d37f425", ["video.mp4"])
     ledger.incomplete_seen(
-        "kamla/Rukaiya+Tanzeela/harshitrameja3082005@gmail.com/"
+        "kamla/Rukaiya+Tanzeela/player-two@example.com/"
         "2026-08-15T12-21-25Z_kamla_c_6cc275ddc3d5a420",
         ["video.mp4", "inputs.jsonl"])
     ledger.insert_session(
         session_id="exerising kamla", game="", operator_email="",
         player_email="",
-        drive_path="kamla/Rukaiya+Tanzeela/harshitrameja3082005@gmail.com/"
+        drive_path="kamla/Rukaiya+Tanzeela/player-two@example.com/"
                    "exerising kamla",
         drive_ctime="", md5_video="", bytes_=0, state="QUARANTINED",
         detail="session folder 'exerising kamla' doesn't match the id "
@@ -63,7 +63,7 @@ def test_build_rows_content_and_order(cfg, ledger):
         ["incomplete_upload", "incomplete_upload", "bad_path"]
     r1, r2, r3 = rows
     assert r1["operator"] == "Rukaiya+Tanzeela"
-    assert r1["player_email"] == "giveusheirloom@gmail.com"
+    assert r1["player_email"] == "player-one@example.com"
     assert r1["folder"] == "2026-08-15T11-06-45Z_kamla_c_e6e9d0031d37f425"
     assert r1["detail"] == "video.mp4"
     assert r2["detail"] == "video.mp4, inputs.jsonl"
